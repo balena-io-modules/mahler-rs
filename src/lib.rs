@@ -1,3 +1,9 @@
+use std::{
+    fmt::{Display, Formatter},
+    ops::Deref,
+    ops::DerefMut,
+};
+
 pub struct Context<S>
 where
     S: Clone,
@@ -9,126 +15,153 @@ pub trait FromContext<S>
 where
     S: Clone,
 {
-    fn from_context(state: &S, context: &Context<S>) -> Self;
+    fn from_context(context: &Context<S>) -> Self;
 }
 
-pub struct State<T>(pub T);
-pub struct Target<T>(pub T);
-
-impl<S> FromContext<S> for State<S>
+pub trait FromState<'system, S>
 where
     S: Clone,
 {
-    fn from_context(state: &S, _: &Context<S>) -> Self {
-        State(state.clone())
+    fn from_state(state: &'system mut S) -> Self;
+}
+
+pub struct State<'system, S>(&'system mut S);
+
+impl<'system, S> DerefMut for State<'system, S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
     }
 }
 
-impl<S> FromContext<S> for Target<S>
+impl<'system, S> Deref for State<'system, S> {
+    type Target = S;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<S> Display for State<'_, S>
+where
+    S: Display,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<'system, S> FromState<'system, S> for State<'system, S>
 where
     S: Clone,
 {
-    fn from_context(_: &S, context: &Context<S>) -> Self {
+    fn from_state(state: &'system mut S) -> Self {
+        State(state)
+    }
+}
+
+pub struct Target<S>(pub S);
+impl<'system, S> FromContext<S> for Target<S>
+where
+    S: Clone,
+{
+    fn from_context(context: &Context<S>) -> Self {
         Target(context.target.clone())
     }
 }
 
-pub trait Handler<T, S>
+pub trait Handler<'system, T, S>
 where
     S: Clone,
 {
-    fn call(&self, state: S, context: Context<S>);
+    fn call(&self, state: &'system mut S, context: Context<S>);
 }
 
-impl<F, S> Handler<(), S> for F
+impl<'system, F, S> Handler<'system, (), S> for F
 where
     F: Fn(),
     S: Clone,
 {
-    fn call(&self, _: S, _: Context<S>) {
+    fn call(&self, _: &'system mut S, _: Context<S>) {
         (self)();
     }
 }
 
-impl<F, S, T1> Handler<(T1,), S> for F
+impl<'system, F, S, T1> Handler<'system, (T1,), S> for F
 where
     F: Fn(T1),
     S: Clone,
-    T1: FromContext<S>,
+    T1: FromState<'system, S>,
 {
-    fn call(&self, state: S, context: Context<S>) {
-        (self)(T1::from_context(&state, &context));
+    fn call(&self, state: &'system mut S, _: Context<S>) {
+        (self)(T1::from_state(state));
     }
 }
 
-impl<F, S, T1, T2> Handler<(T1, T2), S> for F
+impl<'system, F, S, T1, T2> Handler<'system, (T1, T2), S> for F
 where
     F: Fn(T1, T2),
     S: Clone,
-    T1: FromContext<S>,
+    T1: FromState<'system, S>,
     T2: FromContext<S>,
 {
-    fn call(&self, state: S, context: Context<S>) {
-        (self)(
-            T1::from_context(&state, &context),
-            T2::from_context(&state, &context),
-        );
+    fn call(&self, state: &'system mut S, context: Context<S>) {
+        (self)(T1::from_state(state), T2::from_context(&context));
     }
 }
 
-pub struct Action<S, T, H>
+pub struct Action<'system, S, T, H>
 where
     S: Clone,
-    H: Handler<T, S>,
+    H: Handler<'system, T, S>,
 {
     handler: H,
     context: Context<S>,
-    _marker: std::marker::PhantomData<T>,
+    _marker: std::marker::PhantomData<&'system T>,
 }
 
-impl<S, T, H> Action<S, T, H>
+impl<'system, S, T, H> Action<'system, S, T, H>
 where
     S: Clone,
-    H: Handler<T, S>,
+    H: Handler<'system, T, S>,
 {
-    pub fn from(effect: H, context: Context<S>) -> Self {
+    pub fn from(handler: H, context: Context<S>) -> Self {
         Action {
-            handler: effect,
+            handler,
             context,
             _marker: std::marker::PhantomData,
         }
     }
 
-    pub fn run(self, state: S) {
+    pub fn run(self, state: &'system mut S) {
         self.handler.call(state, self.context);
     }
 }
 
-pub struct Task<S, T, H>
+pub struct Task<'system, S, T, H>
 where
     S: Clone,
-    H: Handler<T, S>,
+    H: Handler<'system, T, S>,
 {
-    pub handler: H,
-    state: std::marker::PhantomData<S>,
-    _marker: std::marker::PhantomData<T>,
+    action: H,
+    _state: std::marker::PhantomData<&'system S>,
+    _args: std::marker::PhantomData<T>,
 }
 
-impl<S, T, H> Task<S, T, H>
+impl<'system, S, T, H> Task<'system, S, T, H>
 where
     S: Clone,
-    H: Handler<T, S>,
+    H: Handler<'system, T, S>,
 {
     pub fn from(handler: H) -> Self {
         Task {
-            handler,
-            state: std::marker::PhantomData,
-            _marker: std::marker::PhantomData,
+            action: handler,
+            _state: std::marker::PhantomData,
+            _args: std::marker::PhantomData,
         }
     }
 
-    pub fn bind(self, context: Context<S>) -> Action<S, T, H> {
-        Action::from(self.handler, context)
+    pub fn bind(self, context: Context<S>) -> Action<'system, S, T, H> {
+        Action::from(self.action, context)
     }
 }
 
@@ -138,14 +171,16 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let task = Task::from(|State(counter): State<i32>, Target(tgt): Target<i32>| {
-            if counter < tgt {
-                println!("counter: {}", counter);
+        let task = Task::from(|mut counter: State<i32>, Target(tgt): Target<i32>| {
+            if *counter < tgt {
+                *counter = *counter + 1;
             }
-
-            assert_eq!(counter, 1);
         });
         let action = task.bind(Context { target: 1 });
-        action.run(1)
+        let mut counter = 0;
+        action.run(&mut counter);
+
+        // The referenced value was modified
+        assert_eq!(counter, 1);
     }
 }
