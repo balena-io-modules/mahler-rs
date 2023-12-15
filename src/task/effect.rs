@@ -1,14 +1,14 @@
 use crate::context::{Context, FromContext};
 use crate::system::FromSystem;
 
-pub trait Handler<'system, T, S>: Clone
+pub trait Effect<'system, T, S>: Clone
 where
     S: Clone,
 {
     fn call(&self, state: &'system mut S, context: Context<S>);
 }
 
-impl<'system, F, S> Handler<'system, (), S> for F
+impl<'system, F, S> Effect<'system, (), S> for F
 where
     F: Fn() + Clone,
     S: Clone,
@@ -20,7 +20,7 @@ where
 
 // TODO: use macro rules to implement this
 
-impl<'system, F, S, T1> Handler<'system, (T1,), S> for F
+impl<'system, F, S, T1> Effect<'system, (T1,), S> for F
 where
     F: Fn(T1) + Clone,
     S: Clone,
@@ -31,7 +31,7 @@ where
     }
 }
 
-impl<'system, F, S, T1, T2> Handler<'system, (T1, T2), S> for F
+impl<'system, F, S, T1, T2> Effect<'system, (T1, T2), S> for F
 where
     F: Fn(T1, T2) + Clone,
     S: Clone,

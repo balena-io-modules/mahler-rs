@@ -1,30 +1,36 @@
-use super::Handler;
+use super::Effect;
 use crate::context::Context;
 
-pub struct Action<'system, S, T, H>
+pub struct Action<'system, S, T, E>
 where
     S: Clone,
-    H: Handler<'system, T, S>,
+    E: Effect<'system, T, S>,
 {
-    handler: H,
+    effect: E,
     context: Context<S>,
     _marker: std::marker::PhantomData<&'system T>,
 }
 
-impl<'system, S, T, H> Action<'system, S, T, H>
+impl<'system, S, T, E> Action<'system, S, T, E>
 where
     S: Clone,
-    H: Handler<'system, T, S>,
+    E: Effect<'system, T, S>,
 {
-    pub fn from(handler: H, context: Context<S>) -> Self {
+    pub fn from(effect: E, context: Context<S>) -> Self {
         Action {
-            handler,
+            effect,
             context,
             _marker: std::marker::PhantomData,
         }
     }
 
+    pub fn effect(self, state: &'system mut S) {
+        self.effect.call(state, self.context);
+    }
+
+    // Run is the same as effect for now, but eventually
+    // we'll have a different handler
     pub fn run(self, state: &'system mut S) {
-        self.handler.call(state, self.context);
+        self.effect.call(state, self.context);
     }
 }
