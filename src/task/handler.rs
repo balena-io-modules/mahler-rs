@@ -1,7 +1,7 @@
 use crate::context::{Context, FromContext};
 use crate::system::FromSystem;
 
-pub trait Handler<'system, T, S>: Sized
+pub trait Handler<'system, T, S>
 where
     S: Clone,
 {
@@ -17,6 +17,8 @@ where
         (self)();
     }
 }
+
+// TODO: use macro rules to implement this
 
 impl<'system, F, S, T1> Handler<'system, (T1,), S> for F
 where

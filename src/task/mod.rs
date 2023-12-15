@@ -6,30 +6,40 @@ pub use action::*;
 use crate::context::Context;
 use handler::Handler;
 
-pub struct Task<'system, S, T, H>
+pub trait Task<'system, S, T, H>
 where
     S: Clone,
     H: Handler<'system, T, S>,
 {
-    action: H,
-    _state: std::marker::PhantomData<&'system S>,
+    fn get_handler(&self) -> H;
+
+    fn bind(&self, context: Context<S>) -> Action<'system, S, T, H> {
+        Action::from(self.get_handler(), context)
+    }
+}
+
+pub struct ActionTask<'system, S, T, H> {
+    handler: H,
+    _system: std::marker::PhantomData<&'system S>,
     _args: std::marker::PhantomData<T>,
 }
 
-impl<'system, S, T, H> Task<'system, S, T, H>
-where
-    S: Clone,
-    H: Handler<'system, T, S>,
-{
+impl<'system, S, T, H> ActionTask<'system, S, T, H> {
     pub fn from(handler: H) -> Self {
-        Task {
-            action: handler,
-            _state: std::marker::PhantomData,
-            _args: std::marker::PhantomData,
+        ActionTask {
+            handler,
+            _system: std::marker::PhantomData::<&'system S>,
+            _args: std::marker::PhantomData::<T>,
         }
     }
+}
 
-    pub fn bind(self, context: Context<S>) -> Action<'system, S, T, H> {
-        Action::from(self.action, context)
+impl<'system, S, T, H> Task<'system, S, T, H> for ActionTask<'system, S, T, H>
+where
+    S: Clone,
+    H: Handler<'system, T, S> + Copy,
+{
+    fn get_handler(&self) -> H {
+        self.handler
     }
 }

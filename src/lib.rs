@@ -4,14 +4,15 @@ pub mod task;
 
 #[cfg(test)]
 mod tests {
+    use crate::task::{ActionTask, Task};
+
     use super::*;
     use context::{Context, Target};
     use system::System;
-    use task::Task;
 
     #[test]
     fn it_works() {
-        let task = Task::from(|mut counter: System<i32>, Target(tgt): Target<i32>| {
+        let task = ActionTask::from(|mut counter: System<i32>, Target(tgt): Target<i32>| {
             if *counter < tgt {
                 *counter = *counter + 1;
             }
