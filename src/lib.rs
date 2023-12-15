@@ -1,17 +1,17 @@
 pub mod context;
-pub mod state;
+pub mod system;
 pub mod task;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use context::{Context, Target};
-    use state::State;
+    use system::System;
     use task::Task;
 
     #[test]
     fn it_works() {
-        let task = Task::from(|mut counter: State<i32>, Target(tgt): Target<i32>| {
+        let task = Task::from(|mut counter: System<i32>, Target(tgt): Target<i32>| {
             if *counter < tgt {
                 *counter = *counter + 1;
             }

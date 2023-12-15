@@ -1,5 +1,5 @@
 use crate::context::{Context, FromContext};
-use crate::state::FromState;
+use crate::system::FromSystem;
 
 pub trait Handler<'system, T, S>: Sized
 where
@@ -22,7 +22,7 @@ impl<'system, F, S, T1> Handler<'system, (T1,), S> for F
 where
     F: Fn(T1),
     S: Clone,
-    T1: FromState<'system, S>,
+    T1: FromSystem<'system, S>,
 {
     fn call(&self, state: &'system mut S, _: Context<S>) {
         (self)(T1::from_state(state));
@@ -33,7 +33,7 @@ impl<'system, F, S, T1, T2> Handler<'system, (T1, T2), S> for F
 where
     F: Fn(T1, T2),
     S: Clone,
-    T1: FromState<'system, S>,
+    T1: FromSystem<'system, S>,
     T2: FromContext<S>,
 {
     fn call(&self, state: &'system mut S, context: Context<S>) {

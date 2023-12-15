@@ -4,19 +4,19 @@ use std::{
     ops::DerefMut,
 };
 
-pub trait FromState<'system, S> {
+pub trait FromSystem<'system, S> {
     fn from_state(state: &'system mut S) -> Self;
 }
 
-pub struct State<'system, S>(&'system mut S);
+pub struct System<'system, S>(&'system mut S);
 
-impl<'system, S> DerefMut for State<'system, S> {
+impl<'system, S> DerefMut for System<'system, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
     }
 }
 
-impl<'system, S> Deref for State<'system, S> {
+impl<'system, S> Deref for System<'system, S> {
     type Target = S;
 
     fn deref(&self) -> &Self::Target {
@@ -24,7 +24,7 @@ impl<'system, S> Deref for State<'system, S> {
     }
 }
 
-impl<S> Display for State<'_, S>
+impl<S> Display for System<'_, S>
 where
     S: Display,
 {
@@ -33,8 +33,8 @@ where
     }
 }
 
-impl<'system, S> FromState<'system, S> for State<'system, S> {
+impl<'system, S> FromSystem<'system, S> for System<'system, S> {
     fn from_state(state: &'system mut S) -> Self {
-        State(state)
+        System(state)
     }
 }
