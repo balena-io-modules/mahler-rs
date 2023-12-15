@@ -37,9 +37,9 @@ impl<'system, S, T, H> ActionTask<'system, S, T, H> {
 impl<'system, S, T, H> Task<'system, S, T, H> for ActionTask<'system, S, T, H>
 where
     S: Clone,
-    H: Handler<'system, T, S> + Copy,
+    H: Handler<'system, T, S>,
 {
     fn get_handler(&self) -> H {
-        self.handler
+        self.handler.clone()
     }
 }
