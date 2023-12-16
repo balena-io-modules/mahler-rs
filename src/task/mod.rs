@@ -14,7 +14,7 @@ where
     fn get_effect(&self) -> E;
 
     fn bind(&self, context: Context<S>) -> Action<'system, S, T, E> {
-        Action::from(self.get_effect(), context)
+        Action::from(self.get_effect(), self.get_effect(), context)
     }
 }
 
@@ -50,13 +50,15 @@ mod tests {
     use crate::system::System;
     use crate::task::{ActionTask, Task};
 
+    fn my_task(mut counter: System<i32>, Target(tgt): Target<i32>) {
+        if *counter < tgt {
+            *counter = *counter + 1;
+        }
+    }
+
     #[test]
     fn it_works() {
-        let task = ActionTask::from(|mut counter: System<i32>, Target(tgt): Target<i32>| {
-            if *counter < tgt {
-                *counter = *counter + 1;
-            }
-        });
+        let task = ActionTask::from(my_task);
         let action = task.bind(Context { target: 1 });
         let mut counter = 0;
         action.run(&mut counter);

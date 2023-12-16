@@ -13,7 +13,7 @@ where
 impl<'system, F, S, R> Handler<'system, S, (), R> for F
 where
     F: FnOnce() -> R + Clone + Send + 'static,
-    S: Clone,
+    S: Clone + Send + 'static,
     R: Future<Output = ()>,
 {
     fn call(self, _: &'system mut S, _: Context<S>) -> R {
@@ -29,7 +29,7 @@ macro_rules! impl_handler {
         impl<'system, S, F, $first, $($ty,)* R> Handler<'system, S, ($first, $($ty,)*), R> for F
         where
             F: FnOnce($first, $($ty,)*) -> R + Clone + Send + 'static,
-            S: Clone + Send,
+            S: Clone + Send + 'static,
             $first: FromSystem<'system, S>,
             $($ty: FromContext<S>,)*
         {
