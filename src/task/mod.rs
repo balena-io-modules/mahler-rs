@@ -1,15 +1,15 @@
 mod action;
-mod effect;
+mod handler;
 
 pub use action::*;
 
 use crate::context::Context;
-use effect::Effect;
+use handler::Handler;
 
 pub trait Task<'system, S, T, E>
 where
     S: Clone,
-    E: Effect<'system, T, S>,
+    E: Handler<'system, S, T, ()>,
 {
     fn get_effect(&self) -> E;
 
@@ -37,7 +37,7 @@ impl<'system, S, T, E> ActionTask<'system, S, T, E> {
 impl<'system, S, T, E> Task<'system, S, T, E> for ActionTask<'system, S, T, E>
 where
     S: Clone,
-    E: Effect<'system, T, S>,
+    E: Handler<'system, S, T, ()>,
 {
     fn get_effect(&self) -> E {
         self.effect.clone()

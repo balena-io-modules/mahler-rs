@@ -1,10 +1,10 @@
-use super::Effect;
+use super::handler::Handler;
 use crate::context::Context;
 
 pub struct Action<'system, S, T, E>
 where
     S: Clone,
-    E: Effect<'system, T, S>,
+    E: Handler<'system, S, T, ()>,
 {
     effect: E,
     context: Context<S>,
@@ -14,7 +14,7 @@ where
 impl<'system, S, T, E> Action<'system, S, T, E>
 where
     S: Clone,
-    E: Effect<'system, T, S>,
+    E: Handler<'system, S, T, ()>,
 {
     pub fn from(effect: E, context: Context<S>) -> Self {
         Action {
