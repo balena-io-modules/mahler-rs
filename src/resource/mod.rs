@@ -1,8 +1,43 @@
-use super::{Entity, Indexable, WithParent};
+mod read;
+mod target;
+mod update;
+
+pub use read::*;
+pub use target::*;
+pub use update::*;
+
+use crate::{
+    entity::{Entity, WithParent},
+    state::Indexable,
+};
 
 use std::any::{Any, TypeId};
 
 pub trait Resource {}
+
+impl<R> Indexable for R
+where
+    R: Resource + 'static,
+{
+    type Id = TypeId;
+
+    fn id(&self) -> Self::Id {
+        TypeId::of::<Self>()
+    }
+}
+
+impl<R> WithParent for R
+where
+    R: Resource + 'static,
+{
+    type Parent = ();
+
+    fn pid(&self) {
+        ()
+    }
+}
+
+impl<R> Entity for R where R: Resource + 'static {}
 
 pub(crate) struct BoxedResource {
     id: TypeId,
@@ -20,20 +55,18 @@ impl BoxedResource {
         }
     }
 
-    pub fn as_resource<T>(&self) -> &T
+    pub fn as_resource<R>(&self) -> Option<&R>
     where
-        T: Resource + 'static,
+        R: Resource + 'static,
     {
-        self.contents
-            .downcast_ref::<T>()
-            .expect("could not downcast from BoxedResource")
+        self.contents.downcast_ref::<R>()
     }
 
-    pub fn as_resource_mut<T>(&mut self) -> &mut T
+    pub fn as_resource_mut<R>(&mut self) -> Option<&mut R>
     where
-        T: Resource + 'static,
+        R: Resource + 'static,
     {
-        self.contents.downcast_mut::<T>().unwrap()
+        self.contents.downcast_mut::<R>()
     }
 }
 

@@ -28,12 +28,6 @@ where
     }
 }
 
-pub trait WithParent {
-    type Parent: Indexable;
-
-    fn pid(&self) -> <Self::Parent as Indexable>::Id;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

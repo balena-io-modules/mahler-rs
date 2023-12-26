@@ -1,0 +1,17 @@
+mod read;
+mod target;
+mod update;
+
+pub use read::*;
+pub use target::*;
+pub use update::*;
+
+use crate::state::Indexable;
+
+pub trait WithParent {
+    type Parent: Indexable;
+
+    fn pid(&self) -> <Self::Parent as Indexable>::Id;
+}
+
+pub trait Entity: Indexable + WithParent {}

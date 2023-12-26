@@ -1,22 +1,22 @@
 use std::future::Future;
 
-use crate::context::{Context, FromContext};
-use crate::system::FromSystem;
+use crate::entity::Entity;
+use crate::state::{FromState, FromStateMut, State};
 
-pub trait Handler<'system, S, T, R>: Clone + Send + Sized + 'static
+pub trait Handler<'system, E, T, R>: Clone + Send + Sized + 'static
 where
-    S: Clone,
+    E: Entity,
 {
-    fn call(self, state: &'system mut S, context: Context<S>) -> R;
+    fn call(self, state: &'system mut State, target: &E) -> R;
 }
 
-impl<'system, F, S, R> Handler<'system, S, (), R> for F
+impl<'system, F, E, R> Handler<'system, E, (), R> for F
 where
     F: FnOnce() -> R + Clone + Send + 'static,
-    S: Clone + Send + 'static,
+    E: Entity + Send + 'static,
     R: Future<Output = ()>,
 {
-    fn call(self, _: &'system mut S, _: Context<S>) -> R {
+    fn call(self, _: &'system mut State, _: &E) -> R {
         (self)()
     }
 }
@@ -25,16 +25,24 @@ macro_rules! impl_handler {
     (
         $first:ident, $($ty:ident),*
     ) => {
-        #[allow(unused)]
-        impl<'system, S, F, $first, $($ty,)* R> Handler<'system, S, ($first, $($ty,)*), R> for F
+        #[allow(non_snake_case, unused)]
+        impl<'system, E, F, $first, $($ty,)* R> Handler<'system, E, ($first, $($ty,)*), R> for F
         where
             F: FnOnce($first, $($ty,)*) -> R + Clone + Send + 'static,
-            S: Clone + Send + 'static,
-            $first: FromSystem<'system, S>,
-            $($ty: FromContext<S>,)*
+            E: Entity + Clone + Send + 'static,
+            $first: FromStateMut<'system, E>,
+            $($ty: FromState<E>,)*
         {
-            fn call(self, state: &'system mut S, context: Context<S>) -> R {
-                (self)($first::from_state(state), $($ty::from_context(&context),)*)
+            fn call(self, state: &'system mut State, target: &E) -> R {
+                $(
+                    let $ty = $ty::from_state(state, target);
+                )*
+
+                // From system requires a mutable reference so we have to
+                // do this last
+                let $first = $first::from_state_mut(state, target);
+
+                (self)($first, $($ty,)*)
             }
         }
     };

@@ -1,4 +1,4 @@
-pub mod context;
-pub mod db;
-pub mod system;
+pub mod entity;
+pub mod resource;
+pub mod state;
 pub mod task;
