@@ -46,25 +46,44 @@ impl State {
             .insert(TypeId::of::<I>(), Box::new(Index::<I>::new()));
     }
 
-    pub fn insert_entity<E>(&mut self, entity: E)
+    pub fn insert_entity<E>(&mut self, entity: E) -> &E
     where
         E: Entity + 'static,
     {
         if !self.db.contains_key(&TypeId::of::<E>()) {
             self.init::<E>();
         }
+        let id = entity.id();
         self.db
             .get_mut(&TypeId::of::<E>())
             .map(|index| index.downcast_mut::<Index<E>>().expect("downcast failed"))
             .unwrap()
             .insert(entity);
+        self.get_entity::<E>(&id).unwrap()
     }
 
-    pub fn insert_resource<R>(&mut self, resource: R)
+    pub fn insert_resource<R>(&mut self, resource: R) -> &R
     where
         R: Resource + 'static,
     {
-        self.insert_entity(BoxedResource::new(resource))
+        self.insert_entity(BoxedResource::new(resource));
+        self.get_resource::<R>().unwrap()
+    }
+
+    pub fn create_resource<R>(&mut self) -> &R
+    where
+        R: Resource + Default + 'static,
+    {
+        self.insert_resource(R::default());
+        self.get_resource::<R>().unwrap()
+    }
+
+    pub fn create_resource_mut<R>(&mut self) -> &mut R
+    where
+        R: Resource + Default + 'static,
+    {
+        self.insert_resource(R::default());
+        self.get_resource_mut::<R>().unwrap()
     }
 
     pub fn get_entity<E>(&self, id: &<E as Indexable>::Id) -> Option<&E>
@@ -132,37 +151,79 @@ mod tests {
         impl WithParent for Directory {
             type Parent = ();
 
-            fn pid(&self) {}
+            fn parent_id(&self) {}
         }
 
-        let mut system = State::new();
+        #[derive(PartialEq, Clone, Debug)]
+        struct File<'dir> {
+            name: String,
+            contents: String,
+            directory: &'dir Directory,
+        }
 
-        system.insert_entity(Directory {
+        impl<'dir> Indexable for File<'dir> {
+            type Id = (<Directory as Indexable>::Id, String);
+
+            fn id(&self) -> Self::Id {
+                (self.directory.id(), self.name.clone())
+            }
+        }
+
+        impl<'dir> WithParent for File<'dir> {
+            type Parent = Directory;
+
+            fn parent_id(&self) -> String {
+                self.directory.id()
+            }
+        }
+
+        impl<'dir> Entity for File<'dir> {}
+
+        let mut state = State::new();
+
+        state.insert_entity(Directory {
             name: "test".to_string(),
         });
 
-        let dir = Directory {
-            name: "test".to_string(),
-        };
-
         assert_eq!(
-            system.get_entity::<Directory>(&"test".to_string()),
-            Some(&dir)
+            state.get_entity::<Directory>(&"test".to_string()),
+            Some(&Directory {
+                name: "test".to_string()
+            })
         );
+
+        // This doesn't work
+        // let directory = state.get_entity::<Directory>(&"test".to_string()).unwrap();
+        // state.insert_entity(File {
+        //     name: "test.txt".to_string(),
+        //     contents: "Hello world!!".to_string(),
+        //     directory,
+        // });
+        //
+        // assert_eq!(
+        //     state.get_entity::<File>(&("/".to_string(), "test.txt".to_string())),
+        //     Some(&File {
+        //         name: "test.txt".to_string(),
+        //         contents: "Hello world!!".to_string(),
+        //         directory: &Directory {
+        //             name: "test".to_string()
+        //         }
+        //     })
+        // );
     }
 
     #[test]
     fn it_allows_insertion_and_retrieval_of_resources() {
-        #[derive(PartialEq, Clone, Debug)]
+        #[derive(PartialEq, Clone, Debug, Default)]
         struct Counter(u32);
 
         impl Resource for Counter {}
 
         let mut db = State::new();
-        db.insert_resource(Counter(11));
+        db.create_resource::<Counter>();
         db.insert_resource("Hello world!!".to_string());
 
-        assert_eq!(db.get_resource::<Counter>(), Some(&Counter(11)));
+        assert_eq!(db.get_resource::<Counter>(), Some(&Counter(0)));
         assert_eq!(
             db.get_resource::<String>(),
             Some(&"Hello world!!".to_string())

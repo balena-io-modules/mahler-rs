@@ -11,7 +11,7 @@ use crate::state::Indexable;
 pub trait WithParent {
     type Parent: Indexable;
 
-    fn pid(&self) -> <Self::Parent as Indexable>::Id;
+    fn parent_id(&self) -> <Self::Parent as Indexable>::Id;
 }
 
 pub trait Entity: Indexable + WithParent {}

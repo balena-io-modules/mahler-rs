@@ -32,7 +32,7 @@ where
 {
     type Parent = ();
 
-    fn pid(&self) {
+    fn parent_id(&self) {
         ()
     }
 }
@@ -81,7 +81,7 @@ impl Indexable for BoxedResource {
 impl WithParent for BoxedResource {
     type Parent = ();
 
-    fn pid(&self) {
+    fn parent_id(&self) {
         ()
     }
 }
