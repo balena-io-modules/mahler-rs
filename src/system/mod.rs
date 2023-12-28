@@ -15,27 +15,27 @@ use crate::{
     resource::{BoxedResource, Resource},
 };
 
-pub struct State {
+pub struct System {
     db: HashMap<TypeId, Box<dyn Any>>,
 }
 
-pub trait FromStateMut<'system, E>
+pub(crate) trait FromSystemMut<'system, E>
 where
     E: Entity,
 {
-    fn from_state_mut(state: &'system mut State, target: &E) -> Self;
+    fn from_system_mut(system: &'system mut System, target: &E) -> Self;
 }
 
-pub trait FromState<E>
+pub(crate) trait FromSystem<E>
 where
     E: Entity,
 {
-    fn from_state(state: &State, target: &E) -> Self;
+    fn from_system(system: &System, target: &E) -> Self;
 }
 
-impl State {
+impl System {
     pub fn new() -> Self {
-        State { db: HashMap::new() }
+        System { db: HashMap::new() }
     }
 
     fn init<I>(&mut self)
@@ -179,7 +179,7 @@ mod tests {
 
         impl<'dir> Entity for File<'dir> {}
 
-        let mut state = State::new();
+        let mut state = System::new();
 
         state.insert_entity(Directory {
             name: "test".to_string(),
@@ -189,6 +189,17 @@ mod tests {
             state.get_entity::<Directory>(&"test".to_string()),
             Some(&Directory {
                 name: "test".to_string()
+            })
+        );
+
+        let directory = state.get_entity_mut::<Directory>(&"test".to_string());
+        directory.map(|dir| dir.name = "test2".to_string());
+
+        // This fails and that's bad
+        assert_eq!(
+            state.get_entity::<Directory>(&"test2".to_string()),
+            Some(&Directory {
+                name: "test2".to_string()
             })
         );
 
@@ -219,7 +230,7 @@ mod tests {
 
         impl Resource for Counter {}
 
-        let mut db = State::new();
+        let mut db = System::new();
         db.create_resource::<Counter>();
         db.insert_resource("Hello world!!".to_string());
 

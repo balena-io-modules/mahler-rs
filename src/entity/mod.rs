@@ -6,7 +6,7 @@ pub use read::*;
 pub use target::*;
 pub use update::*;
 
-use crate::state::Indexable;
+use crate::system::Indexable;
 
 pub trait WithParent {
     type Parent: Indexable;

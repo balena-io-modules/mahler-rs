@@ -1,14 +1,14 @@
 use super::Entity;
-use crate::state::{FromState, State};
+use crate::system::{FromSystem, System};
 use std::ops::Deref;
 
 pub struct Target<E>(E);
 
-impl<E> FromState<E> for Target<E>
+impl<E> FromSystem<E> for Target<E>
 where
     E: Entity + Clone + 'static,
 {
-    fn from_state(_: &State, target: &E) -> Self {
+    fn from_system(_: &System, target: &E) -> Self {
         Self(target.clone())
     }
 }

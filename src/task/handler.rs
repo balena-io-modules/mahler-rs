@@ -1,13 +1,13 @@
 use std::future::Future;
 
 use crate::entity::Entity;
-use crate::state::{FromState, FromStateMut, State};
+use crate::system::{FromSystem, FromSystemMut, System};
 
 pub trait Handler<'system, E, T, R>: Clone + Send + Sized + 'static
 where
     E: Entity,
 {
-    fn call(self, state: &'system mut State, target: &E) -> R;
+    fn call(self, system: &'system mut System, target: &E) -> R;
 }
 
 impl<'system, F, E, R> Handler<'system, E, (), R> for F
@@ -16,7 +16,7 @@ where
     E: Entity + Send + 'static,
     R: Future<Output = ()>,
 {
-    fn call(self, _: &'system mut State, _: &E) -> R {
+    fn call(self, _: &'system mut System, _: &E) -> R {
         (self)()
     }
 }
@@ -30,17 +30,17 @@ macro_rules! impl_handler {
         where
             F: FnOnce($first, $($ty,)*) -> R + Clone + Send + 'static,
             E: Entity + Clone + Send + 'static,
-            $first: FromStateMut<'system, E>,
-            $($ty: FromState<E>,)*
+            $first: FromSystemMut<'system, E>,
+            $($ty: FromSystem<E>,)*
         {
-            fn call(self, state: &'system mut State, target: &E) -> R {
+            fn call(self, system: &'system mut System, target: &E) -> R {
                 $(
-                    let $ty = $ty::from_state(state, target);
+                    let $ty = $ty::from_system(system, target);
                 )*
 
                 // From system requires a mutable reference so we have to
                 // do this last
-                let $first = $first::from_state_mut(state, target);
+                let $first = $first::from_system_mut(system, target);
 
                 (self)($first, $($ty,)*)
             }

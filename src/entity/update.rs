@@ -1,15 +1,15 @@
 use super::Entity;
-use crate::state::{FromStateMut, State};
+use crate::system::{FromSystemMut, System};
 use std::ops::{Deref, DerefMut};
 
 pub struct Update<'system, T>(&'system mut T);
 
-impl<'system, E> FromStateMut<'system, E> for Update<'system, E>
+impl<'system, E> FromSystemMut<'system, E> for Update<'system, E>
 where
     E: Entity + 'static,
 {
-    fn from_state_mut(state: &'system mut State, target: &E) -> Self {
-        if let Some(entity) = state.get_entity_mut::<E>(&target.id()) {
+    fn from_system_mut(system: &'system mut System, target: &E) -> Self {
+        if let Some(entity) = system.get_entity_mut::<E>(&target.id()) {
             Self(entity)
         } else {
             // TODO

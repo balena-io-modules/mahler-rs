@@ -1,5 +1,5 @@
 use super::handler::Handler;
-use crate::{entity::Entity, state::State};
+use crate::{entity::Entity, system::System};
 
 pub struct Action<'system, S, T, E, H = E, R = ()>
 where
@@ -30,13 +30,13 @@ where
         }
     }
 
-    pub fn effect(self, state: &'system mut State) {
-        self.effect.call(state, &self.target);
+    pub fn effect(self, system: &'system mut System) {
+        self.effect.call(system, &self.target);
     }
 
     // Run is the same as effect for now, but eventually
     // we'll have a different handler
-    pub fn run(self, state: &'system mut State) {
-        self.handler.call(state, &self.target);
+    pub fn run(self, system: &'system mut System) {
+        self.handler.call(system, &self.target);
     }
 }

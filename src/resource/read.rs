@@ -1,14 +1,14 @@
 use super::Resource;
-use crate::state::{FromState, State};
+use crate::system::{FromSystem, System};
 use std::ops::Deref;
 
 pub struct Read<R>(R);
 
-impl<R> FromState<R> for Read<R>
+impl<R> FromSystem<R> for Read<R>
 where
     R: Resource + Clone + 'static,
 {
-    fn from_state(state: &State, _: &R) -> Self {
+    fn from_system(state: &System, _: &R) -> Self {
         if let Some(entity) = state.get_resource::<R>() {
             Self(entity.clone())
         } else {

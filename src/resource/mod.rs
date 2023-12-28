@@ -8,7 +8,7 @@ pub use update::*;
 
 use crate::{
     entity::{Entity, WithParent},
-    state::Indexable,
+    system::Indexable,
 };
 
 use std::any::{Any, TypeId};

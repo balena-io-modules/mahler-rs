@@ -1,14 +1,14 @@
 use super::Resource;
-use crate::state::{FromState, State};
+use crate::system::{FromSystem, System};
 use std::ops::Deref;
 
 pub struct Target<R>(R);
 
-impl<R> FromState<R> for Target<R>
+impl<R> FromSystem<R> for Target<R>
 where
     R: Resource + Clone + 'static,
 {
-    fn from_state(_: &State, target: &R) -> Self {
+    fn from_system(_: &System, target: &R) -> Self {
         Self(target.clone())
     }
 }
