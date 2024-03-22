@@ -1,69 +1,98 @@
 mod action;
-mod handler;
+mod effect;
 
-pub use action::*;
+use std::marker::PhantomData;
 
-use crate::entity::Entity;
-use handler::Handler;
+use crate::state::{Context, State};
 
-pub trait Task<'system, S, T, E>
+pub use action::{Action, Handler};
+use effect::Effect;
+
+pub struct Task<'system, S, T, E, A>
 where
-    S: Entity + Clone,
-    E: Handler<'system, S, T, ()>,
+    S: State,
+    E: Effect<'system, S, T>,
+    A: Handler<'system, S, T>,
 {
-    fn get_effect(&self) -> E;
-
-    fn bind(&self, target: S) -> Action<'system, S, T, E> {
-        Action::from(self.get_effect(), self.get_effect(), target)
-    }
-}
-
-pub struct ActionTask<S, T, E> {
     effect: E,
-    _system: std::marker::PhantomData<S>,
-    _args: std::marker::PhantomData<T>,
+    action: A,
+    _state: PhantomData<&'system S>,
+    _args: PhantomData<T>,
 }
 
-impl<S, T, E> ActionTask<S, T, E> {
-    pub fn from(effect: E) -> Self {
-        ActionTask {
+impl<'system, S, T, E, A> Task<'system, S, T, E, A>
+where
+    S: State,
+    E: Effect<'system, S, T>,
+    A: Handler<'system, S, T>,
+{
+    pub fn new(effect: E, action: A) -> Self {
+        Task {
             effect,
-            _system: std::marker::PhantomData::<S>,
-            _args: std::marker::PhantomData::<T>,
+            action,
+            _state: PhantomData::<&'system S>,
+            _args: PhantomData::<T>,
         }
     }
-}
 
-impl<'system, S, T, E> Task<'system, S, T, E> for ActionTask<S, T, E>
-where
-    S: Entity + Clone,
-    E: Handler<'system, S, T, ()>,
-{
-    fn get_effect(&self) -> E {
-        self.effect.clone()
+    pub fn bind(self, context: Context<S>) -> Action<'system, S, T, E, A> {
+        Action::new(self.effect, self.action, context)
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use crate::context::{Context, Target};
-//     use crate::system::System;
-//     use crate::task::{ActionTask, Task};
-//
-//     fn my_task(mut counter: System<i32>, Target(tgt): Target<i32>) {
-//         if *counter < tgt {
-//             *counter = *counter + 1;
-//         }
-//     }
-//
-//     #[test]
-//     fn it_works() {
-//         let task = ActionTask::from(my_task);
-//         let action = task.bind(Context { target: 1 });
-//         let mut counter = 0;
-//         action.run(&mut counter);
-//
-//         // The referenced value was modified
-//         assert_eq!(counter, 1);
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extract::{State, Target};
+    use crate::state::Context;
+
+    fn my_task_effect(mut counter: State<i32>, Target(tgt): Target<i32>) {
+        if *counter < tgt {
+            *counter += 1;
+        }
+    }
+
+    async fn my_task_action(mut counter: State<'_, i32>, tgt: Target<i32>) {
+        if *counter < *tgt {
+            *counter += 1;
+        }
+    }
+
+    #[test]
+    fn it_allows_to_dry_run_tasks() {
+        let task = Task::from(my_task_effect);
+        let action = task.bind(Context { target: 1 });
+
+        let mut counter = 0;
+        action.dry_run(&mut counter);
+
+        // The referenced value was modified
+        assert_eq!(counter, 1);
+    }
+
+    #[tokio::test]
+    async fn it_runs_async_actions() {
+        let task = Task::from(my_task_effect);
+        let action = task.bind(Context { target: 1 });
+
+        let mut counter = 0;
+        // Run the action
+        action.run(&mut counter).await;
+
+        // The referenced value was modified
+        assert_eq!(counter, 1);
+    }
+
+    #[tokio::test]
+    async fn it_allows_extending_actions_with_effect() {
+        let task = my_task_action.with_effect(my_task_effect);
+        let action = task.bind(Context { target: 1 });
+
+        let mut counter = 0;
+        // Run the action
+        action.run(&mut counter).await;
+
+        // The referenced value was modified
+        assert_eq!(counter, 1);
+    }
+}
