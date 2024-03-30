@@ -1,12 +1,14 @@
 mod action;
 mod effect;
+mod handler;
 
 use std::marker::PhantomData;
 
 use crate::state::Context;
 
-pub use action::{Action, Handler};
+pub use action::Action;
 use effect::Effect;
+pub use handler::Handler;
 
 pub struct Task<'system, S, T, E, A>
 where

@@ -5,7 +5,7 @@ use std::{
 
 use crate::state::{Context, FromContext, FromState};
 
-use super::action::Handler;
+use super::handler::Handler;
 use super::Task;
 
 pub trait Effect<'system, S, T>: Clone + Sized {
