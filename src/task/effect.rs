@@ -3,14 +3,14 @@ use std::{
     marker::PhantomData,
 };
 
-use crate::state::{Context, FromContext, FromState, State};
+use crate::state::{Context, FromContext, FromState};
 
 use super::action::Handler;
 use super::Task;
 
 pub trait Effect<'system, S, T>: Clone + Sized
 where
-    S: State,
+    S: Clone,
 {
     fn call(self, state: &'system mut S, context: Context<S>);
 }
@@ -18,7 +18,7 @@ where
 impl<'system, F, S> Effect<'system, S, ()> for F
 where
     F: FnOnce() + Clone + 'static,
-    S: State + Send + 'static,
+    S: Clone + Send + 'static,
 {
     fn call(self, _: &mut S, _: Context<S>) {
         (self)()
@@ -33,7 +33,7 @@ macro_rules! impl_effect_handler {
         impl<'system, S, F, $first, $($ty,)*> Effect<'system, S, ($first, $($ty,)*)> for F
         where
             F: FnOnce($first, $($ty,)*) + Clone +'static,
-            S: State + 'static,
+            S: Clone + 'static,
             $first: FromState<'system, S>,
             $($ty: FromContext<S>,)*
         {
@@ -74,7 +74,7 @@ impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14
 
 pub struct IntoHandler<'system, S, T, E>
 where
-    S: State,
+    S: Clone,
     E: Effect<'system, S, T>,
 {
     effect: E,
@@ -84,7 +84,7 @@ where
 
 impl<'system, S, T, E> Clone for IntoHandler<'system, S, T, E>
 where
-    S: State,
+    S: Clone,
     E: Effect<'system, S, T>,
 {
     fn clone(&self) -> Self {
@@ -98,7 +98,7 @@ where
 
 impl<'system, S, T, E> IntoHandler<'system, S, T, E>
 where
-    S: State,
+    S: Clone,
     E: Effect<'system, S, T>,
 {
     fn new(effect: E) -> Self {
@@ -112,7 +112,7 @@ where
 
 impl<'system, S, T, E> Handler<'system, S, T> for IntoHandler<'system, S, T, E>
 where
-    S: State + Send + Sync + 'static,
+    S: Clone + Send + Sync + 'static,
     E: Effect<'system, S, T> + Send,
     T: Send,
 {
@@ -126,7 +126,7 @@ where
 
 impl<'system, S, T, E> From<E> for Task<'system, S, T, E, IntoHandler<'system, S, T, E>>
 where
-    S: State + Send + Sync + 'static,
+    S: Clone + Send + Sync + 'static,
     E: Effect<'system, S, T> + Send,
     T: Send,
 {

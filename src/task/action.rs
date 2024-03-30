@@ -1,14 +1,14 @@
 use std::future::Future;
 use std::marker::PhantomData;
 
-use crate::state::{Context, FromContext, FromState, State};
+use crate::state::{Context, FromContext, FromState};
 
 use super::effect::Effect;
 use super::Task;
 
 pub trait Handler<'system, S, T>: Clone + Send + Sized
 where
-    S: State,
+    S: Clone,
 {
     type Future: Future<Output = ()> + Send;
 
@@ -22,7 +22,7 @@ where
 impl<'system, F, S, R> Handler<'system, S, ()> for F
 where
     F: FnOnce() -> R + Clone + Send + 'static,
-    S: State + Send + 'static,
+    S: Clone + Send + 'static,
     R: Future<Output = ()> + Send,
 {
     type Future = R;
@@ -40,7 +40,7 @@ macro_rules! impl_action_handler {
         impl<'system, S, F, $first, $($ty,)* R> Handler<'system, S, ($first, $($ty,)*)> for F
         where
             F: FnOnce($first, $($ty,)*) -> R + Clone + Send + 'static,
-            S: State + Send + 'static,
+            S: Clone + Send + 'static,
             R: Future<Output = ()> + Send,
             $first: FromState<'system, S> + Send,
             $($ty: FromContext<S> + Send,)*
@@ -82,7 +82,7 @@ impl_action_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14
 
 pub struct Action<'system, S, T, E, A>
 where
-    S: State,
+    S: Clone,
     E: Effect<'system, S, T>,
     A: Handler<'system, S, T>,
 {
@@ -94,7 +94,7 @@ where
 
 impl<'system, S, T, E, A> Action<'system, S, T, E, A>
 where
-    S: State,
+    S: Clone,
     E: Effect<'system, S, T>,
     A: Handler<'system, S, T>,
 {
