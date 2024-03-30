@@ -10,7 +10,6 @@ use effect::Effect;
 
 pub struct Task<'system, S, T, E, A>
 where
-    S: Clone,
     E: Effect<'system, S, T>,
     A: Handler<'system, S, T>,
 {
@@ -22,7 +21,6 @@ where
 
 impl<'system, S, T, E, A> Task<'system, S, T, E, A>
 where
-    S: Clone,
     E: Effect<'system, S, T>,
     A: Handler<'system, S, T>,
 {

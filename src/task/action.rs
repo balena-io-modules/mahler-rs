@@ -6,13 +6,10 @@ use crate::state::{Context, FromContext, FromState};
 use super::effect::Effect;
 use super::Task;
 
-pub trait Handler<'system, S, T>: Clone + Send + Sized
-where
-    S: Clone,
-{
+pub trait Handler<'system, S, T>: Clone + Send + Sized {
     type Future: Future<Output = ()> + Send;
 
-    fn call(self, state: &'system mut S, context: Context<S>) -> Self::Future;
+    fn call(self, state: &'system mut S, context: &Context<S>) -> Self::Future;
 
     fn with_effect<E: Effect<'system, S, T>>(self, effect: E) -> Task<'system, S, T, E, Self> {
         Task::new(effect, self)
@@ -22,12 +19,12 @@ where
 impl<'system, F, S, R> Handler<'system, S, ()> for F
 where
     F: FnOnce() -> R + Clone + Send + 'static,
-    S: Clone + Send + 'static,
+    S: Send + 'static,
     R: Future<Output = ()> + Send,
 {
     type Future = R;
 
-    fn call(self, _: &'system mut S, _: Context<S>) -> Self::Future {
+    fn call(self, _: &'system mut S, _: &Context<S>) -> Self::Future {
         (self)()
     }
 }
@@ -40,17 +37,16 @@ macro_rules! impl_action_handler {
         impl<'system, S, F, $first, $($ty,)* R> Handler<'system, S, ($first, $($ty,)*)> for F
         where
             F: FnOnce($first, $($ty,)*) -> R + Clone + Send + 'static,
-            S: Clone + Send + 'static,
+            S: Send + 'static,
             R: Future<Output = ()> + Send,
             $first: FromState<'system, S> + Send,
             $($ty: FromContext<S> + Send,)*
         {
             type Future = R;
 
-            fn call(self, state: &'system mut S, context: Context<S>) -> Self::Future {
+            fn call(self, state: &'system mut S, context: &Context<S>) -> Self::Future {
                 $(
-                    // TODO: it would be nice to use references here to avoid clonning
-                    let $ty = $ty::from_context(state, context.clone());
+                    let $ty = $ty::from_context(state, context);
                 )*
 
                 // From system requires a mutable reference so we have to
@@ -82,7 +78,6 @@ impl_action_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14
 
 pub struct Action<'system, S, T, E, A>
 where
-    S: Clone,
     E: Effect<'system, S, T>,
     A: Handler<'system, S, T>,
 {
@@ -94,7 +89,6 @@ where
 
 impl<'system, S, T, E, A> Action<'system, S, T, E, A>
 where
-    S: Clone,
     E: Effect<'system, S, T>,
     A: Handler<'system, S, T>,
 {
@@ -108,10 +102,10 @@ where
     }
 
     pub fn dry_run(self, state: &'system mut S) {
-        self.effect.call(state, self.context.clone());
+        self.effect.call(state, &self.context);
     }
 
     pub fn run(self, state: &'system mut S) -> A::Future {
-        self.action.call(state, self.context.clone())
+        self.action.call(state, &self.context)
     }
 }

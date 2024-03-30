@@ -3,8 +3,8 @@ use std::ops::{Deref, DerefMut};
 
 pub struct State<'system, S>(&'system mut S);
 
-impl<'system, S: Clone> FromState<'system, S> for State<'system, S> {
-    fn from_state(state: &'system mut S, _: Context<S>) -> Self {
+impl<'system, S> FromState<'system, S> for State<'system, S> {
+    fn from_state(state: &'system mut S, _: &Context<S>) -> Self {
         State(state)
     }
 }

@@ -8,19 +8,16 @@ use crate::state::{Context, FromContext, FromState};
 use super::action::Handler;
 use super::Task;
 
-pub trait Effect<'system, S, T>: Clone + Sized
-where
-    S: Clone,
-{
-    fn call(self, state: &'system mut S, context: Context<S>);
+pub trait Effect<'system, S, T>: Clone + Sized {
+    fn call(self, state: &'system mut S, context: &Context<S>);
 }
 
 impl<'system, F, S> Effect<'system, S, ()> for F
 where
     F: FnOnce() + Clone + 'static,
-    S: Clone + Send + 'static,
+    S: Send + 'static,
 {
-    fn call(self, _: &mut S, _: Context<S>) {
+    fn call(self, _: &mut S, _: &Context<S>) {
         (self)()
     }
 }
@@ -33,15 +30,14 @@ macro_rules! impl_effect_handler {
         impl<'system, S, F, $first, $($ty,)*> Effect<'system, S, ($first, $($ty,)*)> for F
         where
             F: FnOnce($first, $($ty,)*) + Clone +'static,
-            S: Clone + 'static,
+            S: 'static,
             $first: FromState<'system, S>,
             $($ty: FromContext<S>,)*
         {
 
-            fn call(self, state: &'system mut S, context: Context<S>) {
+            fn call(self, state: &'system mut S, context: &Context<S>) {
                 $(
-                    // TODO: it would be nice to use references here to avoid clonning
-                    let $ty = $ty::from_context(state, context.clone());
+                    let $ty = $ty::from_context(state, context);
                 )*
 
                 // From system requires a mutable reference so we have to
@@ -74,7 +70,6 @@ impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14
 
 pub struct IntoHandler<'system, S, T, E>
 where
-    S: Clone,
     E: Effect<'system, S, T>,
 {
     effect: E,
@@ -84,7 +79,6 @@ where
 
 impl<'system, S, T, E> Clone for IntoHandler<'system, S, T, E>
 where
-    S: Clone,
     E: Effect<'system, S, T>,
 {
     fn clone(&self) -> Self {
@@ -98,7 +92,6 @@ where
 
 impl<'system, S, T, E> IntoHandler<'system, S, T, E>
 where
-    S: Clone,
     E: Effect<'system, S, T>,
 {
     fn new(effect: E) -> Self {
@@ -112,13 +105,13 @@ where
 
 impl<'system, S, T, E> Handler<'system, S, T> for IntoHandler<'system, S, T, E>
 where
-    S: Clone + Send + Sync + 'static,
+    S: Send + Sync + 'static,
     E: Effect<'system, S, T> + Send,
     T: Send,
 {
     type Future = Ready<()>;
 
-    fn call(self, state: &'system mut S, context: Context<S>) -> Self::Future {
+    fn call(self, state: &'system mut S, context: &Context<S>) -> Self::Future {
         self.effect.call(state, context);
         ready(())
     }
@@ -126,7 +119,7 @@ where
 
 impl<'system, S, T, E> From<E> for Task<'system, S, T, E, IntoHandler<'system, S, T, E>>
 where
-    S: Clone + Send + Sync + 'static,
+    S: Send + Sync + 'static,
     E: Effect<'system, S, T> + Send,
     T: Send,
 {
