@@ -10,7 +10,7 @@ pub trait Handler<'system, S, T>: Clone + Send + Sized {
 
     fn call(self, state: &'system mut S, context: &Context<S>) -> Self::Future;
 
-    fn with_effect<E: Effect<'system, S, T>>(self, effect: E) -> Task<'system, S, T, E, Self> {
+    fn with_effect<E: Effect<'system, S, T>>(self, effect: E) -> Task<S, T, E, Self> {
         Task::new(effect, self)
     }
 }

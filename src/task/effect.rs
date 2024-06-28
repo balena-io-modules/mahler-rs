@@ -8,13 +8,13 @@ use crate::state::{Context, FromContext, FromState};
 use super::handler::Handler;
 use super::Task;
 
-pub trait Effect<'system, S, T>: Clone + Sized {
+pub trait Effect<'system, S, T>: Clone + Send + Sized {
     fn call(self, state: &'system mut S, context: &Context<S>);
 }
 
 impl<'system, F, S> Effect<'system, S, ()> for F
 where
-    F: FnOnce() + Clone + 'static,
+    F: FnOnce() + Clone + Send + 'static,
     S: Send + 'static,
 {
     fn call(self, _: &mut S, _: &Context<S>) {
@@ -29,7 +29,7 @@ macro_rules! impl_effect_handler {
         #[allow(non_snake_case, unused)]
         impl<'system, S, F, $first, $($ty,)*> Effect<'system, S, ($first, $($ty,)*)> for F
         where
-            F: FnOnce($first, $($ty,)*) + Clone +'static,
+            F: FnOnce($first, $($ty,)*) + Clone + Send +'static,
             S: 'static,
             $first: FromState<'system, S>,
             $($ty: FromContext<S>,)*
@@ -117,7 +117,7 @@ where
     }
 }
 
-impl<'system, S, T, E> From<E> for Task<'system, S, T, E, IntoHandler<'system, S, T, E>>
+impl<'system, S, T, E> From<E> for Task<S, T, E, IntoHandler<'system, S, T, E>>
 where
     S: Send + Sync + 'static,
     E: Effect<'system, S, T> + Send,

@@ -5,18 +5,14 @@ use crate::state::Context;
 use super::effect::Effect;
 use super::Handler;
 
-pub struct Action<'system, S, T, E, A>
-where
-    E: Effect<'system, S, T>,
-    A: Handler<'system, S, T>,
-{
+pub struct Action<S, T, E, A> {
     effect: E,
     action: A,
     context: Context<S>,
-    _args: PhantomData<&'system T>,
+    _args: PhantomData<T>,
 }
 
-impl<'system, S, T, E, A> Action<'system, S, T, E, A>
+impl<'system, S, T, E, A> Action<S, T, E, A>
 where
     E: Effect<'system, S, T>,
     A: Handler<'system, S, T>,
@@ -26,7 +22,7 @@ where
             effect,
             action,
             context,
-            _args: PhantomData::<&'system T>,
+            _args: PhantomData::<T>,
         }
     }
 

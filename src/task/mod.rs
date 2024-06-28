@@ -10,18 +10,14 @@ pub use action::Action;
 use effect::Effect;
 pub use handler::Handler;
 
-pub struct Task<'system, S, T, E, A>
-where
-    E: Effect<'system, S, T>,
-    A: Handler<'system, S, T>,
-{
+pub struct Task<S, T, E, A> {
     effect: E,
     action: A,
-    _state: PhantomData<&'system S>,
+    _state: PhantomData<S>,
     _args: PhantomData<T>,
 }
 
-impl<'system, S, T, E, A> Task<'system, S, T, E, A>
+impl<'system, S, T, E, A> Task<S, T, E, A>
 where
     E: Effect<'system, S, T>,
     A: Handler<'system, S, T>,
@@ -30,12 +26,12 @@ where
         Task {
             effect,
             action,
-            _state: PhantomData::<&'system S>,
+            _state: PhantomData::<S>,
             _args: PhantomData::<T>,
         }
     }
 
-    pub fn bind(self, context: Context<S>) -> Action<'system, S, T, E, A> {
+    pub fn bind(self, context: Context<S>) -> Action<S, T, E, A> {
         Action::new(self.effect, self.action, context)
     }
 }
