@@ -1,24 +1,40 @@
-use crate::state::{Context, FromState};
+use crate::path::Path;
+use crate::system::{Context, IntoPatch, System, SystemReader};
+use json_patch::{diff, Patch};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::{self};
 use std::ops::{Deref, DerefMut};
 
-pub struct State<'system, S>(&'system mut S);
+#[derive(Debug)]
+pub struct State<S>(S);
 
-impl<'system, S> FromState<'system, S> for State<'system, S> {
-    fn from_state(state: &'system mut S, _: &Context<S>) -> Self {
-        State(state)
+impl<S: DeserializeOwned> SystemReader<S> for State<S> {
+    fn from_system(system: &System, _: &Context<S>) -> Self {
+        State(system.state().unwrap())
     }
 }
 
-impl<'system, S> Deref for State<'system, S> {
+impl<S: Clone + Serialize> IntoPatch for State<S> {
+    fn into_patch(self, system: &System) -> Patch {
+        // Get the root value
+        let before = system.pointer(Path::default());
+        let after = serde_json::to_value(self.0).unwrap();
+
+        diff(before, &after)
+    }
+}
+
+impl<S> Deref for State<S> {
     type Target = S;
 
     fn deref(&self) -> &Self::Target {
-        self.0
+        &self.0
     }
 }
 
-impl<'system, S> DerefMut for State<'system, S> {
+impl<S> DerefMut for State<S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0
+        &mut self.0
     }
 }

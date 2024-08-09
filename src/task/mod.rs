@@ -4,7 +4,7 @@ mod handler;
 
 use std::marker::PhantomData;
 
-use crate::state::Context;
+use crate::system::Context;
 
 pub use action::Action;
 use effect::Effect;
@@ -17,10 +17,11 @@ pub struct Task<S, T, E, A> {
     _args: PhantomData<T>,
 }
 
-impl<'system, S, T, E, A> Task<S, T, E, A>
+impl<S, T, E, A> Task<S, T, E, A>
 where
-    E: Effect<'system, S, T>,
-    A: Handler<'system, S, T>,
+    S: Clone,
+    E: Effect<S, T>,
+    A: Handler<S, T>,
 {
     pub fn new(effect: E, action: A) -> Self {
         Task {
@@ -40,55 +41,70 @@ where
 mod tests {
     use super::*;
     use crate::extract::{State, Target};
-    use crate::state::Context;
+    use crate::system::{Context, System};
+    use json_patch::Patch;
+    use serde_json::{from_value, json};
 
-    fn my_task_effect(mut counter: State<i32>, Target(tgt): Target<i32>) {
+    fn my_task_effect(mut counter: State<i32>, Target(tgt): Target<i32>) -> State<i32> {
         if *counter < tgt {
             *counter += 1;
         }
+
+        // State implements IntoPatch
+        counter
     }
 
-    async fn my_task_action(mut counter: State<'_, i32>, tgt: Target<i32>) {
+    async fn my_task_action(mut counter: State<i32>, tgt: Target<i32>) -> State<i32> {
         if *counter < *tgt {
             *counter += 1;
         }
+
+        counter
     }
 
     #[test]
     fn it_allows_to_dry_run_tasks() {
+        let system = System::from(0);
         let task = Task::from(my_task_effect);
         let action = task.bind(Context { target: 1 });
 
-        let mut counter = 0;
-        action.dry_run(&mut counter);
-
-        // The referenced value was modified
-        assert_eq!(counter, 1);
+        // Get the list of changes that the action performs
+        let changes = action.dry_run(&system);
+        assert_eq!(
+            changes,
+            from_value::<Patch>(json!([
+              { "op": "replace", "path": "", "value": 1 },
+            ]))
+            .unwrap()
+        );
     }
 
     #[tokio::test]
     async fn it_runs_async_actions() {
+        let mut system = System::from(0);
         let task = Task::from(my_task_effect);
         let action = task.bind(Context { target: 1 });
 
-        let mut counter = 0;
         // Run the action
-        action.run(&mut counter).await;
+        action.run(&mut system).await;
+
+        let state = system.state::<i32>().unwrap();
 
         // The referenced value was modified
-        assert_eq!(counter, 1);
+        assert_eq!(state, 1);
     }
 
     #[tokio::test]
     async fn it_allows_extending_actions_with_effect() {
+        let mut system = System::from(0);
         let task = my_task_action.with_effect(my_task_effect);
         let action = task.bind(Context { target: 1 });
 
-        let mut counter = 0;
         // Run the action
-        action.run(&mut counter).await;
+        action.run(&mut system).await;
 
-        // The referenced value was modified
-        assert_eq!(counter, 1);
+        // Check that the system state was modified
+        let state = system.state::<i32>().unwrap();
+        assert_eq!(state, 1);
     }
 }

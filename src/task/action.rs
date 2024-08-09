@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
-use crate::state::Context;
+use crate::system::{Context, System};
+use json_patch::Patch;
 
 use super::effect::Effect;
 use super::Handler;
@@ -12,10 +13,11 @@ pub struct Action<S, T, E, A> {
     _args: PhantomData<T>,
 }
 
-impl<'system, S, T, E, A> Action<S, T, E, A>
+impl<S, T, E, A> Action<S, T, E, A>
 where
-    E: Effect<'system, S, T>,
-    A: Handler<'system, S, T>,
+    E: Effect<S, T>,
+    A: Handler<S, T>,
+    S: Clone,
 {
     pub fn new(effect: E, action: A, context: Context<S>) -> Self {
         Action {
@@ -26,11 +28,16 @@ where
         }
     }
 
-    pub fn dry_run(self, state: &'system mut S) {
-        self.effect.call(state, &self.context);
+    /// Dry run produces a list of changes that the action
+    /// performs
+    pub fn dry_run(self, system: &System) -> Patch {
+        self.effect.call(system.clone(), self.context)
     }
 
-    pub fn run(self, state: &'system mut S) -> A::Future {
-        self.action.call(state, &self.context)
+    pub async fn run(self, system: &mut System) {
+        let changes = self.action.call(system.clone(), self.context.clone()).await;
+
+        // TODO: return an error instead
+        system.patch(changes).unwrap();
     }
 }

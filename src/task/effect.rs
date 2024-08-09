@@ -1,25 +1,16 @@
+use json_patch::Patch;
 use std::{
     future::{ready, Ready},
     marker::PhantomData,
 };
 
-use crate::state::{Context, FromContext, FromState};
+use crate::system::{Context, IntoPatch, System, SystemReader};
 
 use super::handler::Handler;
 use super::Task;
 
-pub trait Effect<'system, S, T>: Clone + Send + Sized {
-    fn call(self, state: &'system mut S, context: &Context<S>);
-}
-
-impl<'system, F, S> Effect<'system, S, ()> for F
-where
-    F: FnOnce() + Clone + Send + 'static,
-    S: Send + 'static,
-{
-    fn call(self, _: &mut S, _: &Context<S>) {
-        (self)()
-    }
+pub trait Effect<S, T>: Clone + Send + Sized {
+    fn call(self, system: System, context: Context<S>) -> Patch;
 }
 
 macro_rules! impl_effect_handler {
@@ -27,25 +18,23 @@ macro_rules! impl_effect_handler {
         $first:ident, $($ty:ident),*
     ) => {
         #[allow(non_snake_case, unused)]
-        impl<'system, S, F, $first, $($ty,)*> Effect<'system, S, ($first, $($ty,)*)> for F
+        impl<S, F, $($ty,)* Res> Effect<S, ($($ty,)*)> for F
         where
-            F: FnOnce($first, $($ty,)*) + Clone + Send +'static,
+            F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
+            Res: IntoPatch,
             S: 'static,
-            $first: FromState<'system, S>,
-            $($ty: FromContext<S>,)*
+            $($ty: SystemReader<S>,)*
         {
 
-            fn call(self, state: &'system mut S, context: &Context<S>) {
+            fn call(self, system: System, context: Context<S>) -> Patch {
                 $(
-                    let $ty = $ty::from_context(state, context);
+                    let $ty = $ty::from_system(&system, &context);
                 )*
 
-                // From system requires a mutable reference so we have to
-                // do this last
-                let $first = $first::from_state(state, context);
+                let res = (self)($($ty,)*);
 
-
-                (self)($first, $($ty,)*)
+                // Update the system
+                res.into_patch(&system)
             }
         }
     };
@@ -68,60 +57,60 @@ impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14
 impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15);
 impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16);
 
-pub struct IntoHandler<'system, S, T, E>
+pub struct IntoHandler<S, T, E>
 where
-    E: Effect<'system, S, T>,
+    E: Effect<S, T>,
 {
     effect: E,
-    _state: PhantomData<&'system S>,
+    _state: PhantomData<S>,
     _args: PhantomData<T>,
 }
 
-impl<'system, S, T, E> Clone for IntoHandler<'system, S, T, E>
+impl<S, T, E> Clone for IntoHandler<S, T, E>
 where
-    E: Effect<'system, S, T>,
+    E: Effect<S, T>,
 {
     fn clone(&self) -> Self {
         IntoHandler {
             effect: self.effect.clone(),
-            _state: PhantomData::<&'system S>,
+            _state: PhantomData::<S>,
             _args: PhantomData::<T>,
         }
     }
 }
 
-impl<'system, S, T, E> IntoHandler<'system, S, T, E>
+impl<S, T, E> IntoHandler<S, T, E>
 where
-    E: Effect<'system, S, T>,
+    E: Effect<S, T>,
 {
     fn new(effect: E) -> Self {
         IntoHandler {
             effect,
-            _state: PhantomData::<&'system S>,
+            _state: PhantomData::<S>,
             _args: PhantomData::<T>,
         }
     }
 }
 
-impl<'system, S, T, E> Handler<'system, S, T> for IntoHandler<'system, S, T, E>
+impl<S, T, E> Handler<S, T> for IntoHandler<S, T, E>
 where
-    S: Send + Sync + 'static,
-    E: Effect<'system, S, T> + Send,
-    T: Send,
+    S: Clone + Send + Sync + 'static,
+    E: Effect<S, T> + Send + 'static,
+    T: Send + 'static,
 {
-    type Future = Ready<()>;
+    type Future = Ready<Patch>;
 
-    fn call(self, state: &'system mut S, context: &Context<S>) -> Self::Future {
-        self.effect.call(state, context);
-        ready(())
+    fn call(self, system: System, context: Context<S>) -> Self::Future {
+        let patch = self.effect.call(system, context);
+        ready(patch)
     }
 }
 
-impl<'system, S, T, E> From<E> for Task<S, T, E, IntoHandler<'system, S, T, E>>
+impl<S, T, E> From<E> for Task<S, T, E, IntoHandler<S, T, E>>
 where
-    S: Send + Sync + 'static,
-    E: Effect<'system, S, T> + Send,
-    T: Send,
+    S: Clone + Send + Sync + 'static,
+    E: Effect<S, T> + Send + 'static,
+    T: Send + 'static,
 {
     fn from(effect: E) -> Self {
         Task::new(effect.clone(), IntoHandler::new(effect))
