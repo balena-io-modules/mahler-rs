@@ -1,6 +1,8 @@
 use crate::path::Path;
 
 pub struct Context<S> {
+    // TODO: the target needs to be an option as
+    // it won't make sense for some operations
     pub target: S,
     pub path: Path,
 }

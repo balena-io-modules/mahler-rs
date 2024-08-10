@@ -6,40 +6,45 @@ use serde::Serialize;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
-pub struct View<S, O = S> {
-    state: O,
+pub struct View<S, T = S> {
+    state: T,
     path: Path,
-    _marker: PhantomData<S>,
+    _system: PhantomData<S>,
 }
 
-impl<S, O: DeserializeOwned> FromSystem<S> for View<S, O> {
+impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
     fn from_system(system: &System, context: &Context<S>) -> Self {
+        // TODO: if the parent of the target does not exist
+        // this function should error, if the parent exists but the
+        // value does not, then the state should be None
         let value = system.pointer(context.path.clone());
-        let state = serde_json::from_value::<O>(value.clone()).unwrap();
+
+        // TODO: return an error here
+        let state = serde_json::from_value::<T>(value.clone()).unwrap();
 
         View {
             state,
             path: context.path.clone(),
-            _marker: PhantomData::<S>,
+            _system: PhantomData::<S>,
         }
     }
 }
 
-impl<S, O> Deref for View<S, O> {
-    type Target = O;
+impl<S, T> Deref for View<S, T> {
+    type Target = T;
 
     fn deref(&self) -> &Self::Target {
         &self.state
     }
 }
 
-impl<S, O> DerefMut for View<S, O> {
+impl<S, T> DerefMut for View<S, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.state
     }
 }
 
-impl<S, O: Clone + Serialize> IntoPatch for View<S, O> {
+impl<S, T: Serialize> IntoPatch for View<S, T> {
     fn into_patch(self, system: &System) -> Patch {
         // Get the root value
         let before = system.pointer(self.path);
@@ -49,7 +54,7 @@ impl<S, O: Clone + Serialize> IntoPatch for View<S, O> {
     }
 }
 
-impl<S, O: Serialize + 'static> IntoSystemWriter for View<S, O> {
+impl<S, T: Serialize + 'static> IntoSystemWriter for View<S, T> {
     fn into_system_writer(self) -> SystemWriter {
         SystemWriter::new(|system: &mut System| {
             let root = system.pointer_mut(self.path);

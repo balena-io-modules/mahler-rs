@@ -37,7 +37,8 @@ where
 
 impl System {
     pub(crate) fn pointer(&self, path: Path) -> &Value {
-        // Path already validates the path
+        // TODO: this function should return Option<&Value> as the
+        // path may not exist on the state
         self.state.pointer(path.as_ref()).unwrap()
     }
 
@@ -46,6 +47,8 @@ impl System {
     }
 
     pub(crate) fn pointer_mut(&mut self, path: Path) -> &mut Value {
+        // TODO: this function should return Option<&mut Value> as the
+        // path may not exist on the state
         self.state.pointer_mut(path.as_ref()).unwrap()
     }
 

@@ -45,8 +45,8 @@ mod tests {
     use json_patch::Patch;
     use serde_json::{from_value, json};
 
-    fn my_task_effect(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
-        if *counter < tgt {
+    fn my_task_effect(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
+        if *counter < *tgt {
             *counter += 1;
         }
 
