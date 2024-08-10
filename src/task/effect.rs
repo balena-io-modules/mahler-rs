@@ -4,7 +4,7 @@ use std::{
     marker::PhantomData,
 };
 
-use crate::system::{Context, FromSystem, IntoPatch, System};
+use crate::system::{Context, FromSystem, IntoPatch, System, SystemWriter};
 
 use super::handler::Handler;
 use super::Task;
@@ -98,11 +98,14 @@ where
     E: Effect<S, T> + Send + 'static,
     T: Send + 'static,
 {
-    type Future = Ready<Patch>;
+    type Future = Ready<SystemWriter>;
 
     fn call(self, system: System, context: Context<S>) -> Self::Future {
         let patch = self.effect.call(system, context);
-        ready(patch)
+        ready(SystemWriter::new(|system: &mut System| {
+            // TODO: this should return a result
+            system.patch(patch).unwrap();
+        }))
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::path::Path;
-use crate::system::{Context, FromSystem, IntoPatch, System};
+use crate::system::{Context, FromSystem, IntoPatch, IntoSystemWriter, System, SystemWriter};
 use json_patch::{diff, Patch};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -22,6 +22,15 @@ impl<S: Clone + Serialize> IntoPatch for State<S> {
         let after = serde_json::to_value(self.0).unwrap();
 
         diff(before, &after)
+    }
+}
+
+impl<S: Serialize + 'static> IntoSystemWriter for State<S> {
+    fn into_system_writer(self) -> SystemWriter {
+        SystemWriter::new(move |system: &mut System| {
+            let root = system.pointer_mut(Path::default());
+            *root = serde_json::to_value(self.0).unwrap();
+        })
     }
 }
 

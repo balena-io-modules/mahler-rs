@@ -35,9 +35,7 @@ where
     }
 
     pub async fn run(self, system: &mut System) {
-        let changes = self.action.call(system.clone(), self.context.clone()).await;
-
-        // TODO: return an error instead
-        system.patch(changes).unwrap();
+        let sys_writer = self.action.call(system.clone(), self.context.clone()).await;
+        sys_writer.write(system);
     }
 }
