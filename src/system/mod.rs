@@ -36,6 +36,10 @@ where
 }
 
 impl System {
+    pub(crate) fn root(&self) -> &Value {
+        &self.state
+    }
+
     pub(crate) fn pointer(&self, path: Path) -> &Value {
         // TODO: this function should return Option<&Value> as the
         // path may not exist on the state

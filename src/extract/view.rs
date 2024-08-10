@@ -47,10 +47,17 @@ impl<S, T> DerefMut for View<S, T> {
 impl<S, T: Serialize> IntoPatch for View<S, T> {
     fn into_patch(self, system: &System) -> Patch {
         // Get the root value
-        let before = system.pointer(self.path);
-        let after = serde_json::to_value(self.state).unwrap();
+        let mut system_after = system.clone();
 
-        diff(before, &after)
+        // Write the changes to the system copy
+        let pointer = system_after.pointer_mut(self.path);
+
+        // Should we use error handling here? A serialization error
+        // at this point would be strange
+        *pointer = serde_json::to_value(self.state).unwrap();
+
+        // Return the difference between the roots
+        diff(system.root(), system_after.root())
     }
 }
 
