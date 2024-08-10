@@ -40,12 +40,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract::{State, Target};
+    use crate::extract::{Target, View};
     use crate::system::{Context, System};
     use json_patch::Patch;
     use serde_json::{from_value, json};
 
-    fn my_task_effect(mut counter: State<i32>, Target(tgt): Target<i32>) -> State<i32> {
+    fn my_task_effect(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
         if *counter < tgt {
             *counter += 1;
         }
@@ -54,7 +54,7 @@ mod tests {
         counter
     }
 
-    async fn my_task_action(mut counter: State<i32>, tgt: Target<i32>) -> State<i32> {
+    async fn my_task_action(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
             *counter += 1;
         }
@@ -66,7 +66,7 @@ mod tests {
     fn it_allows_to_dry_run_tasks() {
         let system = System::from(0);
         let task = Task::from(my_task_effect);
-        let action = task.bind(Context { target: 1 });
+        let action = task.bind(Context::from(1));
 
         // Get the list of changes that the action performs
         let changes = action.dry_run(&system);
@@ -83,7 +83,7 @@ mod tests {
     async fn it_runs_async_actions() {
         let mut system = System::from(0);
         let task = Task::from(my_task_effect);
-        let action = task.bind(Context { target: 1 });
+        let action = task.bind(Context::from(1));
 
         // Run the action
         action.run(&mut system).await;
@@ -98,7 +98,7 @@ mod tests {
     async fn it_allows_extending_actions_with_effect() {
         let mut system = System::from(0);
         let task = my_task_action.with_effect(my_task_effect);
-        let action = task.bind(Context { target: 1 });
+        let action = task.bind(Context::from(1));
 
         // Run the action
         action.run(&mut system).await;

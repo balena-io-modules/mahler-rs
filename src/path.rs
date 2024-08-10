@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Path(String);
 
 #[derive(Debug)]

@@ -1,5 +1,5 @@
-mod state;
 mod target;
+mod view;
 
-pub use state::*;
 pub use target::*;
+pub use view::*;
