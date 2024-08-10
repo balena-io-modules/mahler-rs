@@ -4,7 +4,7 @@ use std::{
     marker::PhantomData,
 };
 
-use crate::system::{Context, IntoPatch, System, SystemReader};
+use crate::system::{Context, FromSystem, IntoPatch, System};
 
 use super::handler::Handler;
 use super::Task;
@@ -23,7 +23,7 @@ macro_rules! impl_effect_handler {
             F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
             Res: IntoPatch,
             S: 'static,
-            $($ty: SystemReader<S>,)*
+            $($ty: FromSystem<S>,)*
         {
 
             fn call(self, system: System, context: Context<S>) -> Patch {

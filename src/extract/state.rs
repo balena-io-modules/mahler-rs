@@ -1,5 +1,5 @@
 use crate::path::Path;
-use crate::system::{Context, IntoPatch, System, SystemReader};
+use crate::system::{Context, FromSystem, IntoPatch, System};
 use json_patch::{diff, Patch};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -9,7 +9,7 @@ use std::ops::{Deref, DerefMut};
 #[derive(Debug)]
 pub struct State<S>(S);
 
-impl<S: DeserializeOwned> SystemReader<S> for State<S> {
+impl<S: DeserializeOwned> FromSystem<S> for State<S> {
     fn from_system(system: &System, _: &Context<S>) -> Self {
         State(system.state().unwrap())
     }

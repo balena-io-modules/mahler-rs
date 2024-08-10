@@ -5,7 +5,7 @@ use std::pin::Pin;
 use super::effect::Effect;
 use super::Task;
 
-use crate::system::{Context, IntoPatch, System, SystemReader};
+use crate::system::{Context, FromSystem, IntoPatch, System};
 
 pub trait Handler<S: Clone, T>: Clone + Send + Sized + 'static {
     type Future: Future<Output = Patch> + Send + 'static;
@@ -28,7 +28,7 @@ macro_rules! impl_action_handler {
             S: Clone + Send + Sync + 'static,
             Fut: Future<Output = Res> + Send,
             Res: IntoPatch,
-            $($ty: SystemReader<S> + Send,)*
+            $($ty: FromSystem<S> + Send,)*
         {
 
             // TODO: this should return a result

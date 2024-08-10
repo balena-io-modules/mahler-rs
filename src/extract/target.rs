@@ -1,9 +1,9 @@
-use crate::system::{Context, System, SystemReader};
+use crate::system::{Context, FromSystem, System};
 use std::ops::Deref;
 
 pub struct Target<S>(pub S);
 
-impl<S: Clone> SystemReader<S> for Target<S> {
+impl<S: Clone> FromSystem<S> for Target<S> {
     fn from_system(_: &System, context: &Context<S>) -> Self {
         Target(context.target.clone())
     }
