@@ -16,11 +16,11 @@ pub struct Action<S> {
     run: Run<S>,
 }
 
-impl<S: Clone> Action<S> {
-    pub fn new<E, H, T>(effect: E, handler: H, context: Context<S>) -> Self
+impl<S> Action<S> {
+    pub(crate) fn new<E, H, T>(effect: E, handler: H, context: Context<S>) -> Self
     where
-        E: Effect<S, T> + 'static,
-        H: Handler<S, T> + 'static,
+        E: Effect<S, T>,
+        H: Handler<S, T>,
     {
         Self {
             context,

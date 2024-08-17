@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use crate::system::{Context, FromSystem, IntoPatch, System};
 
-pub trait Handler<S: Clone, T>: Clone + Send + Sized + 'static {
+pub trait Handler<S, T>: Clone + Send + Sized + 'static {
     type Future: Future<Output = Patch> + 'static;
 
     fn call(self, state: System, context: Context<S>) -> Self::Future;
@@ -14,7 +14,7 @@ pub trait Handler<S: Clone, T>: Clone + Send + Sized + 'static {
     fn with_effect<E>(self, effect: E) -> Task<S>
     where
         S: 'static,
-        E: Effect<S, T> + 'static,
+        E: Effect<S, T>,
     {
         Task::new(effect, self)
     }
@@ -28,7 +28,7 @@ macro_rules! impl_action_handler {
         impl<S, F, $($ty,)* Fut, Res> Handler<S, ($($ty,)*)> for F
         where
             F: FnOnce($($ty,)*) -> Fut + Clone + Send + 'static,
-            S: Clone + Send + Sync + 'static,
+            S: Send + Sync + 'static,
             Fut: Future<Output = Res> + Send,
             Res: IntoPatch,
             $($ty: FromSystem<S> + Send,)*

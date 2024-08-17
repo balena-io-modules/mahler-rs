@@ -8,7 +8,7 @@ use crate::system::{Context, FromSystem, IntoPatch, System};
 
 use super::handler::Handler;
 
-pub trait Effect<S, T>: Clone + Send + Sized {
+pub trait Effect<S, T>: Clone + Send + Sized + 'static {
     fn call(self, system: System, context: Context<S>) -> Patch;
 }
 
@@ -21,7 +21,6 @@ macro_rules! impl_effect_handler {
         where
             F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
             Res: IntoPatch,
-            S: 'static,
             $($ty: FromSystem<S>,)*
         {
 
@@ -93,7 +92,7 @@ where
 
 impl<S, T, E> Handler<S, T> for IntoHandler<S, T, E>
 where
-    S: Clone + Send + Sync + 'static,
+    S: Send + Sync + 'static,
     E: Effect<S, T> + Send + 'static,
     T: Send + 'static,
 {

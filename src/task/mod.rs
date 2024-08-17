@@ -8,14 +8,17 @@ use effect::{Effect, IntoHandler};
 pub use handler::Handler;
 
 pub struct Task<S> {
+    // TODO: it would be great if this could be a
+    // Box<Fn(Context) -> Action<S>>, that way we could deref
+    // the task
     bind: Box<dyn ToAction<S>>,
 }
 
-impl<S: Clone> Task<S> {
+impl<S> Task<S> {
     fn new<E, H, T>(effect: E, handler: H) -> Self
     where
-        E: Effect<S, T> + 'static,
-        H: Handler<S, T> + 'static,
+        E: Effect<S, T>,
+        H: Handler<S, T>,
         S: 'static,
     {
         Self {
@@ -56,7 +59,7 @@ mod tests {
             *counter += 1;
         }
 
-        // State implements IntoPatch
+        // View implements IntoPatch
         counter
     }
 
