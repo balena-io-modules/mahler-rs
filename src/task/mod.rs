@@ -1,39 +1,45 @@
 mod action;
 mod effect;
 mod handler;
-
-use std::marker::PhantomData;
-
 use crate::system::Context;
-
 pub use action::Action;
-use effect::Effect;
+use action::{ActionBuilder, ToAction};
+use effect::{Effect, IntoHandler};
 pub use handler::Handler;
 
-pub struct Task<S, T, E, A> {
-    effect: E,
-    action: A,
-    _state: PhantomData<S>,
-    _args: PhantomData<T>,
+pub struct Task<S> {
+    bind: Box<dyn ToAction<S>>,
 }
 
-impl<S, T, E, A> Task<S, T, E, A>
-where
-    S: Clone,
-    E: Effect<S, T>,
-    A: Handler<S, T>,
-{
-    pub fn new(effect: E, action: A) -> Self {
-        Task {
-            effect,
-            action,
-            _state: PhantomData::<S>,
-            _args: PhantomData::<T>,
+impl<S: Clone> Task<S> {
+    fn new<E, H, T>(effect: E, handler: H) -> Self
+    where
+        E: Effect<S, T> + 'static,
+        H: Handler<S, T> + 'static,
+        S: 'static,
+    {
+        Self {
+            bind: Box::new(ActionBuilder {
+                effect,
+                handler,
+                build: |effect: E, handler: H, context: Context<S>| {
+                    Action::new(effect, handler, context)
+                },
+            }),
         }
     }
 
-    pub fn bind(self, context: Context<S>) -> Action<S, T, E, A> {
-        Action::new(self.effect, self.action, context)
+    pub fn from<E, T>(effect: E) -> Self
+    where
+        E: Effect<S, T> + 'static,
+        T: Send + 'static,
+        S: Send + Sync + 'static,
+    {
+        Self::new(effect.clone(), IntoHandler::new(effect))
+    }
+
+    pub fn bind(&self, context: Context<S>) -> Action<S> {
+        self.bind.to_action(context)
     }
 }
 

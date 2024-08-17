@@ -1,5 +1,5 @@
 use crate::path::Path;
-use crate::system::{Context, FromSystem, IntoPatch, IntoSystemWriter, System, SystemWriter};
+use crate::system::{Context, FromSystem, IntoPatch, System};
 use json_patch::{diff, Patch};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -58,14 +58,5 @@ impl<S, T: Serialize> IntoPatch for View<S, T> {
 
         // Return the difference between the roots
         diff(system.root(), system_after.root())
-    }
-}
-
-impl<S, T: Serialize + 'static> IntoSystemWriter for View<S, T> {
-    fn into_system_writer(self) -> SystemWriter {
-        SystemWriter::new(|system: &mut System| {
-            let root = system.pointer_mut(self.path);
-            *root = serde_json::to_value(self.state).unwrap();
-        })
     }
 }

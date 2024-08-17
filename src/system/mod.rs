@@ -8,8 +8,6 @@ mod into_patch;
 pub(crate) use into_patch::*;
 mod from_system;
 pub(crate) use from_system::*;
-mod system_writer;
-pub(crate) use system_writer::*;
 mod context;
 pub use context::*;
 

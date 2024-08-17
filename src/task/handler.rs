@@ -1,17 +1,21 @@
+use super::effect::Effect;
+use super::Task;
+use json_patch::Patch;
 use std::future::Future;
 use std::pin::Pin;
 
-use super::effect::Effect;
-use super::Task;
-
-use crate::system::{Context, FromSystem, IntoSystemWriter, System, SystemWriter};
+use crate::system::{Context, FromSystem, IntoPatch, System};
 
 pub trait Handler<S: Clone, T>: Clone + Send + Sized + 'static {
-    type Future: Future<Output = SystemWriter> + 'static;
+    type Future: Future<Output = Patch> + 'static;
 
     fn call(self, state: System, context: Context<S>) -> Self::Future;
 
-    fn with_effect<E: Effect<S, T>>(self, effect: E) -> Task<S, T, E, Self> {
+    fn with_effect<E>(self, effect: E) -> Task<S>
+    where
+        S: 'static,
+        E: Effect<S, T> + 'static,
+    {
         Task::new(effect, self)
     }
 }
@@ -26,12 +30,12 @@ macro_rules! impl_action_handler {
             F: FnOnce($($ty,)*) -> Fut + Clone + Send + 'static,
             S: Clone + Send + Sync + 'static,
             Fut: Future<Output = Res> + Send,
-            Res: IntoSystemWriter,
+            Res: IntoPatch,
             $($ty: FromSystem<S> + Send,)*
         {
 
             // TODO: this should return a result
-            type Future = Pin<Box<dyn Future<Output = SystemWriter> + Send>>;
+            type Future = Pin<Box<dyn Future<Output = Patch> + Send>>;
 
             fn call(self, system: System, context: Context<S>) -> Self::Future {
                 Box::pin(async move {
@@ -43,7 +47,7 @@ macro_rules! impl_action_handler {
                     let res = (self)($($ty,)*).await;
 
                     // Update the system using the response
-                    res.into_system_writer()
+                    res.into_patch(&system)
                 })
             }
         }
