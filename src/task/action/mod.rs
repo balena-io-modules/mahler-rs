@@ -1,9 +1,11 @@
 use crate::system::{Context, System};
 use json_patch::Patch;
 
-use super::effect::Effect;
-use super::handler::HandlerOutput;
-use super::Handler;
+pub(crate) mod effect;
+mod handler;
+use effect::Effect;
+pub use handler::Handler;
+use handler::HandlerOutput;
 
 type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Patch>;
 type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> HandlerOutput>;

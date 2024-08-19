@@ -1,11 +1,8 @@
 mod action;
-mod effect;
-mod handler;
 use crate::system::Context;
-pub use action::Action;
+use action::effect::{Effect, IntoHandler};
+pub use action::{Action, Handler};
 use action::{ActionBuilder, ToAction};
-use effect::{Effect, IntoHandler};
-pub use handler::Handler;
 
 pub struct Task<S> {
     builder: Box<dyn ToAction<S>>,

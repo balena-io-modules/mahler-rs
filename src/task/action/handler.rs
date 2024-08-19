@@ -1,5 +1,5 @@
 use super::effect::Effect;
-use super::Task;
+use crate::task::Task;
 use json_patch::Patch;
 use std::future::Future;
 use std::pin::Pin;
