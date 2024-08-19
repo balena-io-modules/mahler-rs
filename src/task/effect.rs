@@ -1,12 +1,10 @@
+use super::handler::Handler;
+use crate::system::{Context, FromSystem, IntoPatch, System};
 use json_patch::Patch;
 use std::{
     future::{ready, Ready},
     marker::PhantomData,
 };
-
-use crate::system::{Context, FromSystem, IntoPatch, System};
-
-use super::handler::Handler;
 
 pub trait Effect<S, T>: Clone + Send + Sized + 'static {
     fn call(self, system: System, context: Context<S>) -> Patch;

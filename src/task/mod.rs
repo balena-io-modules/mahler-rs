@@ -8,10 +8,7 @@ use effect::{Effect, IntoHandler};
 pub use handler::Handler;
 
 pub struct Task<S> {
-    // TODO: it would be great if this could be a
-    // Box<Fn(Context) -> Action<S>>, that way we could deref
-    // the task
-    bind: Box<dyn ToAction<S>>,
+    builder: Box<dyn ToAction<S>>,
 }
 
 impl<S> Task<S> {
@@ -22,7 +19,7 @@ impl<S> Task<S> {
         S: 'static,
     {
         Self {
-            bind: Box::new(ActionBuilder {
+            builder: Box::new(ActionBuilder {
                 effect,
                 handler,
                 build: |effect: E, handler: H, context: Context<S>| {
@@ -42,7 +39,7 @@ impl<S> Task<S> {
     }
 
     pub fn bind(&self, context: Context<S>) -> Action<S> {
-        self.bind.to_action(context)
+        self.builder.to_action(context)
     }
 }
 

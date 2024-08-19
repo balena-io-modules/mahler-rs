@@ -1,14 +1,12 @@
 use crate::system::{Context, System};
 use json_patch::Patch;
-use std::future::Future;
-use std::pin::Pin;
 
 use super::effect::Effect;
+use super::handler::HandlerOutput;
 use super::Handler;
 
-type Output = Pin<Box<dyn Future<Output = Patch>>>;
 type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Patch>;
-type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> Output>;
+type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> HandlerOutput>;
 
 pub struct Action<S> {
     context: Context<S>,

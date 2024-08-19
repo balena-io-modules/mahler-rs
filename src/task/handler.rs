@@ -6,6 +6,9 @@ use std::pin::Pin;
 
 use crate::system::{Context, FromSystem, IntoPatch, System};
 
+// TODO: this should return a result
+pub(crate) type HandlerOutput = Pin<Box<dyn Future<Output = Patch>>>;
+
 pub trait Handler<S, T>: Clone + Send + Sized + 'static {
     type Future: Future<Output = Patch> + 'static;
 
@@ -34,8 +37,7 @@ macro_rules! impl_action_handler {
             $($ty: FromSystem<S> + Send,)*
         {
 
-            // TODO: this should return a result
-            type Future = Pin<Box<dyn Future<Output = Patch> + Send>>;
+            type Future = HandlerOutput;
 
             fn call(self, system: System, context: Context<S>) -> Self::Future {
                 Box::pin(async move {
