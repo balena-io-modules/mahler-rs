@@ -24,7 +24,8 @@ macro_rules! impl_effect_handler {
 
             fn call(self, system: System, context: Context<S>) -> Patch {
                 $(
-                    let $ty = $ty::from_system(&system, &context);
+                    // TODO: convert the error into a possible output
+                    let $ty = $ty::from_system(&system, &context).unwrap();
                 )*
 
                 let res = (self)($($ty,)*);

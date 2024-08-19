@@ -42,7 +42,8 @@ macro_rules! impl_action_handler {
             fn call(self, system: System, context: Context<S>) -> Self::Future {
                 Box::pin(async move {
                     $(
-                        let $ty = $ty::from_system(&system, &context);
+                        // TODO: convert the error to a valid output
+                        let $ty = $ty::from_system(&system, &context).unwrap();
                     )*
 
                     // Execute the handler

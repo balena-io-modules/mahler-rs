@@ -3,25 +3,33 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::marker::PhantomData;
 use std::ops::Deref;
+use thiserror::Error;
 
 pub struct Target<S, T = S> {
     target: T,
     _system: PhantomData<S>,
 }
 
-impl<S: Serialize + Clone, T: DeserializeOwned> FromSystem<S> for Target<S, T> {
-    fn from_system(_: &System, context: &Context<S>) -> Self {
-        // TODO: catch error
-        let tgt = serde_json::to_value(context.target.clone()).unwrap();
-        // TODO: Pointer may return None so the target field should be an option
-        let value = tgt.pointer(context.path.as_ref()).unwrap();
+#[derive(Error, Debug)]
+pub enum TargetError {
+    #[error("serialization/deserialization failed")]
+    SerdeError(#[from] serde_json::error::Error),
+}
 
-        // TODO: catch value
-        let target = serde_json::from_value::<T>(value.clone()).unwrap();
-        Target {
+impl<S: Serialize + Clone, T: DeserializeOwned> FromSystem<S> for Target<S, T> {
+    type Error = TargetError;
+
+    fn from_system(_: &System, context: &Context<S>) -> Result<Self, Self::Error> {
+        let tgt = serde_json::to_value(context.target.clone())?;
+
+        // TODO: allow target to be None
+        let value = tgt.pointer(context.path.as_ref()).unwrap();
+        let target = serde_json::from_value::<T>(value.clone())?;
+
+        Ok(Target {
             target,
             _system: PhantomData::<S>,
-        }
+        })
     }
 }
 

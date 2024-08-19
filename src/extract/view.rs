@@ -6,6 +6,16 @@ use serde::Serialize;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ViewError {
+    #[error("serialization/deserialization failed")]
+    SerdeError(#[from] serde_json::error::Error),
+    // #[error("`{0}` is not a valid path on the system state")]
+    // InvalidPath(String),
+}
+
 pub struct View<S, T = S> {
     state: T,
     path: Path,
@@ -13,20 +23,20 @@ pub struct View<S, T = S> {
 }
 
 impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
-    fn from_system(system: &System, context: &Context<S>) -> Self {
+    type Error = ViewError;
+
+    fn from_system(system: &System, context: &Context<S>) -> Result<Self, Self::Error> {
         // TODO: if the parent of the target does not exist
         // this function should error, if the parent exists but the
         // value does not, then the state should be None
         let value = system.pointer(context.path.clone());
+        let state = serde_json::from_value::<T>(value.clone())?;
 
-        // TODO: return an error here
-        let state = serde_json::from_value::<T>(value.clone()).unwrap();
-
-        View {
+        Ok(View {
             state,
             path: context.path.clone(),
             _system: PhantomData::<S>,
-        }
+        })
     }
 }
 
