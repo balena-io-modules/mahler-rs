@@ -1,20 +1,12 @@
+use crate::error::Error;
 use crate::path::Path;
-use crate::system::{Context, FromSystem, IntoPatch, System};
-use json_patch::{diff, Patch};
+use crate::system::{Context, FromSystem, System};
+use crate::task::{IntoOutcome, Outcome};
+use json_patch::diff;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum ViewError {
-    #[error("serialization/deserialization failed")]
-    SerdeError(#[from] serde_json::error::Error),
-    // #[error("`{0}` is not a valid path on the system state")]
-    // InvalidPath(String),
-}
 
 pub struct View<S, T = S> {
     state: T,
@@ -23,9 +15,12 @@ pub struct View<S, T = S> {
 }
 
 impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
-    type Error = ViewError;
+    type Error = Error;
 
-    fn from_system(system: &System, context: &Context<S>) -> Result<Self, Self::Error> {
+    fn from_system(
+        system: &System,
+        context: &Context<S>,
+    ) -> core::result::Result<Self, Self::Error> {
         // TODO: if the parent of the target does not exist
         // this function should error, if the parent exists but the
         // value does not, then the state should be None
@@ -54,8 +49,8 @@ impl<S, T> DerefMut for View<S, T> {
     }
 }
 
-impl<S, T: Serialize> IntoPatch for View<S, T> {
-    fn into_patch(self, system: &System) -> Patch {
+impl<S, T: Serialize> IntoOutcome for View<S, T> {
+    fn into_outcome(self, system: &System) -> Outcome {
         // Get the root value
         let mut system_after = system.clone();
 
@@ -64,9 +59,9 @@ impl<S, T: Serialize> IntoPatch for View<S, T> {
 
         // Should we use error handling here? A serialization error
         // at this point would be strange
-        *pointer = serde_json::to_value(self.state).unwrap();
+        *pointer = serde_json::to_value(self.state)?;
 
         // Return the difference between the roots
-        diff(system.root(), system_after.root())
+        Ok(diff(system.root(), system_after.root()))
     }
 }

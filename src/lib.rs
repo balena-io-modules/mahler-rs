@@ -1,3 +1,4 @@
+pub mod error;
 mod extract;
 mod path;
 

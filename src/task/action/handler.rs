@@ -1,16 +1,15 @@
 use super::effect::Effect;
 use crate::task::Task;
-use json_patch::Patch;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::system::{Context, FromSystem, IntoPatch, System};
+use crate::system::{Context, FromSystem, System};
+use crate::task::outcome::{IntoOutcome, Outcome};
 
-// TODO: this should return a result
-pub(crate) type HandlerOutput = Pin<Box<dyn Future<Output = Patch>>>;
+pub(crate) type HandlerOutput = Pin<Box<dyn Future<Output = Outcome>>>;
 
 pub trait Handler<S, T>: Clone + Send + Sized + 'static {
-    type Future: Future<Output = Patch> + 'static;
+    type Future: Future<Output = Outcome> + 'static;
 
     fn call(self, state: System, context: Context<S>) -> Self::Future;
 
@@ -33,7 +32,7 @@ macro_rules! impl_action_handler {
             F: FnOnce($($ty,)*) -> Fut + Clone + Send + 'static,
             S: Send + Sync + 'static,
             Fut: Future<Output = Res> + Send,
-            Res: IntoPatch,
+            Res: IntoOutcome,
             $($ty: FromSystem<S> + Send,)*
         {
 
@@ -42,15 +41,17 @@ macro_rules! impl_action_handler {
             fn call(self, system: System, context: Context<S>) -> Self::Future {
                 Box::pin(async move {
                     $(
-                        // TODO: convert the error to a valid output
-                        let $ty = $ty::from_system(&system, &context).unwrap();
+                        let $ty = match $ty::from_system(&system, &context) {
+                            Ok(value) => value,
+                            Err(failure) => return failure.into_outcome(&system)
+                        };
                     )*
 
                     // Execute the handler
                     let res = (self)($($ty,)*).await;
 
                     // Update the system using the response
-                    res.into_patch(&system)
+                   res.into_outcome(&system)
                 })
             }
         }

@@ -1,8 +1,10 @@
 mod action;
+mod outcome;
 use crate::system::Context;
 use action::effect::{Effect, IntoHandler};
 pub use action::{Action, Handler};
 use action::{ActionBuilder, ToAction};
+pub(crate) use outcome::{IntoOutcome, Outcome};
 
 pub struct Task<S> {
     builder: Box<dyn ToAction<S>>,
@@ -72,7 +74,7 @@ mod tests {
         let action = task.bind(Context::from(1));
 
         // Get the list of changes that the action performs
-        let changes = action.dry_run(&system);
+        let changes = action.dry_run(&system).unwrap();
         assert_eq!(
             changes,
             from_value::<Patch>(json!([
@@ -89,7 +91,7 @@ mod tests {
         let action = task.bind(Context::from(1));
 
         // Run the action
-        action.run(&mut system).await;
+        action.run(&mut system).await.unwrap();
 
         let state = system.state::<i32>().unwrap();
 
@@ -104,7 +106,7 @@ mod tests {
         let action = task.bind(Context::from(1));
 
         // Run the action
-        action.run(&mut system).await;
+        action.run(&mut system).await.unwrap();
 
         // Check that the system state was modified
         let state = system.state::<i32>().unwrap();

@@ -1,23 +1,17 @@
+use crate::error::Error;
 use crate::system::{Context, FromSystem, System};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use thiserror::Error;
 
 pub struct Target<S, T = S> {
     target: T,
     _system: PhantomData<S>,
 }
 
-#[derive(Error, Debug)]
-pub enum TargetError {
-    #[error("serialization/deserialization failed")]
-    SerdeError(#[from] serde_json::error::Error),
-}
-
 impl<S: Serialize + Clone, T: DeserializeOwned> FromSystem<S> for Target<S, T> {
-    type Error = TargetError;
+    type Error = Error;
 
     fn from_system(_: &System, context: &Context<S>) -> Result<Self, Self::Error> {
         let tgt = serde_json::to_value(context.target.clone())?;

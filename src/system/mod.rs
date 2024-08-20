@@ -2,10 +2,9 @@ use json_patch::{patch, Patch};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
+use crate::error::Error;
 use crate::path::Path;
 
-mod into_patch;
-pub(crate) use into_patch::*;
 mod from_system;
 pub(crate) use from_system::*;
 mod context;
@@ -14,12 +13,6 @@ pub use context::*;
 #[derive(Clone)]
 pub struct System {
     state: Value,
-}
-
-#[derive(Debug)]
-pub enum Error {
-    DeserializationError(String),
-    PatchError(String),
 }
 
 impl<S> From<S> for System
@@ -45,7 +38,8 @@ impl System {
     }
 
     pub(crate) fn patch(&mut self, changes: Patch) -> Result<(), Error> {
-        patch(&mut self.state, &changes).map_err(|e| Error::PatchError(e.to_string()))
+        patch(&mut self.state, &changes)?;
+        Ok(())
     }
 
     pub(crate) fn pointer_mut(&mut self, path: Path) -> &mut Value {
@@ -55,7 +49,7 @@ impl System {
     }
 
     pub fn state<S: DeserializeOwned>(&self) -> Result<S, Error> {
-        serde_json::from_value(self.state.clone())
-            .map_err(|e| Error::DeserializationError(e.to_string()))
+        let s = serde_json::from_value(self.state.clone())?;
+        Ok(s)
     }
 }

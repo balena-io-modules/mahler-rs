@@ -1,13 +1,15 @@
 use super::handler::Handler;
-use crate::system::{Context, FromSystem, IntoPatch, System};
-use json_patch::Patch;
+use crate::{
+    system::{Context, FromSystem, System},
+    task::outcome::{IntoOutcome, Outcome},
+};
 use std::{
     future::{ready, Ready},
     marker::PhantomData,
 };
 
 pub trait Effect<S, T>: Clone + Send + Sized + 'static {
-    fn call(self, system: System, context: Context<S>) -> Patch;
+    fn call(self, system: System, context: Context<S>) -> Outcome;
 }
 
 macro_rules! impl_effect_handler {
@@ -18,20 +20,22 @@ macro_rules! impl_effect_handler {
         impl<S, F, $($ty,)* Res> Effect<S, ($($ty,)*)> for F
         where
             F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
-            Res: IntoPatch,
+            Res: IntoOutcome,
             $($ty: FromSystem<S>,)*
         {
 
-            fn call(self, system: System, context: Context<S>) -> Patch {
+            fn call(self, system: System, context: Context<S>) -> Outcome {
                 $(
-                    // TODO: convert the error into a possible output
-                    let $ty = $ty::from_system(&system, &context).unwrap();
+                    let $ty = match $ty::from_system(&system, &context) {
+                        Ok(value) => value,
+                        Err(failure) => return failure.into_outcome(&system)
+                    };
                 )*
 
                 let res = (self)($($ty,)*);
 
                 // Update the system
-                res.into_patch(&system)
+                res.into_outcome(&system)
             }
         }
     };
@@ -95,7 +99,7 @@ where
     E: Effect<S, T> + Send + 'static,
     T: Send + 'static,
 {
-    type Future = Ready<Patch>;
+    type Future = Ready<Outcome>;
 
     fn call(self, system: System, context: Context<S>) -> Self::Future {
         ready(self.effect.call(system, context))
