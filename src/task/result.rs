@@ -30,7 +30,7 @@ where
     fn into_result(self, system: &System) -> Result {
         match self {
             Ok(value) => value.into_result(system),
-            Err(e) => Err(Error::RuntimeError(anyhow::Error::new(e))),
+            Err(e) => Err(Error::Other(Box::new(e))),
         }
     }
 }

@@ -1,12 +1,8 @@
+use crate::error::Error;
 use std::fmt::Display;
 
 #[derive(Clone, Default)]
 pub struct Path(String);
-
-#[derive(Debug)]
-pub enum Error {
-    InvalidPath,
-}
 
 impl Path {
     pub fn split(&self) -> Vec<String> {
@@ -59,7 +55,7 @@ impl TryFrom<&str> for Path {
 
     fn try_from(pointer: &str) -> Result<Self, Self::Error> {
         if !pointer.is_empty() && !pointer.starts_with('/') {
-            return Err(Error::InvalidPath);
+            return Err(Error::InvalidPath(String::from(pointer)));
         }
 
         Ok(Path(pointer.to_string()))

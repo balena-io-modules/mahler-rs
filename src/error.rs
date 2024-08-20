@@ -3,9 +3,14 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
-    SerdeError(#[from] serde_json::error::Error),
+    SerializationError(#[from] serde_json::error::Error),
+
     #[error(transparent)]
-    PatchError(#[from] json_patch::PatchError),
+    PatchFailed(#[from] json_patch::PatchError),
+
+    #[error("the string `{0}` is not a valid path")]
+    InvalidPath(String),
+
     #[error(transparent)]
-    RuntimeError(#[from] anyhow::Error),
+    Other(#[from] Box<dyn std::error::Error>),
 }

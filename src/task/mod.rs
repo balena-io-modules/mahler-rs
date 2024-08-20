@@ -49,6 +49,13 @@ mod tests {
     use crate::system::{Context, System};
     use json_patch::Patch;
     use serde_json::{from_value, json};
+    use thiserror::Error;
+
+    #[derive(Error, Debug)]
+    enum MyError {
+        #[error("counter already reached")]
+        CounterReached,
+    }
 
     fn my_task_effect(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
@@ -59,12 +66,17 @@ mod tests {
         counter
     }
 
-    async fn my_task_action(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
+    async fn my_task_action(
+        mut counter: View<i32>,
+        tgt: Target<i32>,
+    ) -> core::result::Result<View<i32>, MyError> {
         if *counter < *tgt {
             *counter += 1;
+        } else {
+            return Err(MyError::CounterReached);
         }
 
-        counter
+        Ok(counter)
     }
 
     #[test]
@@ -86,7 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_runs_async_actions() {
-        let mut system = System::from(0);
+        let mut system = System::from(1);
         let task = Task::from(my_task_effect);
         let action = task.bind(Context::from(1));
 
@@ -111,5 +123,16 @@ mod tests {
         // Check that the system state was modified
         let state = system.state::<i32>().unwrap();
         assert_eq!(state, 1);
+    }
+
+    #[tokio::test]
+    async fn it_allows_actions_returning_errors() {
+        let mut system = System::from(1);
+        let task = my_task_action.with_effect(my_task_effect);
+        let action = task.bind(Context::from(1));
+
+        let res = action.run(&mut system).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().to_string(), "counter already reached");
     }
 }

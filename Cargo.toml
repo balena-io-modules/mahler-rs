@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.86"
 json-patch = "2.0.0"
 serde = { version = "1.0.197" }
 serde_json = "1.0.120"
