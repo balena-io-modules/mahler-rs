@@ -1,7 +1,7 @@
 use super::handler::Handler;
 use crate::{
     system::{Context, FromSystem, System},
-    task::outcome::{IntoOutcome, Outcome},
+    task::result::{IntoResult, Result},
 };
 use std::{
     future::{ready, Ready},
@@ -9,7 +9,7 @@ use std::{
 };
 
 pub trait Effect<S, T>: Clone + Send + Sized + 'static {
-    fn call(self, system: System, context: Context<S>) -> Outcome;
+    fn call(self, system: System, context: Context<S>) -> Result;
 }
 
 macro_rules! impl_effect_handler {
@@ -20,22 +20,22 @@ macro_rules! impl_effect_handler {
         impl<S, F, $($ty,)* Res> Effect<S, ($($ty,)*)> for F
         where
             F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
-            Res: IntoOutcome,
+            Res: IntoResult,
             $($ty: FromSystem<S>,)*
         {
 
-            fn call(self, system: System, context: Context<S>) -> Outcome {
+            fn call(self, system: System, context: Context<S>) -> Result {
                 $(
                     let $ty = match $ty::from_system(&system, &context) {
                         Ok(value) => value,
-                        Err(failure) => return failure.into_outcome(&system)
+                        Err(failure) => return failure.into_result(&system)
                     };
                 )*
 
                 let res = (self)($($ty,)*);
 
                 // Update the system
-                res.into_outcome(&system)
+                res.into_result(&system)
             }
         }
     };
@@ -99,7 +99,7 @@ where
     E: Effect<S, T> + Send + 'static,
     T: Send + 'static,
 {
-    type Future = Ready<Outcome>;
+    type Future = Ready<Result>;
 
     fn call(self, system: System, context: Context<S>) -> Self::Future {
         ready(self.effect.call(system, context))

@@ -4,12 +4,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::system::{Context, FromSystem, System};
-use crate::task::outcome::{IntoOutcome, Outcome};
+use crate::task::result::{IntoResult, Result};
 
-pub(crate) type HandlerOutput = Pin<Box<dyn Future<Output = Outcome>>>;
+pub(crate) type HandlerResult = Pin<Box<dyn Future<Output = Result>>>;
 
 pub trait Handler<S, T>: Clone + Send + Sized + 'static {
-    type Future: Future<Output = Outcome> + 'static;
+    type Future: Future<Output = Result> + 'static;
 
     fn call(self, state: System, context: Context<S>) -> Self::Future;
 
@@ -32,18 +32,18 @@ macro_rules! impl_action_handler {
             F: FnOnce($($ty,)*) -> Fut + Clone + Send + 'static,
             S: Send + Sync + 'static,
             Fut: Future<Output = Res> + Send,
-            Res: IntoOutcome,
+            Res: IntoResult,
             $($ty: FromSystem<S> + Send,)*
         {
 
-            type Future = HandlerOutput;
+            type Future = HandlerResult;
 
             fn call(self, system: System, context: Context<S>) -> Self::Future {
                 Box::pin(async move {
                     $(
                         let $ty = match $ty::from_system(&system, &context) {
                             Ok(value) => value,
-                            Err(failure) => return failure.into_outcome(&system)
+                            Err(failure) => return failure.into_result(&system)
                         };
                     )*
 
@@ -51,7 +51,7 @@ macro_rules! impl_action_handler {
                     let res = (self)($($ty,)*).await;
 
                     // Update the system using the response
-                   res.into_outcome(&system)
+                   res.into_result(&system)
                 })
             }
         }

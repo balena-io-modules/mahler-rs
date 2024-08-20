@@ -1,16 +1,15 @@
 use crate::error::Error;
 use crate::system::{Context, System};
-use crate::task::outcome::Outcome;
+use crate::task::result::Result;
 
 pub(crate) mod effect;
 mod handler;
 use effect::Effect;
 pub use handler::Handler;
-use handler::HandlerOutput;
-use json_patch::Patch;
+use handler::HandlerResult;
 
-type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Outcome>;
-type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> HandlerOutput>;
+type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result>;
+type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> HandlerResult>;
 
 pub struct Action<S> {
     context: Context<S>,
@@ -35,11 +34,11 @@ impl<S> Action<S> {
         }
     }
 
-    pub fn dry_run(self, system: &System) -> Result<Patch, Error> {
+    pub fn dry_run(self, system: &System) -> Result {
         (self.dry_run)(system, self.context)
     }
 
-    pub async fn run(self, system: &mut System) -> Result<(), Error> {
+    pub async fn run(self, system: &mut System) -> core::result::Result<(), Error> {
         let changes = (self.run)(system, self.context).await?;
         system.patch(changes)
     }

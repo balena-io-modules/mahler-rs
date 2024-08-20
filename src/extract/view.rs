@@ -1,7 +1,7 @@
 use crate::error::Error;
 use crate::path::Path;
 use crate::system::{Context, FromSystem, System};
-use crate::task::{IntoOutcome, Outcome};
+use crate::task::{IntoResult, Result};
 use json_patch::diff;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -49,8 +49,8 @@ impl<S, T> DerefMut for View<S, T> {
     }
 }
 
-impl<S, T: Serialize> IntoOutcome for View<S, T> {
-    fn into_outcome(self, system: &System) -> Outcome {
+impl<S, T: Serialize> IntoResult for View<S, T> {
+    fn into_result(self, system: &System) -> Result {
         // Get the root value
         let mut system_after = system.clone();
 
