@@ -14,10 +14,18 @@ impl<S: Serialize + Clone, T: DeserializeOwned> FromSystem<S> for Target<S, T> {
     type Error = Error;
 
     fn from_system(_: &System, context: &Context<S>) -> Result<Self, Self::Error> {
+        if context.target.is_none() {
+            return Err(Error::TargetNotAvailable);
+        }
+
         let tgt = serde_json::to_value(context.target.clone())?;
 
-        // TODO: allow target to be None
-        let value = tgt.pointer(context.path.as_ref()).unwrap();
+        // Return an error if the context path does not exist in the target object
+        let value = tgt
+            .pointer(context.path.as_ref())
+            .ok_or(Error::TargetNotFound(context.path.to_string()))?;
+
+        // This will fail if the value cannot be deserialized into the target type
         let target = serde_json::from_value::<T>(value.clone())?;
 
         Ok(Target {

@@ -1,16 +1,23 @@
 use crate::path::Path;
 
 pub struct Context<S> {
-    // TODO: the target needs to be an option as
-    // it won't make sense for some operations
-    pub target: S,
+    pub target: Option<S>,
     pub path: Path,
+}
+
+impl<S> Default for Context<S> {
+    fn default() -> Self {
+        Context {
+            target: None,
+            path: Path::default(),
+        }
+    }
 }
 
 impl<S> Context<S> {
     pub fn from(target: S) -> Self {
         Self {
-            target,
+            target: Some(target),
             path: Path::default(),
         }
     }
