@@ -22,9 +22,12 @@ impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
         context: &Context<S>,
     ) -> core::result::Result<Self, Self::Error> {
         // TODO: if the parent of the target does not exist
-        // this function should error, if the parent exists but the
-        // value does not, then the state should be None
-        let value = system.pointer(context.path.clone());
+        // this function should error, if the parent exists the value
+        // should be None
+        // TODO: we also need a way to create the value if it doesn't exist
+        // this will depend on the type of the parent, the parent may be an array
+        // or a map and we need to create the relevant key in the parent
+        let value = system.pointer(context.path.clone()).unwrap();
         let state = serde_json::from_value::<T>(value.clone())?;
 
         Ok(View {
@@ -55,7 +58,7 @@ impl<S, T: Serialize> IntoResult for View<S, T> {
         let mut system_after = system.clone();
 
         // Write the changes to the system copy
-        let pointer = system_after.pointer_mut(self.path);
+        let pointer = system_after.pointer_mut(self.path).unwrap();
 
         // Should we use error handling here? A serialization error
         // at this point would be strange
