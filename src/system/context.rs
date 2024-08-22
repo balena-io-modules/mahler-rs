@@ -22,10 +22,10 @@ impl<S> Context<S> {
         }
     }
 
-    pub fn with_path(self, path: Path) -> Self {
+    pub fn with_path(self, path: &'static str) -> Self {
         Self {
             target: self.target,
-            path,
+            path: Path::from_static(path),
         }
     }
 }
