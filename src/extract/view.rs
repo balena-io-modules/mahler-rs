@@ -9,6 +9,11 @@ use serde::Serialize;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
+/// Extracts a sub-element of a state S as indicated by
+/// a path.
+///
+/// The state is None if the path does not exist under the parent
+/// path and it can be created using the `create` function
 #[derive(Debug)]
 pub struct View<S, T = S> {
     state: Option<T>,
@@ -17,6 +22,14 @@ pub struct View<S, T = S> {
 }
 
 impl<S, T> View<S, T> {
+    pub(super) fn new(state: Option<T>, path: Path) -> Self {
+        View {
+            state,
+            path,
+            _system: PhantomData::<S>,
+        }
+    }
+
     pub fn create(&mut self, value: T) -> &mut T {
         self.state = Some(value);
         self.state.as_mut().unwrap()
@@ -29,8 +42,7 @@ impl<S, T> View<S, T> {
 
 impl<S, T: Default> View<S, T> {
     pub fn init(&mut self) -> &mut T {
-        self.state = Some(T::default());
-        self.state.as_mut().unwrap()
+        self.create(T::default())
     }
 }
 
@@ -56,7 +68,8 @@ impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
             })?;
 
         // At this point we assume that if the pointer cannot be
-        // resolved is because the value does not exist yet
+        // resolved is because the value does not exist yet unless
+        // the parent is a scalar
         let state: Option<T> = match pointer.resolve(root) {
             Ok(value) => Some(serde_json::from_value::<T>(value.clone())?),
             Err(e) => match e {
@@ -71,11 +84,7 @@ impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
             },
         };
 
-        Ok(View {
-            state,
-            path: context.path.clone(),
-            _system: PhantomData::<S>,
-        })
+        Ok(View::new(state, context.path.clone()))
     }
 }
 
@@ -118,6 +127,145 @@ impl<S, T: Serialize> IntoResult for View<S, T> {
 
         // Return the difference between the roots
         Ok(diff(system.root(), root))
+    }
+}
+
+/// Extracts a sub-element of a state S as indicated by
+/// a path.
+///
+/// The state is always initialized to the type default,
+/// no matter if it already exists.
+#[derive(Debug)]
+pub struct Create<S, T = S> {
+    state: T,
+    path: Path,
+    _system: PhantomData<S>,
+}
+
+impl<S, T: DeserializeOwned + Default> FromSystem<S> for Create<S, T> {
+    type Error = Error;
+
+    fn from_system(
+        system: &System,
+        context: &Context<S>,
+    ) -> core::result::Result<Self, Self::Error> {
+        // We unwrap the call to parse because the path should
+        // be validated at this point
+        let pointer = context.path.as_ref();
+        let root = system.root();
+
+        // Use the parent of the pointer unless we are at the root
+        let parent = pointer.parent().unwrap_or(pointer);
+
+        // Try to resolve the parent or fail
+        parent
+            .resolve(root)
+            .map_err(|e| Error::PointerResolveFailed {
+                path: context.path.to_string(),
+                reason: e,
+            })?;
+
+        // At this point we assume that if the pointer cannot be
+        // resolved is because the value does not exist yet unless
+        // the parent is a scalar
+        if let Err(e) = pointer.resolve(root) {
+            match e {
+                ResolveError::NotFound { .. } => (),
+                ResolveError::OutOfBounds { .. } => (),
+                _ => {
+                    return Err(Error::PointerResolveFailed {
+                        path: context.path.to_string(),
+                        reason: e,
+                    })
+                }
+            };
+        }
+
+        Ok(Create {
+            state: T::default(),
+            path: context.path.clone(),
+            _system: PhantomData::<S>,
+        })
+    }
+}
+
+impl<S, T: Serialize> IntoResult for Create<S, T> {
+    fn into_result(self, system: &System) -> Result {
+        View::<S, T>::new(Some(self.state), self.path).into_result(system)
+    }
+}
+
+impl<S, T> Deref for Create<S, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl<S, T> DerefMut for Create<S, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+/// Extracts a sub-element of a state S as indicated by
+/// a path.
+///
+/// Initializing the extractor will fail if there is no value at the
+/// given path
+#[derive(Debug)]
+pub struct Update<S, T = S> {
+    state: T,
+    path: Path,
+    _system: PhantomData<S>,
+}
+
+impl<S, T: DeserializeOwned> FromSystem<S> for Update<S, T> {
+    type Error = Error;
+
+    fn from_system(
+        system: &System,
+        context: &Context<S>,
+    ) -> core::result::Result<Self, Self::Error> {
+        let pointer = context.path.as_ref();
+        let root = system.root();
+
+        // If the pointer cannot be resolved for any
+        // reason, return an error
+        let value = pointer
+            .resolve(root)
+            .map_err(|e| Error::PointerResolveFailed {
+                path: context.path.to_string(),
+                reason: e,
+            })?;
+        let state = serde_json::from_value::<T>(value.clone())?;
+
+        Ok(Update {
+            state,
+            path: context.path.clone(),
+            _system: PhantomData::<S>,
+        })
+    }
+}
+
+impl<S, T> Deref for Update<S, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl<S, T> DerefMut for Update<S, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+impl<S, T: Serialize> IntoResult for Update<S, T> {
+    fn into_result(self, system: &System) -> Result {
+        View::<S, T>::new(Some(self.state), self.path).into_result(system)
     }
 }
 
@@ -217,6 +365,95 @@ mod tests {
             ]))
             .unwrap()
         );
+    }
+
+    #[test]
+    fn it_creates_a_value_with_a_create_view() {
+        let mut numbers = HashMap::new();
+        numbers.insert("one".to_string(), 1);
+        numbers.insert("two".to_string(), 2);
+
+        let state = State { numbers };
+
+        let system = System::from(state);
+
+        let mut view: Create<State, i32> =
+            Create::from_system(&system, &Context::default().with_path("/numbers/three")).unwrap();
+        *view = 3;
+
+        // Get the list changes to the view
+        let changes = view.into_result(&system).unwrap();
+        assert_eq!(
+            changes,
+            serde_json::from_value::<Patch>(json!([
+              { "op": "add", "path": "/numbers/three", "value": 3 },
+            ]))
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn it_fails_to_initialize_create_view_if_path_is_invalid() {
+        let mut numbers = HashMap::new();
+        numbers.insert("one".to_string(), 1);
+        numbers.insert("two".to_string(), 2);
+
+        let state = State { numbers };
+
+        let system = System::from(state);
+
+        assert!(Create::<State, i32>::from_system(
+            &system,
+            &Context::default().with_path("/none/three")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn it_allows_changing_a_value_with_an_update_view() {
+        let mut numbers = HashMap::new();
+        numbers.insert("one".to_string(), 1);
+        numbers.insert("two".to_string(), 2);
+
+        let state = State { numbers };
+
+        let system = System::from(state);
+
+        let mut view: Update<State, i32> =
+            Update::from_system(&system, &Context::default().with_path("/numbers/two")).unwrap();
+        *view = 3;
+
+        // Get the list changes to the view
+        let changes = view.into_result(&system).unwrap();
+        assert_eq!(
+            changes,
+            serde_json::from_value::<Patch>(json!([
+              { "op": "replace", "path": "/numbers/two", "value": 3 },
+            ]))
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn it_fails_to_initialize_update_view_if_path_does_not_exit() {
+        let mut numbers = HashMap::new();
+        numbers.insert("one".to_string(), 1);
+        numbers.insert("two".to_string(), 2);
+
+        let state = State { numbers };
+
+        let system = System::from(state);
+
+        assert!(Update::<State, i32>::from_system(
+            &system,
+            &Context::default().with_path("/numbers/three")
+        )
+        .is_err());
+        assert!(Update::<State, i32>::from_system(
+            &system,
+            &Context::default().with_path("/none/three")
+        )
+        .is_err());
     }
 
     #[test]

@@ -45,7 +45,7 @@ impl<S> Task<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract::{Target, View};
+    use crate::extract::{Target, Update};
     use crate::system::{Context, System};
     use json_patch::Patch;
     use serde_json::{from_value, json};
@@ -57,23 +57,21 @@ mod tests {
         CounterReached,
     }
 
-    fn my_task_effect(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
-        let value = counter.as_mut().unwrap();
-        if *value < *tgt {
-            *value += 1;
+    fn my_task_effect(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
+        if *counter < *tgt {
+            *counter += 1;
         }
 
-        // View implements IntoPatch
+        // Update implements IntoResult
         counter
     }
 
     async fn my_task_action(
-        mut counter: View<i32>,
+        mut counter: Update<i32>,
         tgt: Target<i32>,
-    ) -> core::result::Result<View<i32>, MyError> {
-        let value = counter.as_mut().unwrap();
-        if *value < *tgt {
-            *value += 1;
+    ) -> core::result::Result<Update<i32>, MyError> {
+        if *counter < *tgt {
+            *counter += 1;
         } else {
             return Err(MyError::CounterReached);
         }
