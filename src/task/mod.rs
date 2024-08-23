@@ -58,8 +58,9 @@ mod tests {
     }
 
     fn my_task_effect(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
-        if *counter < *tgt {
-            *counter += 1;
+        let value = counter.as_mut().unwrap();
+        if *value < *tgt {
+            *value += 1;
         }
 
         // View implements IntoPatch
@@ -70,8 +71,9 @@ mod tests {
         mut counter: View<i32>,
         tgt: Target<i32>,
     ) -> core::result::Result<View<i32>, MyError> {
-        if *counter < *tgt {
-            *counter += 1;
+        let value = counter.as_mut().unwrap();
+        if *value < *tgt {
+            *value += 1;
         } else {
             return Err(MyError::CounterReached);
         }

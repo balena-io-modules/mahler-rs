@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 json-patch = "2.0.0"
+jsonptr = "0.6.0"
 serde = { version = "1.0.197" }
 serde_json = "1.0.120"
 thiserror = "1.0.63"

@@ -3,7 +3,6 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
 use crate::error::Error;
-use crate::path::Path;
 
 mod from_system;
 pub(crate) use from_system::*;
@@ -31,17 +30,13 @@ impl System {
         &self.state
     }
 
-    pub(crate) fn pointer(&self, path: Path) -> Option<&Value> {
-        self.state.pointer(path.as_ref())
+    pub(crate) fn root_mut(&mut self) -> &mut Value {
+        &mut self.state
     }
 
     pub(crate) fn patch(&mut self, changes: Patch) -> Result<(), Error> {
         patch(&mut self.state, &changes)?;
         Ok(())
-    }
-
-    pub(crate) fn pointer_mut(&mut self, path: Path) -> Option<&mut Value> {
-        self.state.pointer_mut(path.as_ref())
     }
 
     pub fn state<S: DeserializeOwned>(&self) -> Result<S, Error> {

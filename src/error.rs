@@ -11,14 +11,26 @@ pub enum Error {
     #[error("the string `{0}` is not a valid path")]
     InvalidPath(String),
 
-    #[error("no target available for the task")]
-    TargetNotAvailable,
+    #[error("no target available on the context")]
+    TargetIsNone,
 
-    #[error("path `{0}` does not exist on the given target")]
-    TargetNotFound(String),
+    #[error("cannot resolve state path `{path}`: ${reason}")]
+    TargetResolveFailed {
+        path: String,
+        reason: jsonptr::resolve::ResolveError,
+    },
 
-    #[error("path `{0}` does not exist on the system state")]
-    PathNotFound(String),
+    #[error("cannot resolve path `{path}` on system state: ${reason}")]
+    PointerResolveFailed {
+        path: String,
+        reason: jsonptr::resolve::ResolveError,
+    },
+
+    #[error("cannot assign path `{path}` on system state: ${reason}")]
+    PointerAssignFailed {
+        path: String,
+        reason: jsonptr::assign::AssignError,
+    },
 
     #[error(transparent)]
     Other(#[from] Box<dyn std::error::Error>),
