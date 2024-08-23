@@ -8,7 +8,7 @@ use std::{
     marker::PhantomData,
 };
 
-pub trait Effect<S, T>: Clone + Send + Sized + 'static {
+pub trait Effect<S, T>: Clone + Send + 'static {
     fn call(self, system: System, context: Context<S>) -> Result;
 }
 

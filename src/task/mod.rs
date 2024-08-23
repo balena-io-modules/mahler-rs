@@ -48,7 +48,9 @@ mod tests {
     use crate::extract::{Target, Update};
     use crate::system::{Context, System};
     use json_patch::Patch;
+    use serde::{Deserialize, Serialize};
     use serde_json::{from_value, json};
+    use std::collections::HashMap;
     use thiserror::Error;
 
     #[derive(Error, Debug)]
@@ -134,5 +136,51 @@ mod tests {
         let res = action.run(&mut system).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().to_string(), "counter already reached");
+    }
+
+    // State needs to be clone in order for Target to implement IntoSystem
+    #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+    struct State {
+        counters: HashMap<String, i32>,
+    }
+
+    fn update_counter(
+        mut counter: Update<State, i32>,
+        tgt: Target<State, i32>,
+    ) -> Update<State, i32> {
+        if *counter < *tgt {
+            *counter += 1;
+        }
+
+        // Update implements IntoResult
+        counter
+    }
+
+    #[tokio::test]
+    async fn it_modifies_system_sub_elements() {
+        let state = State {
+            counters: [("a".to_string(), 0), ("b".to_string(), 0)].into(),
+        };
+
+        let mut system = System::from(state);
+        let target = State {
+            counters: [("a".to_string(), 2), ("b".to_string(), 1)].into(),
+        };
+
+        let task = Task::from(update_counter);
+        let action = task.bind(Context::from(target).with_path("/counters/a"));
+
+        // Run the action
+        action.run(&mut system).await.unwrap();
+
+        let state = system.state::<State>().unwrap();
+
+        // Only the referenced value was modified
+        assert_eq!(
+            state,
+            State {
+                counters: [("a".to_string(), 1), ("b".to_string(), 0)].into()
+            }
+        );
     }
 }
