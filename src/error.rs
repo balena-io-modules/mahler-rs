@@ -17,6 +17,9 @@ pub enum Error {
     #[error("path `{0}` does not exist on the given target")]
     TargetNotFound(String),
 
+    #[error("path `{0}` does not exist on the system state")]
+    PathNotFound(String),
+
     #[error(transparent)]
     Other(#[from] Box<dyn std::error::Error>),
 }

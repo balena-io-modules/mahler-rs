@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 pub struct View<S, T = S> {
-    state: T,
+    state: Option<T>,
     path: Path,
     _system: PhantomData<S>,
 }
@@ -21,14 +21,15 @@ impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
         system: &System,
         context: &Context<S>,
     ) -> core::result::Result<Self, Self::Error> {
-        // TODO: if the parent of the target does not exist
-        // this function should error, if the parent exists the value
-        // should be None
-        // TODO: we also need a way to create the value if it doesn't exist
-        // this will depend on the type of the parent, the parent may be an array
-        // or a map and we need to create the relevant key in the parent
-        let value = system.pointer(context.path.clone()).unwrap();
-        let state = serde_json::from_value::<T>(value.clone())?;
+        // Check that the parent exists first
+        system
+            .pointer(context.path.parent())
+            .ok_or(Error::PathNotFound(context.path.to_string()))?;
+
+        let mut state: Option<T> = None;
+        if let Some(value) = system.pointer(context.path.clone()) {
+            state = Some(serde_json::from_value::<T>(value.clone())?);
+        }
 
         Ok(View {
             state,
@@ -39,7 +40,7 @@ impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
 }
 
 impl<S, T> Deref for View<S, T> {
-    type Target = T;
+    type Target = Option<T>;
 
     fn deref(&self) -> &Self::Target {
         &self.state
@@ -58,6 +59,7 @@ impl<S, T: Serialize> IntoResult for View<S, T> {
         let mut system_after = system.clone();
 
         // Write the changes to the system copy
+        // TODO: How do we create the value if it did not exist before?
         let pointer = system_after.pointer_mut(self.path).unwrap();
 
         // Should we use error handling here? A serialization error
