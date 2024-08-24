@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
-pub struct Target<S, T = S> {
+pub struct Target<S: Clone, T = S> {
     target: T,
     _system: PhantomData<S>,
 }
@@ -39,7 +39,7 @@ impl<S: Serialize + Clone, T: DeserializeOwned> FromSystem<S> for Target<S, T> {
     }
 }
 
-impl<S, T> Deref for Target<S, T> {
+impl<S: Clone, T> Deref for Target<S, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
