@@ -40,9 +40,3 @@ impl IntoResult for Error {
         Err(self)
     }
 }
-
-impl IntoResult for Patch {
-    fn into_result(self, _: &System) -> Result {
-        Ok(self)
-    }
-}

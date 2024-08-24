@@ -4,7 +4,7 @@ use crate::system::Context;
 use action::effect::{Effect, IntoHandler};
 pub use action::{Action, Handler};
 use action::{ActionBuilder, ToAction};
-pub use result::{IntoResult, Result};
+pub(crate) use result::*;
 
 pub struct Task<S> {
     builder: Box<dyn ToAction<S>>,
