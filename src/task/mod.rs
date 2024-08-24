@@ -163,12 +163,13 @@ mod tests {
         };
 
         let mut system = System::from(state);
-        let target = State {
-            counters: [("a".to_string(), 2), ("b".to_string(), 1)].into(),
-        };
-
         let task = Task::from(update_counter);
-        let action = task.bind(Context::from(target).with_path("/counters/a"));
+        let action = task.bind(
+            Context::from(State {
+                counters: [("a".to_string(), 2), ("b".to_string(), 1)].into(),
+            })
+            .with_path("/counters/a"),
+        );
 
         // Run the action
         action.run(&mut system).await.unwrap();
