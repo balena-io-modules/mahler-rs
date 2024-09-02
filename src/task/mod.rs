@@ -2,7 +2,7 @@ mod action;
 mod result;
 use crate::system::Context;
 use action::effect::{Effect, IntoHandler};
-pub use action::{Action, Handler};
+pub use action::{Action, ActionHandler};
 use action::{ActionBuilder, ToAction};
 pub(crate) use result::*;
 
@@ -14,7 +14,7 @@ impl<S> Task<S> {
     fn new<E, H, T>(effect: E, handler: H) -> Self
     where
         E: Effect<S, T>,
-        H: Handler<S, T>,
+        H: ActionHandler<S, T>,
         S: 'static,
     {
         Self {
@@ -59,7 +59,7 @@ mod tests {
         CounterReached,
     }
 
-    fn my_task_effect(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
+    fn my_task_effect(mut counter: Update<i32>, tgt: Target<i32>) -> impl IntoResult {
         if *counter < *tgt {
             *counter += 1;
         }
@@ -68,10 +68,7 @@ mod tests {
         counter
     }
 
-    async fn my_task_action(
-        mut counter: Update<i32>,
-        tgt: Target<i32>,
-    ) -> core::result::Result<Update<i32>, MyError> {
+    async fn my_task_action(mut counter: Update<i32>, tgt: Target<i32>) -> impl IntoResult {
         if *counter < *tgt {
             *counter += 1;
         } else {

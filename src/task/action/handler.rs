@@ -8,7 +8,7 @@ use crate::task::result::{IntoResult, Result};
 
 pub(crate) type HandlerResult = Pin<Box<dyn Future<Output = Result>>>;
 
-pub trait Handler<S, T>: Clone + Send + Sized + 'static {
+pub trait ActionHandler<S, T>: Clone + Send + Sized + 'static {
     type Future: Future<Output = Result> + 'static;
 
     fn call(self, state: System, context: Context<S>) -> Self::Future;
@@ -27,7 +27,7 @@ macro_rules! impl_action_handler {
         $first:ident, $($ty:ident),*
     ) => {
         #[allow(non_snake_case, unused)]
-        impl<S, F, $($ty,)* Fut, Res> Handler<S, ($($ty,)*)> for F
+        impl<S, F, $($ty,)* Fut, Res> ActionHandler<S, ($($ty,)*)> for F
         where
             F: FnOnce($($ty,)*) -> Fut + Clone + Send + 'static,
             S: Send + Sync + 'static,

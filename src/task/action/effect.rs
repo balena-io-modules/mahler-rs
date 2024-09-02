@@ -1,4 +1,4 @@
-use super::handler::Handler;
+use super::handler::ActionHandler;
 use crate::{
     system::{Context, FromSystem, System},
     task::result::{IntoResult, Result},
@@ -93,7 +93,7 @@ where
     }
 }
 
-impl<S, T, E> Handler<S, T> for IntoHandler<S, T, E>
+impl<S, T, E> ActionHandler<S, T> for IntoHandler<S, T, E>
 where
     S: Send + Sync + 'static,
     E: Effect<S, T> + Send + 'static,

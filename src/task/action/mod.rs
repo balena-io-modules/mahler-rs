@@ -5,7 +5,7 @@ use crate::task::result::Result;
 pub(crate) mod effect;
 mod handler;
 use effect::Effect;
-pub use handler::Handler;
+pub use handler::ActionHandler;
 use handler::HandlerResult;
 
 type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result>;
@@ -21,7 +21,7 @@ impl<S> Action<S> {
     pub(crate) fn new<E, H, T>(effect: E, handler: H, context: Context<S>) -> Self
     where
         E: Effect<S, T>,
-        H: Handler<S, T>,
+        H: ActionHandler<S, T>,
     {
         Self {
             context,
