@@ -3,6 +3,7 @@ use crate::task::Job;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::error::IntoError;
 use crate::system::{Context, FromSystem, System};
 use crate::task::result::{IntoResult, Result};
 
@@ -43,7 +44,7 @@ macro_rules! impl_action_handler {
                     $(
                         let $ty = match $ty::from_system(&system, &context) {
                             Ok(value) => value,
-                            Err(failure) => return failure.into_result(&system)
+                            Err(failure) => return Err(failure.into_error())
                         };
                     )*
 

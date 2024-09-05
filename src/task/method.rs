@@ -1,7 +1,6 @@
-use crate::{
-    system::{Context, FromSystem, System},
-    task::result::{IntoResult, Result},
-};
+use super::result::{IntoResult, Result};
+use crate::error::IntoError;
+use crate::system::{Context, FromSystem, System};
 
 pub trait Method<S, T>: Clone + Send + 'static {
     fn call(self, system: System, context: Context<S>) -> Result;
@@ -23,7 +22,7 @@ macro_rules! impl_method_handler {
                 $(
                     let $ty = match $ty::from_system(&system, &context) {
                         Ok(value) => value,
-                        Err(failure) => return failure.into_result(&system)
+                        Err(failure) => return Err(failure.into_error())
                     };
                 )*
 

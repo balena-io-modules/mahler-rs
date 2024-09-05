@@ -35,3 +35,13 @@ pub enum Error {
     #[error(transparent)]
     Other(#[from] Box<dyn std::error::Error>),
 }
+
+pub trait IntoError {
+    fn into_error(self) -> Error;
+}
+
+impl IntoError for Error {
+    fn into_error(self) -> Error {
+        self
+    }
+}

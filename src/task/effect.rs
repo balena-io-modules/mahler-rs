@@ -1,4 +1,5 @@
 use super::action::Action;
+use crate::error::IntoError;
 use crate::{
     system::{Context, FromSystem, System},
     task::result::{IntoResult, Result},
@@ -28,7 +29,7 @@ macro_rules! impl_effect_handler {
                 $(
                     let $ty = match $ty::from_system(&system, &context) {
                         Ok(value) => value,
-                        Err(failure) => return failure.into_result(&system)
+                        Err(failure) => return return Err(failure.into_error())
                     };
                 )*
 
