@@ -1,4 +1,4 @@
-use super::handler::ActionHandler;
+use super::action::Action;
 use crate::{
     system::{Context, FromSystem, System},
     task::result::{IntoResult, Result},
@@ -58,7 +58,7 @@ impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14
 impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15);
 impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16);
 
-pub(crate) struct IntoHandler<S, T, E>
+pub(crate) struct IntoAction<S, T, E>
 where
     E: Effect<S, T>,
 {
@@ -67,12 +67,12 @@ where
     _args: PhantomData<T>,
 }
 
-impl<S, T, E> Clone for IntoHandler<S, T, E>
+impl<S, T, E> Clone for IntoAction<S, T, E>
 where
     E: Effect<S, T>,
 {
     fn clone(&self) -> Self {
-        IntoHandler {
+        IntoAction {
             effect: self.effect.clone(),
             _state: PhantomData::<S>,
             _args: PhantomData::<T>,
@@ -80,12 +80,12 @@ where
     }
 }
 
-impl<S, T, E> IntoHandler<S, T, E>
+impl<S, T, E> IntoAction<S, T, E>
 where
     E: Effect<S, T>,
 {
     pub fn new(effect: E) -> Self {
-        IntoHandler {
+        IntoAction {
             effect,
             _state: PhantomData::<S>,
             _args: PhantomData::<T>,
@@ -93,7 +93,7 @@ where
     }
 }
 
-impl<S, T, E> ActionHandler<S, T> for IntoHandler<S, T, E>
+impl<S, T, E> Action<S, T> for IntoAction<S, T, E>
 where
     S: Send + Sync + 'static,
     E: Effect<S, T> + Send + 'static,

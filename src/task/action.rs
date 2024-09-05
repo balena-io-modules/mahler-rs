@@ -6,9 +6,9 @@ use std::pin::Pin;
 use crate::system::{Context, FromSystem, System};
 use crate::task::result::{IntoResult, Result};
 
-pub(crate) type HandlerResult = Pin<Box<dyn Future<Output = Result>>>;
+pub(crate) type ActionResult = Pin<Box<dyn Future<Output = Result>>>;
 
-pub trait ActionHandler<S, T>: Clone + Send + Sized + 'static {
+pub trait Action<S, T>: Clone + Send + Sized + 'static {
     type Future: Future<Output = Result> + 'static;
 
     fn call(self, state: System, context: Context<S>) -> Self::Future;
@@ -27,7 +27,7 @@ macro_rules! impl_action_handler {
         $first:ident, $($ty:ident),*
     ) => {
         #[allow(non_snake_case, unused)]
-        impl<S, F, $($ty,)* Fut, Res> ActionHandler<S, ($($ty,)*)> for F
+        impl<S, F, $($ty,)* Fut, Res> Action<S, ($($ty,)*)> for F
         where
             F: FnOnce($($ty,)*) -> Fut + Clone + Send + 'static,
             S: Send + Sync + 'static,
@@ -36,7 +36,7 @@ macro_rules! impl_action_handler {
             $($ty: FromSystem<S> + Send,)*
         {
 
-            type Future = HandlerResult;
+            type Future = ActionResult;
 
             fn call(self, system: System, context: Context<S>) -> Self::Future {
                 Box::pin(async move {

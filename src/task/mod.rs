@@ -1,28 +1,34 @@
 mod action;
+mod effect;
+mod method;
 mod result;
-use crate::system::Context;
-use action::effect::{Effect, IntoHandler};
-pub use action::{Action, ActionHandler};
-use action::{ActionBuilder, ToAction};
+
+use crate::error::Error;
+use crate::system::{Context, System};
+pub use action::Action;
+use action::ActionResult;
+use effect::{Effect, IntoAction};
+use json_patch::{Patch, PatchOperation};
+pub use method::Method;
 pub(crate) use result::*;
 
 pub struct Task<S> {
-    builder: Box<dyn ToAction<S>>,
+    builder: Box<dyn ToJob<S>>,
 }
 
 impl<S> Task<S> {
-    fn new<E, H, T>(effect: E, handler: H) -> Self
+    fn new<E, A, T>(effect: E, action: A) -> Self
     where
         E: Effect<S, T>,
-        H: ActionHandler<S, T>,
+        A: Action<S, T>,
         S: 'static,
     {
         Self {
-            builder: Box::new(ActionBuilder {
+            builder: Box::new(JobUnitBuilder {
                 effect,
-                handler,
-                build: |effect: E, handler: H, context: Context<S>| {
-                    Action::new(effect, handler, context)
+                action,
+                build: |effect: E, action: A, context: Context<S>| {
+                    Job::unit(effect, action, context)
                 },
             }),
         }
@@ -34,11 +40,116 @@ impl<S> Task<S> {
         T: Send + 'static,
         S: Send + Sync + 'static,
     {
-        Self::new(effect.clone(), IntoHandler::new(effect))
+        Self::new(effect.clone(), IntoAction::new(effect))
     }
 
-    pub fn bind(&self, context: Context<S>) -> Action<S> {
-        self.builder.to_action(context)
+    pub fn bind(&self, context: Context<S>) -> Job<S> {
+        self.builder.to_job(context)
+    }
+}
+
+pub(crate) trait ToJob<S> {
+    fn to_job(&self, context: Context<S>) -> Job<S>;
+}
+
+struct JobUnitBuilder<E, A, S> {
+    pub(crate) effect: E,
+    pub(crate) action: A,
+    pub(crate) build: fn(E, A, Context<S>) -> Job<S>,
+}
+
+impl<E, H, S> ToJob<S> for JobUnitBuilder<E, H, S>
+where
+    E: Clone,
+    H: Clone,
+{
+    fn to_job(&self, context: Context<S>) -> Job<S> {
+        (self.build)(self.effect.clone(), self.action.clone(), context)
+    }
+}
+
+type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result>;
+type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> ActionResult>;
+type Expand<S> = Box<dyn FnOnce(&System, Context<S>) -> Vec<Job<S>>>;
+
+pub enum Job<S> {
+    Unit {
+        context: Context<S>,
+        dry_run: DryRun<S>,
+        run: Run<S>,
+    },
+    Group {
+        context: Context<S>,
+        expand: Expand<S>,
+    },
+}
+
+impl<S> Job<S> {
+    pub(crate) fn unit<E, H, T>(effect: E, handler: H, context: Context<S>) -> Self
+    where
+        E: Effect<S, T>,
+        H: Action<S, T>,
+    {
+        Self::Unit {
+            context,
+            dry_run: Box::new(|system: &System, context: Context<S>| {
+                effect.call(system.clone(), context)
+            }),
+            run: Box::new(|system: &System, context: Context<S>| {
+                Box::pin(handler.call(system.clone(), context))
+            }),
+        }
+    }
+
+    /// Run every action in the job sequentially and return the
+    /// aggregate changes.
+    pub fn dry_run(self, system: &System) -> Result {
+        match self {
+            Self::Unit {
+                context, dry_run, ..
+            } => (dry_run)(system, context),
+            Self::Group { context, expand } => {
+                let mut changes: Vec<PatchOperation> = vec![];
+                for job in (expand)(system, context) {
+                    job.dry_run(system)
+                        .map(|Patch(mut patch)| changes.append(&mut patch))?;
+                }
+                Ok(Patch(changes))
+            }
+        }
+    }
+
+    /// Run the job sequentially
+    pub async fn run(self, system: &mut System) -> core::result::Result<(), Error> {
+        match self {
+            Self::Unit { context, run, .. } => {
+                let changes = (run)(system, context).await?;
+                system.patch(changes)
+            }
+            // NOTE: This is only implemented for testing purposes, workflows returned
+            // by a planner will only include unit tasks as the workflow defines whether
+            // the tasks can be executed concurrently or in parallel
+            Self::Group {
+                context, expand, ..
+            } => {
+                for job in (expand)(system, context) {
+                    Box::pin(job.run(system)).await?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Expand the job into its composing sub-jobs.
+    ///
+    /// If the job is a Unit, it will return an empty vector
+    pub fn expand(self, system: &System) -> Vec<Job<S>> {
+        match self {
+            Self::Unit { .. } => vec![],
+            Self::Group {
+                context, expand, ..
+            } => (expand)(system, context),
+        }
     }
 }
 
