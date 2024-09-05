@@ -1,16 +1,17 @@
-use super::effect::Effect;
-use crate::task::Job;
+use json_patch::Patch;
 use std::future::Future;
 use std::pin::Pin;
 
+use super::effect::Effect;
 use crate::error::IntoError;
 use crate::system::{Context, FromSystem, System};
 use crate::task::result::{IntoResult, Result};
+use crate::task::Job;
 
-pub(crate) type ActionResult = Pin<Box<dyn Future<Output = Result>>>;
+pub(crate) type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
 
 pub trait Action<S, T>: Clone + Send + Sized + 'static {
-    type Future: Future<Output = Result> + 'static;
+    type Future: Future<Output = Result<Patch>> + 'static;
 
     fn call(self, state: System, context: Context<S>) -> Self::Future;
 
@@ -33,11 +34,11 @@ macro_rules! impl_action_handler {
             F: FnOnce($($ty,)*) -> Fut + Clone + Send + 'static,
             S: Send + Sync + 'static,
             Fut: Future<Output = Res> + Send,
-            Res: IntoResult,
+            Res: IntoResult<Output = Patch>,
             $($ty: FromSystem<S> + Send,)*
         {
 
-            type Future = ActionResult;
+            type Future = ActionOutput;
 
             fn call(self, system: System, context: Context<S>) -> Self::Future {
                 Box::pin(async move {

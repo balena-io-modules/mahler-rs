@@ -1,42 +1,41 @@
 use crate::{error::Error, system::System};
-use json_patch::Patch;
 
 /// The task outcome is a type alias
 /// of Result
-pub type Result = core::result::Result<Patch, Error>;
+pub(crate) type Result<O> = core::result::Result<O, Error>;
 
 pub trait IntoResult {
-    fn into_result(self, system: &System) -> Result;
+    type Output;
+
+    fn into_result(self, system: &System) -> Result<Self::Output>;
 }
 
-impl<T> IntoResult for Option<T>
+impl<T, O> IntoResult for Option<T>
 where
-    T: IntoResult,
+    O: Default,
+    T: IntoResult<Output = O>,
 {
-    fn into_result(self, system: &System) -> Result {
+    type Output = O;
+
+    fn into_result(self, system: &System) -> Result<Self::Output> {
         match self {
-            // TODO: should this be an error
-            None => Ok(Patch(vec![])),
+            None => Err(Error::ConditionFailed("unknown".to_string())),
             Some(value) => value.into_result(system),
         }
     }
 }
 
-impl<T, E> IntoResult for core::result::Result<T, E>
+impl<T, E, O> IntoResult for core::result::Result<T, E>
 where
-    T: IntoResult,
+    T: IntoResult<Output = O>,
     E: std::error::Error + Sync + Send + 'static,
 {
-    fn into_result(self, system: &System) -> Result {
+    type Output = O;
+
+    fn into_result(self, system: &System) -> Result<Self::Output> {
         match self {
             Ok(value) => value.into_result(system),
             Err(e) => Err(Error::Other(Box::new(e))),
         }
-    }
-}
-
-impl IntoResult for Error {
-    fn into_result(self, _: &System) -> Result {
-        Err(self)
     }
 }

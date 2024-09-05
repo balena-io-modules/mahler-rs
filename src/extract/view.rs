@@ -1,13 +1,14 @@
-use crate::error::Error;
-use crate::path::Path;
-use crate::system::{Context, FromSystem, System};
-use crate::task::{IntoResult, Result};
-use json_patch::diff;
+use json_patch::{diff, Patch};
 use jsonptr::resolve::ResolveError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+
+use crate::error::Error;
+use crate::path::Path;
+use crate::system::{Context, FromSystem, System};
+use crate::task::{IntoResult, Result};
 
 /// Extracts a sub-element of a state S as indicated by
 /// a path.
@@ -103,7 +104,9 @@ impl<S, T> DerefMut for View<S, T> {
 }
 
 impl<S, T: Serialize> IntoResult for View<S, T> {
-    fn into_result(self, system: &System) -> Result {
+    type Output = Patch;
+
+    fn into_result(self, system: &System) -> Result<Patch> {
         // Get the root value
         let mut after = system.clone();
         let root = after.root_mut();
@@ -190,7 +193,9 @@ impl<S, T: DeserializeOwned + Default> FromSystem<S> for Create<S, T> {
 }
 
 impl<S, T: Serialize> IntoResult for Create<S, T> {
-    fn into_result(self, system: &System) -> Result {
+    type Output = Patch;
+
+    fn into_result(self, system: &System) -> Result<Patch> {
         View::<S, T>::new(Some(self.state), self.path).into_result(system)
     }
 }
@@ -264,7 +269,8 @@ impl<S, T> DerefMut for Update<S, T> {
 }
 
 impl<S, T: Serialize> IntoResult for Update<S, T> {
-    fn into_result(self, system: &System) -> Result {
+    type Output = Patch;
+    fn into_result(self, system: &System) -> Result<Patch> {
         View::<S, T>::new(Some(self.state), self.path).into_result(system)
     }
 }

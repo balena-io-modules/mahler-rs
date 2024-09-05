@@ -1,16 +1,18 @@
+use json_patch::Patch;
+use std::{
+    future::{ready, Ready},
+    marker::PhantomData,
+};
+
 use super::action::Action;
 use crate::error::IntoError;
 use crate::{
     system::{Context, FromSystem, System},
     task::result::{IntoResult, Result},
 };
-use std::{
-    future::{ready, Ready},
-    marker::PhantomData,
-};
 
 pub trait Effect<S, T>: Clone + Send + 'static {
-    fn call(self, system: System, context: Context<S>) -> Result;
+    fn call(self, system: System, context: Context<S>) -> Result<Patch>;
 }
 
 macro_rules! impl_effect_handler {
@@ -21,15 +23,15 @@ macro_rules! impl_effect_handler {
         impl<S, F, $($ty,)* Res> Effect<S, ($($ty,)*)> for F
         where
             F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
-            Res: IntoResult,
+            Res: IntoResult<Output = Patch>,
             $($ty: FromSystem<S>,)*
         {
 
-            fn call(self, system: System, context: Context<S>) -> Result {
+            fn call(self, system: System, context: Context<S>) -> Result<Patch> {
                 $(
                     let $ty = match $ty::from_system(&system, &context) {
                         Ok(value) => value,
-                        Err(failure) => return return Err(failure.into_error())
+                        Err(failure) => return Err(failure.into_error())
                     };
                 )*
 
@@ -100,7 +102,7 @@ where
     E: Effect<S, T> + Send + 'static,
     T: Send + 'static,
 {
-    type Future = Ready<Result>;
+    type Future = Ready<Result<Patch>>;
 
     fn call(self, system: System, context: Context<S>) -> Self::Future {
         ready(self.effect.call(system, context))

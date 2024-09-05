@@ -14,6 +14,12 @@ pub enum Error {
     #[error("no target available on the context")]
     TargetIsNone,
 
+    #[error("cannot expand a unit task")]
+    CannotExpandTask,
+
+    #[error("condition failed: ${0}")]
+    ConditionFailed(String),
+
     #[error("cannot resolve state path `{path}`: ${reason}")]
     TargetResolveFailed {
         path: String,

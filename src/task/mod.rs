@@ -9,7 +9,7 @@ use json_patch::{Patch, PatchOperation};
 use crate::error::Error;
 use crate::system::{Context, System};
 
-use action::ActionResult;
+use action::ActionOutput;
 use boxed::*;
 use effect::{Effect, IntoAction};
 
@@ -47,8 +47,8 @@ impl<S> Job<S> {
     }
 }
 
-type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result>;
-type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> ActionResult>;
+type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result<Patch>>;
+type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> ActionOutput>;
 type Expand<S> = Box<dyn FnOnce(&System, Context<S>) -> core::result::Result<Vec<Task<S>>, Error>>;
 
 pub enum Task<S> {
@@ -82,7 +82,7 @@ impl<S> Task<S> {
 
     /// Run every action in the job sequentially and return the
     /// aggregate changes.
-    pub fn dry_run(self, system: &System) -> Result {
+    pub fn dry_run(self, system: &System) -> Result<Patch> {
         match self {
             Self::Unit {
                 context, dry_run, ..
@@ -126,7 +126,7 @@ impl<S> Task<S> {
     /// If the job is a Unit, it will return an empty vector
     pub fn expand(self, system: &System) -> core::result::Result<Vec<Task<S>>, Error> {
         match self {
-            Self::Unit { .. } => Ok(vec![]),
+            Self::Unit { .. } => Err(Error::CannotExpandTask),
             Self::Group {
                 context, expand, ..
             } => (expand)(system, context),
@@ -151,7 +151,7 @@ mod tests {
         CounterReached,
     }
 
-    fn my_task_effect(mut counter: Update<i32>, tgt: Target<i32>) -> impl IntoResult {
+    fn plus_one(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
         if *counter < *tgt {
             *counter += 1;
         }
@@ -160,7 +160,10 @@ mod tests {
         counter
     }
 
-    async fn my_task_action(mut counter: Update<i32>, tgt: Target<i32>) -> impl IntoResult {
+    async fn plus_one_action(
+        mut counter: Update<i32>,
+        tgt: Target<i32>,
+    ) -> core::result::Result<Update<i32>, MyError> {
         if *counter < *tgt {
             *counter += 1;
         } else {
@@ -173,11 +176,11 @@ mod tests {
     #[test]
     fn it_allows_to_dry_run_tasks() {
         let system = System::from(0);
-        let task = Job::from(my_task_effect);
-        let action = task.bind(Context::from(1));
+        let job = Job::from(plus_one);
+        let task = job.bind(Context::from(1));
 
         // Get the list of changes that the action performs
-        let changes = action.dry_run(&system).unwrap();
+        let changes = task.dry_run(&system).unwrap();
         assert_eq!(
             changes,
             from_value::<Patch>(json!([
@@ -190,11 +193,11 @@ mod tests {
     #[tokio::test]
     async fn it_runs_async_actions() {
         let mut system = System::from(1);
-        let task = Job::from(my_task_effect);
-        let action = task.bind(Context::from(1));
+        let job = Job::from(plus_one);
+        let task = job.bind(Context::from(1));
 
         // Run the action
-        action.run(&mut system).await.unwrap();
+        task.run(&mut system).await.unwrap();
 
         let state = system.state::<i32>().unwrap();
 
@@ -205,11 +208,11 @@ mod tests {
     #[tokio::test]
     async fn it_allows_extending_actions_with_effect() {
         let mut system = System::from(0);
-        let task = my_task_action.with_effect(my_task_effect);
-        let action = task.bind(Context::from(1));
+        let job = plus_one_action.with_effect(plus_one);
+        let task = job.bind(Context::from(1));
 
         // Run the action
-        action.run(&mut system).await.unwrap();
+        task.run(&mut system).await.unwrap();
 
         // Check that the system state was modified
         let state = system.state::<i32>().unwrap();
@@ -219,10 +222,10 @@ mod tests {
     #[tokio::test]
     async fn it_allows_actions_returning_errors() {
         let mut system = System::from(1);
-        let task = my_task_action.with_effect(my_task_effect);
-        let action = task.bind(Context::from(1));
+        let job = plus_one_action.with_effect(plus_one);
+        let task = job.bind(Context::from(1));
 
-        let res = action.run(&mut system).await;
+        let res = task.run(&mut system).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().to_string(), "counter already reached");
     }

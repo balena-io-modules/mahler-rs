@@ -1,9 +1,10 @@
 use super::result::{IntoResult, Result};
+use super::Task;
 use crate::error::IntoError;
 use crate::system::{Context, FromSystem, System};
 
 pub trait Method<S, T>: Clone + Send + 'static {
-    fn call(self, system: System, context: Context<S>) -> Result;
+    fn call(self, system: System, context: Context<S>) -> Result<Vec<Task<S>>>;
 }
 
 macro_rules! impl_method_handler {
@@ -14,11 +15,11 @@ macro_rules! impl_method_handler {
         impl<S, F, $($ty,)* Res> Method<S, ($($ty,)*)> for F
         where
             F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
-            Res: IntoResult,
+            Res: IntoResult<Output = Vec<Task<S>>>,
             $($ty: FromSystem<S>,)*
         {
 
-            fn call(self, system: System, context: Context<S>) -> Result {
+            fn call(self, system: System, context: Context<S>) -> Result<Vec<Task<S>>> {
                 $(
                     let $ty = match $ty::from_system(&system, &context) {
                         Ok(value) => value,
