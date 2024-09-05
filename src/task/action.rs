@@ -1,5 +1,5 @@
 use super::effect::Effect;
-use crate::task::Task;
+use crate::task::Job;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -13,12 +13,12 @@ pub trait Action<S, T>: Clone + Send + Sized + 'static {
 
     fn call(self, state: System, context: Context<S>) -> Self::Future;
 
-    fn with_effect<E>(self, effect: E) -> Task<S>
+    fn with_effect<E>(self, effect: E) -> Job<S>
     where
         S: 'static,
         E: Effect<S, T>,
     {
-        Task::new(effect, self)
+        Job::new(effect, self)
     }
 }
 

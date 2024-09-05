@@ -1,22 +1,27 @@
 mod action;
+mod boxed;
 mod effect;
 mod method;
 mod result;
 
+use json_patch::{Patch, PatchOperation};
+
 use crate::error::Error;
 use crate::system::{Context, System};
-pub use action::Action;
+
 use action::ActionResult;
+use boxed::*;
 use effect::{Effect, IntoAction};
-use json_patch::{Patch, PatchOperation};
+
+pub use action::Action;
 pub use method::Method;
 pub(crate) use result::*;
 
-pub struct Task<S> {
-    builder: Box<dyn ToJob<S>>,
+pub struct Job<S> {
+    builder: BoxedIntoTask<S>,
 }
 
-impl<S> Task<S> {
+impl<S> Job<S> {
     fn new<E, A, T>(effect: E, action: A) -> Self
     where
         E: Effect<S, T>,
@@ -24,13 +29,7 @@ impl<S> Task<S> {
         S: 'static,
     {
         Self {
-            builder: Box::new(JobUnitBuilder {
-                effect,
-                action,
-                build: |effect: E, action: A, context: Context<S>| {
-                    Job::unit(effect, action, context)
-                },
-            }),
+            builder: BoxedIntoTask::from_unit(effect, action),
         }
     }
 
@@ -43,36 +42,16 @@ impl<S> Task<S> {
         Self::new(effect.clone(), IntoAction::new(effect))
     }
 
-    pub fn bind(&self, context: Context<S>) -> Job<S> {
-        self.builder.to_job(context)
-    }
-}
-
-pub(crate) trait ToJob<S> {
-    fn to_job(&self, context: Context<S>) -> Job<S>;
-}
-
-struct JobUnitBuilder<E, A, S> {
-    pub(crate) effect: E,
-    pub(crate) action: A,
-    pub(crate) build: fn(E, A, Context<S>) -> Job<S>,
-}
-
-impl<E, H, S> ToJob<S> for JobUnitBuilder<E, H, S>
-where
-    E: Clone,
-    H: Clone,
-{
-    fn to_job(&self, context: Context<S>) -> Job<S> {
-        (self.build)(self.effect.clone(), self.action.clone(), context)
+    pub fn bind(&self, context: Context<S>) -> Task<S> {
+        self.builder.clone().into_task(context)
     }
 }
 
 type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result>;
 type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> ActionResult>;
-type Expand<S> = Box<dyn FnOnce(&System, Context<S>) -> Vec<Job<S>>>;
+type Expand<S> = Box<dyn FnOnce(&System, Context<S>) -> core::result::Result<Vec<Task<S>>, Error>>;
 
-pub enum Job<S> {
+pub enum Task<S> {
     Unit {
         context: Context<S>,
         dry_run: DryRun<S>,
@@ -84,7 +63,7 @@ pub enum Job<S> {
     },
 }
 
-impl<S> Job<S> {
+impl<S> Task<S> {
     pub(crate) fn unit<E, H, T>(effect: E, handler: H, context: Context<S>) -> Self
     where
         E: Effect<S, T>,
@@ -110,7 +89,8 @@ impl<S> Job<S> {
             } => (dry_run)(system, context),
             Self::Group { context, expand } => {
                 let mut changes: Vec<PatchOperation> = vec![];
-                for job in (expand)(system, context) {
+                let jobs = (expand)(system, context)?;
+                for job in jobs {
                     job.dry_run(system)
                         .map(|Patch(mut patch)| changes.append(&mut patch))?;
                 }
@@ -132,7 +112,8 @@ impl<S> Job<S> {
             Self::Group {
                 context, expand, ..
             } => {
-                for job in (expand)(system, context) {
+                let jobs = (expand)(system, context)?;
+                for job in jobs {
                     Box::pin(job.run(system)).await?;
                 }
                 Ok(())
@@ -143,9 +124,9 @@ impl<S> Job<S> {
     /// Expand the job into its composing sub-jobs.
     ///
     /// If the job is a Unit, it will return an empty vector
-    pub fn expand(self, system: &System) -> Vec<Job<S>> {
+    pub fn expand(self, system: &System) -> core::result::Result<Vec<Task<S>>, Error> {
         match self {
-            Self::Unit { .. } => vec![],
+            Self::Unit { .. } => Ok(vec![]),
             Self::Group {
                 context, expand, ..
             } => (expand)(system, context),
@@ -192,7 +173,7 @@ mod tests {
     #[test]
     fn it_allows_to_dry_run_tasks() {
         let system = System::from(0);
-        let task = Task::from(my_task_effect);
+        let task = Job::from(my_task_effect);
         let action = task.bind(Context::from(1));
 
         // Get the list of changes that the action performs
@@ -209,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn it_runs_async_actions() {
         let mut system = System::from(1);
-        let task = Task::from(my_task_effect);
+        let task = Job::from(my_task_effect);
         let action = task.bind(Context::from(1));
 
         // Run the action
@@ -271,7 +252,7 @@ mod tests {
         };
 
         let mut system = System::from(state);
-        let task = Task::from(update_counter);
+        let task = Job::from(update_counter);
         let action = task.bind(
             Context::from(State {
                 counters: [("a".to_string(), 2), ("b".to_string(), 1)].into(),
