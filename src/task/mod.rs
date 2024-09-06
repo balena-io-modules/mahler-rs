@@ -8,41 +8,45 @@ use json_patch::{Patch, PatchOperation};
 
 use crate::error::Error;
 use crate::system::{Context, System};
-
 use action::ActionOutput;
 use boxed::*;
-use effect::{Effect, IntoAction};
 
 pub use action::Action;
+pub use effect::Effect;
 pub use method::Method;
 pub(crate) use result::*;
 
+/// Jobs are generic work definitions. They can be converted to tasks
+/// by calling into_task with a specific context.
+///
+/// Jobs are re-usable
 pub struct Job<S> {
     builder: BoxedIntoTask<S>,
 }
 
 impl<S> Job<S> {
-    fn new<E, A, T>(effect: E, action: A) -> Self
+    pub(crate) fn from_action<E, A, T>(effect: E, action: A) -> Self
     where
         E: Effect<S, T>,
         A: Action<S, T>,
         S: 'static,
     {
         Self {
-            builder: BoxedIntoTask::from_unit(effect, action),
+            builder: BoxedIntoTask::from_action(effect, action),
         }
     }
 
-    pub fn from<E, T>(effect: E) -> Self
+    pub(crate) fn from_method<M, T>(method: M) -> Self
     where
-        E: Effect<S, T> + 'static,
-        T: Send + 'static,
-        S: Send + Sync + 'static,
+        M: Method<S, T>,
+        S: 'static,
     {
-        Self::new(effect.clone(), IntoAction::new(effect))
+        Self {
+            builder: BoxedIntoTask::from_method(method),
+        }
     }
 
-    pub fn bind(&self, context: Context<S>) -> Task<S> {
+    pub fn into_task(&self, context: Context<S>) -> Task<S> {
         self.builder.clone().into_task(context)
     }
 }
@@ -51,6 +55,8 @@ type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result<Patch>>;
 type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> ActionOutput>;
 type Expand<S> = Box<dyn FnOnce(&System, Context<S>) -> core::result::Result<Vec<Task<S>>, Error>>;
 
+/// A task is either a concrete unit of work or a grouping of work that can be either be run in
+/// sequence or in parallel
 pub enum Task<S> {
     Unit {
         context: Context<S>,
@@ -80,6 +86,18 @@ impl<S> Task<S> {
         }
     }
 
+    pub(crate) fn group<M, T>(method: M, context: Context<S>) -> Self
+    where
+        M: Method<S, T>,
+    {
+        Self::Group {
+            context,
+            expand: Box::new(|system: &System, context: Context<S>| {
+                method.call(system.clone(), context)
+            }),
+        }
+    }
+
     /// Run every action in the job sequentially and return the
     /// aggregate changes.
     pub fn dry_run(self, system: &System) -> Result<Patch> {
@@ -88,11 +106,18 @@ impl<S> Task<S> {
                 context, dry_run, ..
             } => (dry_run)(system, context),
             Self::Group { context, expand } => {
+                // NOTE: This is only implemented for testing purposes, the planner will need
+                // to dry run tasks as units to check for conflicts
                 let mut changes: Vec<PatchOperation> = vec![];
                 let jobs = (expand)(system, context)?;
+                let mut system = system.clone();
                 for job in jobs {
-                    job.dry_run(system)
-                        .map(|Patch(mut patch)| changes.append(&mut patch))?;
+                    job.dry_run(&system).and_then(|Patch(patch)| {
+                        // Save a copy of the changes
+                        changes.append(&mut patch.clone());
+                        // And apply the changes to the system copy
+                        system.patch(Patch(patch))
+                    })?;
                 }
                 Ok(Patch(changes))
             }
@@ -106,11 +131,13 @@ impl<S> Task<S> {
                 let changes = (run)(system, context).await?;
                 system.patch(changes)
             }
-            // NOTE: This is only implemented for testing purposes, workflows returned
-            // by a planner will only include unit tasks as the workflow defines whether
-            // the tasks can be executed concurrently or in parallel
             Self::Group {
-                context, expand, ..
+                // NOTE: This is only implemented for testing purposes, workflows returned
+                // by the planner will only include unit tasks as the workflow defines whether
+                // the tasks can be executed concurrently or in parallel
+                context,
+                expand,
+                ..
             } => {
                 let jobs = (expand)(system, context)?;
                 for job in jobs {
@@ -160,6 +187,17 @@ mod tests {
         counter
     }
 
+    fn plus_two(counter: Update<i32>, tgt: Target<i32>) -> Vec<Task<i32>> {
+        if *tgt - *counter < 2 {
+            return vec![];
+        }
+
+        vec![
+            plus_one.into_task(Context::from_target(*tgt)),
+            plus_one.into_task(Context::from_target(*tgt)),
+        ]
+    }
+
     async fn plus_one_action(
         mut counter: Update<i32>,
         tgt: Target<i32>,
@@ -176,8 +214,8 @@ mod tests {
     #[test]
     fn it_allows_to_dry_run_tasks() {
         let system = System::from(0);
-        let job = Job::from(plus_one);
-        let task = job.bind(Context::from(1));
+        let job = plus_one.into_job();
+        let task = job.into_task(Context::from_target(1));
 
         // Get the list of changes that the action performs
         let changes = task.dry_run(&system).unwrap();
@@ -190,11 +228,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn it_allows_to_dry_run_composite_tasks() {
+        let system = System::from(0);
+        let job = plus_two.into_job();
+        let task = job.into_task(Context::from_target(2));
+
+        // Get the list of changes that the method performs
+        let changes = task.dry_run(&system).unwrap();
+        assert_eq!(
+            changes,
+            from_value::<Patch>(json!([
+              { "op": "replace", "path": "", "value": 1 },
+              { "op": "replace", "path": "", "value": 2 },
+            ]))
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn it_allows_to_run_composite_tasks() {
+        let mut system = System::from(0);
+        let task = plus_two.into_task(Context::from_target(2));
+
+        // Run the action
+        task.run(&mut system).await.unwrap();
+
+        let state = system.state::<i32>().unwrap();
+
+        // The referenced value was modified
+        assert_eq!(state, 2);
+    }
+
     #[tokio::test]
     async fn it_runs_async_actions() {
         let mut system = System::from(1);
-        let job = Job::from(plus_one);
-        let task = job.bind(Context::from(1));
+        let task = plus_one.into_task(Context::from_target(1));
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -209,7 +278,7 @@ mod tests {
     async fn it_allows_extending_actions_with_effect() {
         let mut system = System::from(0);
         let job = plus_one_action.with_effect(plus_one);
-        let task = job.bind(Context::from(1));
+        let task = job.into_task(Context::from_target(1));
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -223,7 +292,7 @@ mod tests {
     async fn it_allows_actions_returning_errors() {
         let mut system = System::from(1);
         let job = plus_one_action.with_effect(plus_one);
-        let task = job.bind(Context::from(1));
+        let task = job.into_task(Context::from_target(1));
 
         let res = task.run(&mut system).await;
         assert!(res.is_err());
@@ -255,9 +324,9 @@ mod tests {
         };
 
         let mut system = System::from(state);
-        let task = Job::from(update_counter);
-        let action = task.bind(
-            Context::from(State {
+        let task = update_counter.into_job();
+        let action = task.into_task(
+            Context::from_target(State {
                 counters: [("a".to_string(), 2), ("b".to_string(), 1)].into(),
             })
             .with_path("/counters/a"),

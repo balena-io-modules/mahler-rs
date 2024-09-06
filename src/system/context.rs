@@ -15,7 +15,7 @@ impl<S> Default for Context<S> {
 }
 
 impl<S> Context<S> {
-    pub fn from(target: S) -> Self {
+    pub fn from_target(target: S) -> Self {
         Self {
             target: Some(target),
             path: Path::default(),

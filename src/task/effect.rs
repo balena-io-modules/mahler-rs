@@ -4,7 +4,7 @@ use std::{
     marker::PhantomData,
 };
 
-use super::action::Action;
+use super::{action::Action, Job, Task};
 use crate::error::IntoError;
 use crate::{
     system::{Context, FromSystem, System},
@@ -13,6 +13,22 @@ use crate::{
 
 pub trait Effect<S, T>: Clone + Send + 'static {
     fn call(self, system: System, context: Context<S>) -> Result<Patch>;
+
+    fn into_job(self) -> Job<S>
+    where
+        S: Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        Job::from_action(self.clone(), IntoAction::new(self))
+    }
+
+    fn into_task(self, context: Context<S>) -> Task<S>
+    where
+        S: Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        self.into_job().into_task(context)
+    }
 }
 
 macro_rules! impl_effect_handler {
@@ -23,6 +39,7 @@ macro_rules! impl_effect_handler {
         impl<S, F, $($ty,)* Res> Effect<S, ($($ty,)*)> for F
         where
             F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
+
             Res: IntoResult<Output = Patch>,
             $($ty: FromSystem<S>,)*
         {

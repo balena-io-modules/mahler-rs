@@ -1,10 +1,34 @@
 use super::result::{IntoResult, Result};
-use super::Task;
+use super::{Job, Task};
 use crate::error::IntoError;
 use crate::system::{Context, FromSystem, System};
 
 pub trait Method<S, T>: Clone + Send + 'static {
     fn call(self, system: System, context: Context<S>) -> Result<Vec<Task<S>>>;
+
+    fn into_job(self) -> Job<S>
+    where
+        S: Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        Job::from_method(self.clone())
+    }
+
+    fn into_task(self, context: Context<S>) -> Task<S>
+    where
+        S: Send + Sync + 'static,
+        T: Send + 'static,
+    {
+        Job::from_method(self.clone()).into_task(context)
+    }
+}
+
+impl<S> IntoResult for Vec<Task<S>> {
+    type Output = Vec<Task<S>>;
+
+    fn into_result(self, _: &System) -> Result<Self::Output> {
+        Ok(self)
+    }
 }
 
 macro_rules! impl_method_handler {

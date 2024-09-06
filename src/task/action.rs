@@ -20,7 +20,7 @@ pub trait Action<S, T>: Clone + Send + Sized + 'static {
         S: 'static,
         E: Effect<S, T>,
     {
-        Job::new(effect, self)
+        Job::from_action(effect, self)
     }
 }
 
