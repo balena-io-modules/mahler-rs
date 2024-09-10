@@ -8,14 +8,14 @@ use std::ops::{Deref, DerefMut};
 use crate::error::Error;
 use crate::path::Path;
 use crate::system::{Context, FromSystem, System};
-use crate::task::{IntoResult, Result};
+use crate::task::{Effect, IntoEffect, IntoResult, Result};
 
 /// Extracts a sub-element of a state S as indicated by
 /// a path.
 ///
 /// The state is None if the path does not exist under the parent
 /// path and it can be created using the `create` function
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct View<S, T = S> {
     state: Option<T>,
     path: Path,
@@ -103,9 +103,7 @@ impl<S, T> DerefMut for View<S, T> {
     }
 }
 
-impl<S, T: Serialize> IntoResult for View<S, T> {
-    type Output = Patch;
-
+impl<S, T: Serialize> IntoResult<Patch> for View<S, T> {
     fn into_result(self, system: &System) -> Result<Patch> {
         // Get the root value
         let mut after = system.clone();
@@ -127,9 +125,13 @@ impl<S, T: Serialize> IntoResult for View<S, T> {
             // Otherwise delete the path at the pointer
             pointer.delete(root);
         }
-
-        // Return the difference between the roots
         Ok(diff(system.root(), root))
+    }
+}
+
+impl<S, T: Serialize> IntoEffect<Patch, Error> for View<S, T> {
+    fn into_effect(self, system: &System) -> Effect<Patch, Error> {
+        Effect::from(self.into_result(system))
     }
 }
 
@@ -138,7 +140,7 @@ impl<S, T: Serialize> IntoResult for View<S, T> {
 ///
 /// The state is always initialized to the type default,
 /// no matter if it already exists.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Create<S, T = S> {
     state: T,
     path: Path,
@@ -192,11 +194,15 @@ impl<S, T: DeserializeOwned + Default> FromSystem<S> for Create<S, T> {
     }
 }
 
-impl<S, T: Serialize> IntoResult for Create<S, T> {
-    type Output = Patch;
-
+impl<S, T: Serialize> IntoResult<Patch> for Create<S, T> {
     fn into_result(self, system: &System) -> Result<Patch> {
         View::<S, T>::new(Some(self.state), self.path).into_result(system)
+    }
+}
+
+impl<S, T: Serialize> IntoEffect<Patch, Error> for Create<S, T> {
+    fn into_effect(self, system: &System) -> Effect<Patch, Error> {
+        Effect::from(self.into_result(system))
     }
 }
 
@@ -219,7 +225,7 @@ impl<S, T> DerefMut for Create<S, T> {
 ///
 /// Initializing the extractor will fail if there is no value at the
 /// given path
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Update<S, T = S> {
     state: T,
     path: Path,
@@ -268,10 +274,14 @@ impl<S, T> DerefMut for Update<S, T> {
     }
 }
 
-impl<S, T: Serialize> IntoResult for Update<S, T> {
-    type Output = Patch;
+impl<S, T: Serialize> IntoResult<Patch> for Update<S, T> {
     fn into_result(self, system: &System) -> Result<Patch> {
         View::<S, T>::new(Some(self.state), self.path).into_result(system)
+    }
+}
+impl<S, T: Serialize> IntoEffect<Patch, Error> for Update<S, T> {
+    fn into_effect(self, system: &System) -> Effect<Patch, Error> {
+        Effect::from(self.into_result(system))
     }
 }
 
@@ -313,6 +323,7 @@ mod tests {
         *value = 2;
 
         // Get the list changes to the view
+
         let changes = view.into_result(&system).unwrap();
         assert_eq!(
             changes,

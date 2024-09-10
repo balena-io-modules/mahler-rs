@@ -1,20 +1,25 @@
-mod action;
 mod boxed;
 mod effect;
+mod handler;
 mod method;
 mod result;
 
 use json_patch::{Patch, PatchOperation};
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::error::Error;
 use crate::system::{Context, System};
-use action::ActionOutput;
 use boxed::*;
 
-pub use action::Action;
 pub use effect::Effect;
+pub use handler::Handler;
 pub use method::Method;
 pub(crate) use result::*;
+
+pub trait IntoEffect<O, E, I = O> {
+    fn into_effect(self, system: &System) -> Effect<O, E, I>;
+}
 
 /// Jobs are generic work definitions. They can be converted to tasks
 /// by calling into_task with a specific context.
@@ -25,14 +30,14 @@ pub struct Job<S> {
 }
 
 impl<S> Job<S> {
-    pub(crate) fn from_action<E, A, T>(effect: E, action: A) -> Self
+    pub(crate) fn from_handler<H, T, I>(handler: H) -> Self
     where
-        E: Effect<S, T>,
-        A: Action<S, T>,
+        H: Handler<S, T, I>,
         S: 'static,
+        I: 'static,
     {
         Self {
-            builder: BoxedIntoTask::from_action(effect, action),
+            builder: BoxedIntoTask::from_handler(handler),
         }
     }
 
@@ -51,6 +56,7 @@ impl<S> Job<S> {
     }
 }
 
+type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
 type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result<Patch>>;
 type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> ActionOutput>;
 type Expand<S> = Box<dyn FnOnce(&System, Context<S>) -> core::result::Result<Vec<Task<S>>, Error>>;
@@ -70,18 +76,28 @@ pub enum Task<S> {
 }
 
 impl<S> Task<S> {
-    pub(crate) fn unit<E, H, T>(effect: E, handler: H, context: Context<S>) -> Self
+    pub(crate) fn unit<H, T, I>(handler: H, context: Context<S>) -> Self
     where
-        E: Effect<S, T>,
-        H: Action<S, T>,
+        H: Handler<S, T, I>,
+        S: 'static,
+        I: 'static,
     {
+        let hc = handler.clone();
         Self::Unit {
             context,
             dry_run: Box::new(|system: &System, context: Context<S>| {
-                effect.call(system.clone(), context)
+                let effect = hc.call(system, context);
+                effect.dry_run()
             }),
             run: Box::new(|system: &System, context: Context<S>| {
-                Box::pin(handler.call(system.clone(), context))
+                let effect = handler.call(system, context);
+
+                Box::pin(async {
+                    match effect.run().await {
+                        Ok(changes) => Ok(changes),
+                        Err(err) => Err(Error::Other(Box::new(err))),
+                    }
+                })
             }),
         }
     }
@@ -171,6 +187,7 @@ mod tests {
     use serde_json::{from_value, json};
     use std::collections::HashMap;
     use thiserror::Error;
+    use tokio::time::{sleep, Duration};
 
     #[derive(Error, Debug)]
     enum MyError {
@@ -198,17 +215,16 @@ mod tests {
         ]
     }
 
-    async fn plus_one_action(
-        mut counter: Update<i32>,
-        tgt: Target<i32>,
-    ) -> core::result::Result<Update<i32>, MyError> {
-        if *counter < *tgt {
-            *counter += 1;
-        } else {
-            return Err(MyError::CounterReached);
+    fn plus_one_async(counter: Update<i32>, tgt: Target<i32>) -> Effect<Update<i32>, MyError> {
+        if *counter >= *tgt {
+            return Effect::error(MyError::CounterReached);
         }
 
-        Ok(counter)
+        Effect::of(counter).with_io(|mut counter| async {
+            sleep(Duration::from_millis(10)).await;
+            *counter += 1;
+            Ok(counter)
+        })
     }
 
     #[test]
@@ -262,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_runs_async_actions() {
-        let mut system = System::from(1);
+        let mut system = System::from(0);
         let task = plus_one.into_task(Context::from_target(1));
 
         // Run the action
@@ -277,7 +293,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_extending_actions_with_effect() {
         let mut system = System::from(0);
-        let job = plus_one_action.with_effect(plus_one);
+        let job = plus_one_async.into_job();
         let task = job.into_task(Context::from_target(1));
 
         // Run the action
@@ -291,8 +307,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_actions_returning_errors() {
         let mut system = System::from(1);
-        let job = plus_one_action.with_effect(plus_one);
-        let task = job.into_task(Context::from_target(1));
+        let task = plus_one_async.into_task(Context::from_target(1));
 
         let res = task.run(&mut system).await;
         assert!(res.is_err());

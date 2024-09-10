@@ -1,21 +1,18 @@
-use super::{Action, Effect, Method, Task};
+use super::{Handler, Method, Task};
 use crate::system::Context;
 
 pub(crate) struct BoxedIntoTask<S>(Box<dyn ErasedIntoTask<S>>);
 
 impl<S> BoxedIntoTask<S> {
-    pub fn from_action<E, A, T>(effect: E, action: A) -> Self
+    pub fn from_handler<H, T, I>(handler: H) -> Self
     where
-        E: Effect<S, T>,
-        A: Action<S, T>,
+        H: Handler<S, T, I>,
         S: 'static,
+        I: 'static,
     {
         Self(Box::new(MakeUnitTask {
-            effect,
-            action,
-            into_task: |effect: E, action: A, context: Context<S>| {
-                Task::unit(effect, action, context)
-            },
+            handler,
+            into_task: |handler: H, context: Context<S>| Task::unit(handler, context),
         }))
     }
 
@@ -47,28 +44,25 @@ trait ErasedIntoTask<S> {
     fn into_task(self: Box<Self>, context: Context<S>) -> Task<S>;
 }
 
-struct MakeUnitTask<E, A, S> {
-    pub(crate) effect: E,
-    pub(crate) action: A,
-    pub(crate) into_task: fn(E, A, Context<S>) -> Task<S>,
+struct MakeUnitTask<H, S> {
+    pub(crate) handler: H,
+    pub(crate) into_task: fn(H, Context<S>) -> Task<S>,
 }
 
-impl<S, E, A> ErasedIntoTask<S> for MakeUnitTask<E, A, S>
+impl<S, H> ErasedIntoTask<S> for MakeUnitTask<H, S>
 where
     S: 'static,
-    E: Clone + 'static,
-    A: Clone + 'static,
+    H: Clone + 'static,
 {
     fn clone_box(&self) -> Box<dyn ErasedIntoTask<S>> {
         Box::new(Self {
-            effect: self.effect.clone(),
-            action: self.action.clone(),
+            handler: self.handler.clone(),
             into_task: self.into_task,
         })
     }
 
     fn into_task(self: Box<Self>, context: Context<S>) -> Task<S> {
-        (self.into_task)(self.effect.clone(), self.action.clone(), context)
+        (self.into_task)(self.handler.clone(), context)
     }
 }
 

@@ -23,10 +23,8 @@ pub trait Method<S, T>: Clone + Send + 'static {
     }
 }
 
-impl<S> IntoResult for Vec<Task<S>> {
-    type Output = Vec<Task<S>>;
-
-    fn into_result(self, _: &System) -> Result<Self::Output> {
+impl<S> IntoResult<Vec<Task<S>>> for Vec<Task<S>> {
+    fn into_result(self, _: &System) -> Result<Vec<Task<S>>> {
         Ok(self)
     }
 }
@@ -39,7 +37,7 @@ macro_rules! impl_method_handler {
         impl<S, F, $($ty,)* Res> Method<S, ($($ty,)*)> for F
         where
             F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
-            Res: IntoResult<Output = Vec<Task<S>>>,
+            Res: IntoResult<Vec<Task<S>>>,
             $($ty: FromSystem<S>,)*
         {
 

@@ -1,127 +1,181 @@
-use json_patch::Patch;
-use std::{
-    future::{ready, Ready},
-    marker::PhantomData,
-};
+use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 
-use super::{action::Action, Job, Task};
-use crate::error::IntoError;
-use crate::{
-    system::{Context, FromSystem, System},
-    task::result::{IntoResult, Result},
-};
+type IOResult<O, E> = Pin<Box<dyn Future<Output = Result<O, E>>>>;
+type IO<O, E = Infallible, I = O> = Box<dyn FnOnce(I) -> IOResult<O, E>>;
+type Pure<O, E, I> = Box<dyn FnOnce(I) -> Result<O, E>>;
 
-pub trait Effect<S, T>: Clone + Send + 'static {
-    fn call(self, system: System, context: Context<S>) -> Result<Patch>;
+pub enum Effect<O, E = Infallible, I = O> {
+    Pure(Result<O, E>),
+    IO {
+        input: Result<I, E>,
+        pure: Pure<O, E, I>,
+        io: IO<O, E, I>,
+    },
+}
 
-    fn into_job(self) -> Job<S>
-    where
-        S: Send + Sync + 'static,
-        T: Send + 'static,
-    {
-        Job::from_action(self.clone(), IntoAction::new(self))
+impl<O: 'static, E: 'static> Effect<O, E> {
+    pub fn of(o: O) -> Self {
+        Effect::Pure(Ok(o))
     }
 
-    fn into_task(self, context: Context<S>) -> Task<S>
-    where
-        S: Send + Sync + 'static,
-        T: Send + 'static,
-    {
-        self.into_job().into_task(context)
+    pub fn with_io<F: FnOnce(O) -> Res + 'static, Res: Future<Output = Result<O, E>>>(
+        self,
+        f: F,
+    ) -> Effect<O, E> {
+        let io: IO<O, E> = Box::new(|o| Box::pin(async { f(o).await }));
+        let pure = Box::new(|o| Ok(o));
+        match self {
+            Effect::Pure(output) => Effect::IO {
+                input: output,
+                pure,
+                io,
+            },
+            Effect::IO { input, .. } => Effect::IO { input, pure, io },
+        }
     }
 }
 
-macro_rules! impl_effect_handler {
-    (
-        $first:ident, $($ty:ident),*
-    ) => {
-        #[allow(non_snake_case, unused)]
-        impl<S, F, $($ty,)* Res> Effect<S, ($($ty,)*)> for F
-        where
-            F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
+impl<T: 'static, E: 'static, I: 'static> Effect<T, E, I> {
+    pub fn error(e: E) -> Self {
+        Effect::Pure(Err(e))
+    }
 
-            Res: IntoResult<Output = Patch>,
-            $($ty: FromSystem<S>,)*
-        {
-
-            fn call(self, system: System, context: Context<S>) -> Result<Patch> {
-                $(
-                    let $ty = match $ty::from_system(&system, &context) {
-                        Ok(value) => value,
-                        Err(failure) => return Err(failure.into_error())
-                    };
-                )*
-
-                let res = (self)($($ty,)*);
-
-                // Update the system
-                res.into_result(&system)
+    pub fn map<O, F: FnOnce(T) -> O + Clone + 'static>(self, fu: F) -> Effect<O, E, I> {
+        match self {
+            Effect::Pure(output) => Effect::Pure(output.map(fu)),
+            Effect::IO { input, pure, io } => {
+                let fc = fu.clone();
+                Effect::IO {
+                    input,
+                    pure: Box::new(|i| pure(i).map(fc)),
+                    io: Box::new(|i| {
+                        Box::pin(async {
+                            let o = io(i).await?;
+                            Ok(fu(o))
+                        })
+                    }),
+                }
             }
         }
-    };
-}
+    }
 
-impl_effect_handler!(T1,);
-impl_effect_handler!(T1, T2);
-impl_effect_handler!(T1, T2, T3);
-impl_effect_handler!(T1, T2, T3, T4);
-impl_effect_handler!(T1, T2, T3, T4, T5);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15);
-impl_effect_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16);
+    pub fn and_then<O, F: FnOnce(T) -> Result<O, E> + Clone + 'static>(
+        self,
+        fu: F,
+    ) -> Effect<O, E, I> {
+        match self {
+            Effect::Pure(output) => Effect::Pure(output.and_then(fu)),
+            Effect::IO { input, pure, io } => {
+                let fc = fu.clone();
+                Effect::IO {
+                    input,
+                    pure: Box::new(|i| pure(i).and_then(fc)),
+                    io: Box::new(|i| {
+                        Box::pin(async {
+                            let o = io(i).await?;
+                            fu(o)
+                        })
+                    }),
+                }
+            }
+        }
+    }
 
-pub(crate) struct IntoAction<S, T, E>
-where
-    E: Effect<S, T>,
-{
-    effect: E,
-    _state: PhantomData<S>,
-    _args: PhantomData<T>,
-}
+    pub fn map_err<E1, F: FnOnce(E) -> E1 + Clone + 'static>(self, fe: F) -> Effect<T, E1, I> {
+        match self {
+            Effect::Pure(output) => Effect::Pure(output.map_err(fe)),
+            Effect::IO { input, pure, io } => {
+                let fc1 = fe.clone();
+                let fc2 = fe.clone();
+                Effect::IO {
+                    input: input.map_err(fc1),
+                    pure: Box::new(|i| pure(i).map_err(fc2)),
+                    io: Box::new(|i| Box::pin(async { io(i).await.map_err(fe) })),
+                }
+            }
+        }
+    }
 
-impl<S, T, E> Clone for IntoAction<S, T, E>
-where
-    E: Effect<S, T>,
-{
-    fn clone(&self) -> Self {
-        IntoAction {
-            effect: self.effect.clone(),
-            _state: PhantomData::<S>,
-            _args: PhantomData::<T>,
+    pub fn dry_run(self) -> Result<T, E> {
+        match self {
+            Effect::Pure(output) => output,
+            Effect::IO { input, pure, .. } => input.and_then(pure),
+        }
+    }
+
+    pub async fn run(self) -> Result<T, E> {
+        match self {
+            Effect::Pure(output) => output,
+            Effect::IO { input, io, .. } => {
+                let i = input?;
+                io(i).await
+            }
         }
     }
 }
 
-impl<S, T, E> IntoAction<S, T, E>
-where
-    E: Effect<S, T>,
-{
-    pub fn new(effect: E) -> Self {
-        IntoAction {
-            effect,
-            _state: PhantomData::<S>,
-            _args: PhantomData::<T>,
-        }
+impl<T: 'static, E: 'static> From<Result<T, E>> for Effect<T, E> {
+    fn from(res: Result<T, E>) -> Effect<T, E> {
+        Effect::Pure(res)
     }
 }
 
-impl<S, T, E> Action<S, T> for IntoAction<S, T, E>
-where
-    S: Send + Sync + 'static,
-    E: Effect<S, T> + Send + 'static,
-    T: Send + 'static,
-{
-    type Future = Ready<Result<Patch>>;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{sleep, Duration};
 
-    fn call(self, system: System, context: Context<S>) -> Self::Future {
-        ready(self.effect.call(system, context))
+    #[test]
+    fn it_allows_wrapping_a_value() {
+        let effect: Effect<i32> = Effect::of(0);
+        assert_eq!(effect.dry_run(), Ok(0))
+    }
+
+    #[tokio::test]
+    async fn it_allows_async_executions() {
+        let effect = Effect::of(0)
+            .map(|x| x + 1)
+            .with_io(|x| async move {
+                sleep(Duration::from_millis(10)).await;
+                Ok(x + 1) as Result<i32, ()>
+            })
+            .map(|x| format!("result: {}", x));
+
+        assert_eq!(effect.run().await, Ok("result: 2".to_string()))
+    }
+
+    #[test]
+    fn it_allows_sync_executions() {
+        let effect = Effect::of(0)
+            .map(|x| x + 1)
+            .with_io(|x| async move {
+                sleep(Duration::from_millis(10)).await;
+                Ok(x + 1) as Result<i32, ()>
+            })
+            .map(|x| format!("result: {}", x));
+
+        assert_eq!(effect.dry_run(), Ok("result: 1".to_string()))
+    }
+
+    #[test]
+    fn it_allows_errors_in_sync_executions() {
+        let effect = Effect::from(Err("ERROR") as Result<i32, &str>).with_io(|x| async move {
+            sleep(Duration::from_millis(10)).await;
+            Ok(x + 1)
+        });
+
+        assert_eq!(effect.dry_run(), Err("ERROR"))
+    }
+
+    #[tokio::test]
+    async fn it_propagates_errors_in_async_calls() {
+        let effect = Effect::of(0).with_io(|_| async move {
+            sleep(Duration::from_millis(10)).await;
+            Err("this is an error")
+        });
+
+        assert_eq!(effect.run().await, Err("this is an error"))
     }
 }

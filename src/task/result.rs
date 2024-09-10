@@ -4,20 +4,16 @@ use crate::{error::Error, system::System};
 /// of Result
 pub(crate) type Result<O> = core::result::Result<O, Error>;
 
-pub trait IntoResult {
-    type Output;
-
-    fn into_result(self, system: &System) -> Result<Self::Output>;
+pub trait IntoResult<O> {
+    fn into_result(self, system: &System) -> Result<O>;
 }
 
-impl<T, O> IntoResult for Option<T>
+impl<T, O> IntoResult<O> for Option<T>
 where
     O: Default,
-    T: IntoResult<Output = O>,
+    T: IntoResult<O>,
 {
-    type Output = O;
-
-    fn into_result(self, system: &System) -> Result<Self::Output> {
+    fn into_result(self, system: &System) -> Result<O> {
         match self {
             None => Err(Error::ConditionFailed("unknown".to_string())),
             Some(value) => value.into_result(system),
@@ -25,14 +21,12 @@ where
     }
 }
 
-impl<T, E, O> IntoResult for core::result::Result<T, E>
+impl<T, E, O> IntoResult<O> for core::result::Result<T, E>
 where
-    T: IntoResult<Output = O>,
+    T: IntoResult<O>,
     E: std::error::Error + Sync + Send + 'static,
 {
-    type Output = O;
-
-    fn into_result(self, system: &System) -> Result<Self::Output> {
+    fn into_result(self, system: &System) -> Result<O> {
         match self {
             Ok(value) => value.into_result(system),
             Err(e) => Err(Error::Other(Box::new(e))),
