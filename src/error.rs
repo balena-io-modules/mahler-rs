@@ -14,7 +14,7 @@ pub enum Error {
     #[error("no target available on the context")]
     TargetIsNone,
 
-    #[error("cannot expand a unit task")]
+    #[error("cannot expand an atom task")]
     CannotExpandTask,
 
     #[error("condition failed: ${0}")]

@@ -61,29 +61,29 @@ type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result<Patch>>;
 type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> ActionOutput>;
 type Expand<S> = Box<dyn FnOnce(&System, Context<S>) -> core::result::Result<Vec<Task<S>>, Error>>;
 
-/// A task is either a concrete unit of work or a grouping of work that can be either be run in
-/// sequence or in parallel
+/// A task is either a concrete unit (atom) of work or a list of tasks
+/// that can be run in sequence or in parallel
 pub enum Task<S> {
-    Unit {
+    Atom {
         context: Context<S>,
         dry_run: DryRun<S>,
         run: Run<S>,
     },
-    Group {
+    List {
         context: Context<S>,
         expand: Expand<S>,
     },
 }
 
 impl<S> Task<S> {
-    pub(crate) fn unit<H, T, I>(handler: H, context: Context<S>) -> Self
+    pub(crate) fn atom<H, T, I>(handler: H, context: Context<S>) -> Self
     where
         H: Handler<S, T, I>,
         S: 'static,
         I: 'static,
     {
         let hc = handler.clone();
-        Self::Unit {
+        Self::Atom {
             context,
             dry_run: Box::new(|system: &System, context: Context<S>| {
                 let effect = hc.call(system, context);
@@ -106,7 +106,7 @@ impl<S> Task<S> {
     where
         M: Method<S, T>,
     {
-        Self::Group {
+        Self::List {
             context,
             expand: Box::new(|system: &System, context: Context<S>| {
                 method.call(system.clone(), context)
@@ -114,16 +114,16 @@ impl<S> Task<S> {
         }
     }
 
-    /// Run every action in the job sequentially and return the
+    /// Run every action in the task sequentially and return the
     /// aggregate changes.
     pub fn dry_run(self, system: &System) -> Result<Patch> {
         match self {
-            Self::Unit {
+            Self::Atom {
                 context, dry_run, ..
             } => (dry_run)(system, context),
-            Self::Group { context, expand } => {
+            Self::List { context, expand } => {
                 // NOTE: This is only implemented for testing purposes, the planner will need
-                // to dry run tasks as units to check for conflicts
+                // to dry run tasks as atoms to check for conflicts
                 let mut changes: Vec<PatchOperation> = vec![];
                 let jobs = (expand)(system, context)?;
                 let mut system = system.clone();
@@ -140,16 +140,16 @@ impl<S> Task<S> {
         }
     }
 
-    /// Run the job sequentially
+    /// Run the task sequentially
     pub async fn run(self, system: &mut System) -> core::result::Result<(), Error> {
         match self {
-            Self::Unit { context, run, .. } => {
+            Self::Atom { context, run, .. } => {
                 let changes = (run)(system, context).await?;
                 system.patch(changes)
             }
-            Self::Group {
+            Self::List {
                 // NOTE: This is only implemented for testing purposes, workflows returned
-                // by the planner will only include unit tasks as the workflow defines whether
+                // by the planner will only include atom tasks as the workflow defines whether
                 // the tasks can be executed concurrently or in parallel
                 context,
                 expand,
@@ -164,13 +164,13 @@ impl<S> Task<S> {
         }
     }
 
-    /// Expand the job into its composing sub-jobs.
+    /// Expand the task into its composing sub-jobs.
     ///
-    /// If the job is a Unit, it will return an empty vector
+    /// If the task is an atom the expansion will fail
     pub fn expand(self, system: &System) -> core::result::Result<Vec<Task<S>>, Error> {
         match self {
-            Self::Unit { .. } => Err(Error::CannotExpandTask),
-            Self::Group {
+            Self::Atom { .. } => Err(Error::CannotExpandTask),
+            Self::List {
                 context, expand, ..
             } => (expand)(system, context),
         }

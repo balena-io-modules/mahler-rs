@@ -2,7 +2,7 @@ use crate::{error::Error, system::System};
 
 /// The task outcome is a type alias
 /// of Result
-pub(crate) type Result<O> = core::result::Result<O, Error>;
+pub type Result<O> = core::result::Result<O, Error>;
 
 pub trait IntoResult<O> {
     fn into_result(self, system: &System) -> Result<O>;

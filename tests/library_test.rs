@@ -9,7 +9,8 @@ fn my_task_effect(mut counter: Update<i32>, tgt: Target<i32>) -> Effect<Update<i
         *counter += 1;
     }
 
-    // Update implements IntoResult
+    // This is not necessary, just returning the view
+    // works
     Effect::of(counter)
 }
 

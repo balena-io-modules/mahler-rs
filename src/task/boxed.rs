@@ -10,9 +10,9 @@ impl<S> BoxedIntoTask<S> {
         S: 'static,
         I: 'static,
     {
-        Self(Box::new(MakeUnitTask {
+        Self(Box::new(MakeAtomTask {
             handler,
-            into_task: |handler: H, context: Context<S>| Task::unit(handler, context),
+            into_task: |handler: H, context: Context<S>| Task::atom(handler, context),
         }))
     }
 
@@ -21,7 +21,7 @@ impl<S> BoxedIntoTask<S> {
         M: Method<S, T>,
         S: 'static,
     {
-        Self(Box::new(MakeGroupTask {
+        Self(Box::new(MakeListTask {
             method,
             into_task: |method: M, context: Context<S>| Task::group(method, context),
         }))
@@ -44,12 +44,12 @@ trait ErasedIntoTask<S> {
     fn into_task(self: Box<Self>, context: Context<S>) -> Task<S>;
 }
 
-struct MakeUnitTask<H, S> {
+struct MakeAtomTask<H, S> {
     pub(crate) handler: H,
     pub(crate) into_task: fn(H, Context<S>) -> Task<S>,
 }
 
-impl<S, H> ErasedIntoTask<S> for MakeUnitTask<H, S>
+impl<S, H> ErasedIntoTask<S> for MakeAtomTask<H, S>
 where
     S: 'static,
     H: Clone + 'static,
@@ -66,12 +66,12 @@ where
     }
 }
 
-struct MakeGroupTask<M, S> {
+struct MakeListTask<M, S> {
     pub(crate) method: M,
     pub(crate) into_task: fn(M, Context<S>) -> Task<S>,
 }
 
-impl<M, S> ErasedIntoTask<S> for MakeGroupTask<M, S>
+impl<M, S> ErasedIntoTask<S> for MakeListTask<M, S>
 where
     S: 'static,
     M: Clone + 'static,
