@@ -61,6 +61,22 @@ impl<T: 'static, E: 'static, I: 'static> Effect<T, E, I> {
         }
     }
 
+    pub fn map_io<F: FnOnce(T) -> T + 'static>(self, fu: F) -> Effect<T, E, I> {
+        match self {
+            Effect::Pure(output) => Effect::Pure(output),
+            Effect::IO { input, pure, io } => Effect::IO {
+                input,
+                pure,
+                io: Box::new(|i| {
+                    Box::pin(async {
+                        let o = io(i).await?;
+                        Ok(fu(o))
+                    })
+                }),
+            },
+        }
+    }
+
     pub fn and_then<O, F: FnOnce(T) -> Result<O, E> + Clone + 'static>(
         self,
         fu: F,
