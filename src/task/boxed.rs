@@ -23,7 +23,7 @@ impl<S> BoxedIntoTask<S> {
     {
         Self(Box::new(MakeListTask {
             method,
-            into_task: |method: M, context: Context<S>| Task::group(method, context),
+            into_task: |method: M, context: Context<S>| Task::list(method, context),
         }))
     }
 

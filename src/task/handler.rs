@@ -27,12 +27,9 @@ pub trait Handler<S, T, I>: Clone + Send + 'static {
     }
 }
 
-impl<O, E, I> IntoEffect<O, E, I> for Effect<O, E, I> {
-    fn into_effect(self, _: &System) -> Effect<O, E, I> {
-        self
-    }
-}
-
+/// Implement IntoEffect for any effect that has an IntoResult as the output. This means that, for
+/// instance, Effect<View<T>> implements into effect, so effects can use extractors to interact
+/// with the state
 impl<I: IntoResult<Patch> + 'static, E: std::error::Error + 'static> IntoEffect<Patch, Error, I>
     for Effect<I, E>
 {

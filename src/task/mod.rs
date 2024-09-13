@@ -1,6 +1,7 @@
 mod boxed;
 mod effect;
 mod handler;
+mod job;
 mod method;
 mod result;
 
@@ -10,51 +11,12 @@ use std::pin::Pin;
 
 use crate::error::Error;
 use crate::system::{Context, System};
-use boxed::*;
 
-pub use effect::Effect;
+pub use effect::*;
 pub use handler::Handler;
+pub use job::*;
 pub use method::Method;
 pub(crate) use result::*;
-
-pub trait IntoEffect<O, E, I = O> {
-    fn into_effect(self, system: &System) -> Effect<O, E, I>;
-}
-
-/// Jobs are generic work definitions. They can be converted to tasks
-/// by calling into_task with a specific context.
-///
-/// Jobs are re-usable
-pub struct Job<S> {
-    builder: BoxedIntoTask<S>,
-}
-
-impl<S> Job<S> {
-    pub(crate) fn from_handler<H, T, I>(handler: H) -> Self
-    where
-        H: Handler<S, T, I>,
-        S: 'static,
-        I: 'static,
-    {
-        Self {
-            builder: BoxedIntoTask::from_handler(handler),
-        }
-    }
-
-    pub(crate) fn from_method<M, T>(method: M) -> Self
-    where
-        M: Method<S, T>,
-        S: 'static,
-    {
-        Self {
-            builder: BoxedIntoTask::from_method(method),
-        }
-    }
-
-    pub fn into_task(&self, context: Context<S>) -> Task<S> {
-        self.builder.clone().into_task(context)
-    }
-}
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
 type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result<Patch>>;
@@ -102,7 +64,7 @@ impl<S> Task<S> {
         }
     }
 
-    pub(crate) fn group<M, T>(method: M, context: Context<S>) -> Self
+    pub(crate) fn list<M, T>(method: M, context: Context<S>) -> Self
     where
         M: Method<S, T>,
     {
@@ -122,8 +84,6 @@ impl<S> Task<S> {
                 context, dry_run, ..
             } => (dry_run)(system, context),
             Self::List { context, expand } => {
-                // NOTE: This is only implemented for testing purposes, the planner will need
-                // to dry run tasks as atoms to check for conflicts
                 let mut changes: Vec<PatchOperation> = vec![];
                 let jobs = (expand)(system, context)?;
                 let mut system = system.clone();
@@ -148,12 +108,7 @@ impl<S> Task<S> {
                 system.patch(changes)
             }
             Self::List {
-                // NOTE: This is only implemented for testing purposes, workflows returned
-                // by the planner will only include atom tasks as the workflow defines whether
-                // the tasks can be executed concurrently or in parallel
-                context,
-                expand,
-                ..
+                context, expand, ..
             } => {
                 let jobs = (expand)(system, context)?;
                 for job in jobs {
