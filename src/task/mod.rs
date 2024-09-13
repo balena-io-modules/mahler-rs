@@ -2,7 +2,6 @@ mod boxed;
 mod effect;
 mod handler;
 mod job;
-mod method;
 mod result;
 
 use json_patch::{Patch, PatchOperation};
@@ -13,9 +12,8 @@ use crate::error::Error;
 use crate::system::{Context, System};
 
 pub use effect::*;
-pub use handler::Handler;
+pub use handler::*;
 pub use job::*;
-pub use method::Method;
 pub(crate) use result::*;
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
@@ -40,7 +38,7 @@ pub enum Task<S> {
 impl<S> Task<S> {
     pub(crate) fn atom<H, T, I>(handler: H, context: Context<S>) -> Self
     where
-        H: Handler<S, T, I>,
+        H: Handler<S, T, Patch, I>,
         S: 'static,
         I: 'static,
     {
@@ -49,7 +47,7 @@ impl<S> Task<S> {
             context,
             dry_run: Box::new(|system: &System, context: Context<S>| {
                 let effect = hc.call(system, context);
-                effect.dry_run()
+                effect.pure()
             }),
             run: Box::new(|system: &System, context: Context<S>| {
                 let effect = handler.call(system, context);
@@ -64,14 +62,15 @@ impl<S> Task<S> {
         }
     }
 
-    pub(crate) fn list<M, T>(method: M, context: Context<S>) -> Self
+    pub(crate) fn list<H, T>(handler: H, context: Context<S>) -> Self
     where
-        M: Method<S, T>,
+        H: Handler<S, T, Vec<Task<S>>>,
+        S: 'static,
     {
         Self::List {
             context,
             expand: Box::new(|system: &System, context: Context<S>| {
-                method.call(system.clone(), context)
+                handler.call(system, context).pure()
             }),
         }
     }
@@ -172,7 +171,7 @@ mod tests {
 
     fn plus_one_async(counter: Update<i32>, tgt: Target<i32>) -> Effect<Update<i32>, MyError> {
         if *counter >= *tgt {
-            return Effect::error(MyError::CounterReached);
+            return Effect::from_error(MyError::CounterReached);
         }
 
         Effect::of(counter).with_io(|mut counter| async {

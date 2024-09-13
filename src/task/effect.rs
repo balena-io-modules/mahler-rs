@@ -4,7 +4,7 @@ use std::pin::Pin;
 
 use crate::system::System;
 
-pub trait IntoEffect<O, E, I = O> {
+pub(crate) trait IntoEffect<O, E, I = O> {
     fn into_effect(self, system: &System) -> Effect<O, E, I>;
 }
 
@@ -27,7 +27,7 @@ pub enum Effect<O, E = Infallible, I = O> {
     },
 }
 
-impl<O: 'static, E: 'static> Effect<O, E> {
+impl<O, E> Effect<O, E> {
     pub fn of(o: O) -> Self {
         Effect::Pure(Ok(o))
     }
@@ -35,7 +35,10 @@ impl<O: 'static, E: 'static> Effect<O, E> {
     pub fn with_io<F: FnOnce(O) -> Res + 'static, Res: Future<Output = Result<O, E>>>(
         self,
         f: F,
-    ) -> Effect<O, E> {
+    ) -> Effect<O, E>
+    where
+        O: 'static,
+    {
         let io: IO<O, E> = Box::new(|o| Box::pin(async { f(o).await }));
         let pure = Box::new(|o| Ok(o));
         match self {
@@ -50,7 +53,7 @@ impl<O: 'static, E: 'static> Effect<O, E> {
 }
 
 impl<T: 'static, E: 'static, I: 'static> Effect<T, E, I> {
-    pub fn error(e: E) -> Self {
+    pub fn from_error(e: E) -> Self {
         Effect::Pure(Err(e))
     }
 
@@ -126,7 +129,7 @@ impl<T: 'static, E: 'static, I: 'static> Effect<T, E, I> {
         }
     }
 
-    pub fn dry_run(self) -> Result<T, E> {
+    pub fn pure(self) -> Result<T, E> {
         match self {
             Effect::Pure(output) => output,
             Effect::IO { input, pure, .. } => input.and_then(pure),
@@ -158,7 +161,7 @@ mod tests {
     #[test]
     fn it_allows_wrapping_a_value() {
         let effect: Effect<i32> = Effect::of(0);
-        assert_eq!(effect.dry_run(), Ok(0))
+        assert_eq!(effect.pure(), Ok(0))
     }
 
     #[tokio::test]
@@ -184,7 +187,7 @@ mod tests {
             })
             .map(|x| format!("result: {}", x));
 
-        assert_eq!(effect.dry_run(), Ok("result: 1".to_string()))
+        assert_eq!(effect.pure(), Ok("result: 1".to_string()))
     }
 
     #[test]
@@ -194,7 +197,7 @@ mod tests {
             Ok(x + 1)
         });
 
-        assert_eq!(effect.dry_run(), Err("ERROR"))
+        assert_eq!(effect.pure(), Err("ERROR"))
     }
 
     #[tokio::test]

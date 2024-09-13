@@ -1,5 +1,7 @@
+use json_patch::Patch;
+
 use super::boxed::*;
-use super::{Handler, Method, Task};
+use super::{Handler, Task};
 use crate::system::Context;
 
 fn get_id_and_name<T>() -> (String, String) {
@@ -25,13 +27,13 @@ pub struct Job<S> {
 }
 
 impl<S> Job<S> {
-    pub(crate) fn from_handler<H, T, I>(handler: H) -> Self
+    pub(crate) fn from_action<A, T, I>(action: A) -> Self
     where
-        H: Handler<S, T, I>,
+        A: Handler<S, T, Patch, I>,
         S: 'static,
         I: 'static,
     {
-        let (id, name) = get_id_and_name::<H>();
+        let (id, name) = get_id_and_name::<A>();
 
         Self {
             id,
@@ -42,13 +44,13 @@ impl<S> Job<S> {
                 }
                 format!("{}: {}", name, path)
             }),
-            builder: BoxedIntoTask::from_handler(handler),
+            builder: BoxedIntoTask::from_action(action),
         }
     }
 
     pub(crate) fn from_method<M, T>(method: M) -> Self
     where
-        M: Method<S, T>,
+        M: Handler<S, T, Vec<Task<S>>>,
         S: 'static,
     {
         let (id, name) = get_id_and_name::<M>();

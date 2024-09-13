@@ -1,6 +1,6 @@
 use gustav::extract::{Target, Update};
 use gustav::system::{Context, System};
-use gustav::task::{Effect, Handler};
+use gustav::*;
 use json_patch::Patch;
 use serde_json::{from_value, json};
 
