@@ -25,18 +25,20 @@ type Expand<S> = Box<dyn FnOnce(&System, Context<S>) -> core::result::Result<Vec
 /// that can be run in sequence or in parallel
 pub enum Task<S> {
     Atom {
+        id: String,
         context: Context<S>,
         dry_run: DryRun<S>,
         run: Run<S>,
     },
     List {
+        id: String,
         context: Context<S>,
         expand: Expand<S>,
     },
 }
 
 impl<S> Task<S> {
-    pub(crate) fn atom<H, T, I>(handler: H, context: Context<S>) -> Self
+    pub(crate) fn atom<H, T, I>(id: String, handler: H, context: Context<S>) -> Self
     where
         H: Handler<S, T, Patch, I>,
         S: 'static,
@@ -44,6 +46,7 @@ impl<S> Task<S> {
     {
         let hc = handler.clone();
         Self::Atom {
+            id,
             context,
             dry_run: Box::new(|system: &System, context: Context<S>| {
                 let effect = hc.call(system, context);
@@ -62,12 +65,13 @@ impl<S> Task<S> {
         }
     }
 
-    pub(crate) fn list<H, T>(handler: H, context: Context<S>) -> Self
+    pub(crate) fn list<H, T>(id: String, handler: H, context: Context<S>) -> Self
     where
         H: Handler<S, T, Vec<Task<S>>>,
         S: 'static,
     {
         Self::List {
+            id,
             context,
             expand: Box::new(|system: &System, context: Context<S>| {
                 handler.call(system, context).pure()
@@ -82,7 +86,9 @@ impl<S> Task<S> {
             Self::Atom {
                 context, dry_run, ..
             } => (dry_run)(system, context),
-            Self::List { context, expand } => {
+            Self::List {
+                context, expand, ..
+            } => {
                 let mut changes: Vec<PatchOperation> = vec![];
                 let jobs = (expand)(system, context)?;
                 let mut system = system.clone();
@@ -179,6 +185,13 @@ mod tests {
             *counter += 1;
             Ok(counter)
         })
+    }
+
+    #[test]
+    fn it_gets_metadata_from_function() {
+        let job = plus_one.into_job();
+
+        assert_eq!(job.id(), "gustav::task::tests::plus_one".to_string());
     }
 
     #[test]
