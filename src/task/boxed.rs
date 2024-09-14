@@ -64,6 +64,6 @@ where
     }
 
     fn into_task(self: Box<Self>, id: String, context: Context<S>) -> Task<S> {
-        (self.into_task)(id, self.handler.clone(), context)
+        (self.into_task)(id, self.handler, context)
     }
 }

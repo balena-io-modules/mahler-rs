@@ -74,6 +74,9 @@ impl<S> Task<S> {
             id,
             context,
             expand: Box::new(|system: &System, context: Context<S>| {
+                // List tasks cannot perform changes to the system
+                // so the Effect returned by this handler is assumed to
+                // be pure
                 handler.call(system, context).pure()
             }),
         }
