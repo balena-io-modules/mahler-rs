@@ -12,7 +12,7 @@ impl<S> BoxedIntoTask<S> {
         S: 'static,
         I: 'static,
     {
-        Self(Box::new(MakeTask {
+        Self(Box::new(MakeIntoTask {
             handler: action,
             into_task: |id, handler, context| Task::atom(id, handler, context),
         }))
@@ -23,7 +23,7 @@ impl<S> BoxedIntoTask<S> {
         M: Handler<S, T, Vec<Task<S>>>,
         S: 'static,
     {
-        Self(Box::new(MakeTask {
+        Self(Box::new(MakeIntoTask {
             handler: method,
             into_task: |id, method, context| Task::list(id, method, context),
         }))
@@ -46,12 +46,12 @@ trait ErasedIntoTask<S> {
     fn into_task(self: Box<Self>, id: String, context: Context<S>) -> Task<S>;
 }
 
-struct MakeTask<H, S> {
+struct MakeIntoTask<H, S> {
     pub(crate) handler: H,
     pub(crate) into_task: fn(String, H, Context<S>) -> Task<S>,
 }
 
-impl<S, H> ErasedIntoTask<S> for MakeTask<H, S>
+impl<S, H> ErasedIntoTask<S> for MakeIntoTask<H, S>
 where
     S: 'static,
     H: Clone + 'static,
