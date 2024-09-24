@@ -2,6 +2,7 @@
 name = "gustav"
 version = "0.1.0"
 edition = "2021"
+description = "An automated job orchestration library to build and execute dynamic workflows"
 
 [dependencies]
 json-patch = "2.0.0"
