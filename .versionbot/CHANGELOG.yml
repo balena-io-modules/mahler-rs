@@ -1,4 +1,17 @@
 - commits:
+    - subject: Add repo.yml
+      hash: cdcd025814882e67729d07c357a516aa61938b30
+      body: |
+        This ensures that version is updated in Cargo.toml
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.0.3
+  title: ""
+  date: 2024-10-25T23:52:00.202Z
+- commits:
     - subject: Setup flowzone
       hash: 7da616430c9a509481f72074d36c46401d53b6a7
       body: ""
