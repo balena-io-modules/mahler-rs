@@ -1,4 +1,18 @@
 - commits:
+    - subject: Update README
+      hash: 6adf021c3ab1f567ca7960a7fddf85e0594238cc
+      body: |
+        This adds additional information on how interacting the library will
+        look like once more progress has been made
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.0.4
+  title: ""
+  date: 2024-10-29T19:02:39.918Z
+- commits:
     - subject: Add repo.yml
       hash: cdcd025814882e67729d07c357a516aa61938b30
       body: |

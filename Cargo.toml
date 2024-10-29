@@ -1,6 +1,6 @@
 [package]
 name = "gustav"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 description = "An automated job orchestration library to build and execute dynamic workflows"
 
