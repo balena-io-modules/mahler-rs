@@ -169,6 +169,8 @@ mod tests {
 
     fn plus_two(counter: Update<i32>, tgt: Target<i32>) -> Vec<Task<i32>> {
         if *tgt - *counter < 2 {
+            // Returning an empty result tells the planner
+            // the task is not applicable to reach the target
             return vec![];
         }
 
