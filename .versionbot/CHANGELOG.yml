@@ -1,4 +1,16 @@
 - commits:
+    - subject: Allow using array return on compound jobs
+      hash: 939f0674c9f9558c89b3c743a5ab1c93a34f741e
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.1.0
+  title: ""
+  date: 2024-10-29T19:58:22.418Z
+- commits:
     - subject: Update README
       hash: 6adf021c3ab1f567ca7960a7fddf85e0594238cc
       body: |
