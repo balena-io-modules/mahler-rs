@@ -47,6 +47,23 @@ impl<S: 'static, E: std::error::Error + 'static> IntoEffect<Vec<Task<S>>, Error>
     }
 }
 
+impl<S, const N: usize> IntoEffect<Vec<Task<S>>, Error> for [Task<S>; N] {
+    fn into_effect(self, _: &System) -> Effect<Vec<Task<S>>, Error> {
+        Effect::of(self.into())
+    }
+}
+
+impl<S: 'static, E: std::error::Error + 'static, const N: usize> IntoEffect<Vec<Task<S>>, Error>
+    for Result<[Task<S>; N], E>
+{
+    fn into_effect(self, _: &System) -> Effect<Vec<Task<S>>, Error> {
+        Effect::from(
+            self.map_err(|e| Error::Other(Box::new(e)))
+                .map(|a| a.into()),
+        )
+    }
+}
+
 macro_rules! impl_action_handler {
     (
         $first:ident, $($ty:ident),*
