@@ -1,6 +1,8 @@
 mod boxed;
+mod domain;
 mod effect;
 mod handler;
+mod intent;
 mod job;
 mod result;
 
@@ -11,8 +13,10 @@ use std::pin::Pin;
 use crate::error::Error;
 use crate::system::{Context, System};
 
+pub use domain::*;
 pub use effect::*;
 pub use handler::*;
+pub use intent::*;
 pub use job::*;
 pub(crate) use result::*;
 
@@ -38,7 +42,7 @@ pub enum Task<S> {
 }
 
 impl<S> Task<S> {
-    pub(crate) fn atom<H, T, I>(id: String, handler: H, context: Context<S>) -> Self
+    pub(crate) fn atom<H, T, I>(id: &str, handler: H, context: Context<S>) -> Self
     where
         H: Handler<S, T, Patch, I>,
         S: 'static,
@@ -46,7 +50,7 @@ impl<S> Task<S> {
     {
         let hc = handler.clone();
         Self::Atom {
-            id,
+            id: String::from(id),
             context,
             dry_run: Box::new(|system: &System, context: Context<S>| {
                 let effect = hc.call(system, context);
@@ -65,13 +69,13 @@ impl<S> Task<S> {
         }
     }
 
-    pub(crate) fn list<H, T>(id: String, handler: H, context: Context<S>) -> Self
+    pub(crate) fn list<H, T>(id: &str, handler: H, context: Context<S>) -> Self
     where
         H: Handler<S, T, Vec<Task<S>>>,
         S: 'static,
     {
         Self::List {
-            id,
+            id: String::from(id),
             context,
             expand: Box::new(|system: &System, context: Context<S>| {
                 // List tasks cannot perform changes to the system
@@ -196,7 +200,7 @@ mod tests {
     fn it_gets_metadata_from_function() {
         let job = plus_one.into_job();
 
-        assert_eq!(job.id(), "gustav::task::tests::plus_one".to_string());
+        assert_eq!(job.id().as_str(), "gustav::task::tests::plus_one");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use jsonptr::Pointer;
 use std::fmt::Display;
+use std::sync::Arc;
 
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Path(&'static Pointer);
@@ -29,6 +30,22 @@ impl From<Path> for String {
 impl AsRef<Pointer> for Path {
     fn as_ref(&self) -> &Pointer {
         self.0
+    }
+}
+
+// Structure to store path arguments when matching
+// against a lens
+#[derive(Clone)]
+pub(crate) struct PathArgs(pub Vec<(Arc<str>, String)>);
+
+impl PathArgs {
+    pub fn new(params: matchit::Params) -> Self {
+        let params: Vec<(Arc<str>, String)> = params
+            .iter()
+            .map(|(k, v)| (Arc::from(k), String::from(v)))
+            .collect();
+
+        PathArgs(params)
     }
 }
 
