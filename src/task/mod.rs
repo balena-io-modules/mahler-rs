@@ -181,8 +181,8 @@ mod tests {
         }
 
         vec![
-            plus_one.into_task(Context::from_target(*tgt)),
-            plus_one.into_task(Context::from_target(*tgt)),
+            plus_one.into_task(Context::new().target(*tgt)),
+            plus_one.into_task(Context::new().target(*tgt)),
         ]
     }
 
@@ -209,7 +209,7 @@ mod tests {
     fn it_allows_to_dry_run_tasks() {
         let system = System::from(0);
         let job = plus_one.into_job();
-        let task = job.into_task(Context::from_target(1));
+        let task = job.into_task(Context::new().target(1));
 
         // Get the list of changes that the action performs
         let changes = task.dry_run(&system).unwrap();
@@ -226,7 +226,7 @@ mod tests {
     fn it_allows_to_dry_run_composite_tasks() {
         let system = System::from(0);
         let job = plus_two.into_job();
-        let task = job.into_task(Context::from_target(2));
+        let task = job.into_task(Context::new().target(2));
 
         // Get the list of changes that the method performs
         let changes = task.dry_run(&system).unwrap();
@@ -243,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_to_run_composite_tasks() {
         let mut system = System::from(0);
-        let task = plus_two.into_task(Context::from_target(2));
+        let task = plus_two.into_task(Context::new().target(2));
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -257,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn it_runs_async_actions() {
         let mut system = System::from(0);
-        let task = plus_one.into_task(Context::from_target(1));
+        let task = plus_one.into_task(Context::new().target(1));
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -272,7 +272,7 @@ mod tests {
     async fn it_allows_extending_actions_with_effect() {
         let mut system = System::from(0);
         let job = plus_one_async.into_job();
-        let task = job.into_task(Context::from_target(1));
+        let task = job.into_task(Context::new().target(1));
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -285,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_actions_returning_errors() {
         let mut system = System::from(1);
-        let task = plus_one_async.into_task(Context::from_target(1));
+        let task = plus_one_async.into_task(Context::new().target(1));
 
         let res = task.run(&mut system).await;
         assert!(res.is_err());
@@ -319,10 +319,11 @@ mod tests {
         let mut system = System::from(state);
         let task = update_counter.into_job();
         let action = task.into_task(
-            Context::from_target(State {
-                counters: [("a".to_string(), 2), ("b".to_string(), 1)].into(),
-            })
-            .with_path("/counters/a"),
+            Context::new()
+                .target(State {
+                    counters: [("a".to_string(), 2), ("b".to_string(), 1)].into(),
+                })
+                .path("/counters/a"),
         );
 
         // Run the action

@@ -120,7 +120,7 @@ impl<S> Domain<S> {
             .at(path)
             .map(|matched| {
                 (
-                    PathArgs::new(matched.params),
+                    PathArgs::from(matched.params),
                     matched
                         .value
                         .iter()
@@ -156,8 +156,8 @@ mod tests {
         }
 
         vec![
-            plus_one.into_task(Context::from_target(*tgt)),
-            plus_one.into_task(Context::from_target(*tgt)),
+            plus_one.into_task(Context::new().target(*tgt)),
+            plus_one.into_task(Context::new().target(*tgt)),
         ]
     }
 

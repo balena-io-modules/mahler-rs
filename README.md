@@ -202,8 +202,8 @@ fn plus_two(counter: Update<State, i32>, tgt: Target<State, i32>, Path(name): Pa
     // A compound job returns a list of tasks that need to be executed
     // to achieve a certain goal
     vec![
-        plus_one.into_task(Context::new().with_target(*tgt).with_arg("name", &name)),
-        plus_one.into_task(Context::new().with_target(*tgt).with_arg("name", &name)),
+        plus_one.into_task(Context::new().target(*tgt).arg("name", &name)),
+        plus_one.into_task(Context::new().target(*tgt).arg("name", &name)),
     ]
 }
 

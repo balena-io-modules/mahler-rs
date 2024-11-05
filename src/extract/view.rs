@@ -315,7 +315,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: View<State, i32> =
-            View::from_system(&system, &Context::default().with_path("/numbers/one")).unwrap();
+            View::from_system(&system, &Context::new().path("/numbers/one")).unwrap();
 
         assert_eq!(view.as_ref(), Some(&1));
 
@@ -344,16 +344,13 @@ mod tests {
 
         let system = System::from(state);
 
-        assert!(View::<State, i32>::from_system(
-            &system,
-            &Context::default().with_path("/numbers/one/two"),
-        )
-        .is_err());
-        assert!(View::<State, i32>::from_system(
-            &system,
-            &Context::default().with_path("/none/two"),
-        )
-        .is_err());
+        assert!(
+            View::<State, i32>::from_system(&system, &Context::new().path("/numbers/one/two"),)
+                .is_err()
+        );
+        assert!(
+            View::<State, i32>::from_system(&system, &Context::new().path("/none/two"),).is_err()
+        );
     }
 
     #[test]
@@ -367,7 +364,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: View<State, i32> =
-            View::from_system(&system, &Context::default().with_path("/numbers/three")).unwrap();
+            View::from_system(&system, &Context::new().path("/numbers/three")).unwrap();
 
         assert_eq!(view.as_ref(), None);
 
@@ -395,7 +392,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: Create<State, i32> =
-            Create::from_system(&system, &Context::default().with_path("/numbers/three")).unwrap();
+            Create::from_system(&system, &Context::new().path("/numbers/three")).unwrap();
         *view = 3;
 
         // Get the list changes to the view
@@ -419,11 +416,10 @@ mod tests {
 
         let system = System::from(state);
 
-        assert!(Create::<State, i32>::from_system(
-            &system,
-            &Context::default().with_path("/none/three")
-        )
-        .is_err());
+        assert!(
+            Create::<State, i32>::from_system(&system, &Context::new().path("/none/three"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -437,7 +433,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: Update<State, i32> =
-            Update::from_system(&system, &Context::default().with_path("/numbers/two")).unwrap();
+            Update::from_system(&system, &Context::new().path("/numbers/two")).unwrap();
         *view = 3;
 
         // Get the list changes to the view
@@ -461,16 +457,14 @@ mod tests {
 
         let system = System::from(state);
 
-        assert!(Update::<State, i32>::from_system(
-            &system,
-            &Context::default().with_path("/numbers/three")
-        )
-        .is_err());
-        assert!(Update::<State, i32>::from_system(
-            &system,
-            &Context::default().with_path("/none/three")
-        )
-        .is_err());
+        assert!(
+            Update::<State, i32>::from_system(&system, &Context::new().path("/numbers/three"))
+                .is_err()
+        );
+        assert!(
+            Update::<State, i32>::from_system(&system, &Context::new().path("/none/three"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -484,7 +478,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: View<State, i32> =
-            View::from_system(&system, &Context::default().with_path("/numbers/three")).unwrap();
+            View::from_system(&system, &Context::new().path("/numbers/three")).unwrap();
 
         assert_eq!(view.as_ref(), None);
 
@@ -513,7 +507,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: View<State, i32> =
-            View::from_system(&system, &Context::default().with_path("/numbers/one")).unwrap();
+            View::from_system(&system, &Context::new().path("/numbers/one")).unwrap();
 
         // Delete the value
         view.delete();
@@ -538,7 +532,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: View<State, String> =
-            View::from_system(&system, &Context::default().with_path("/numbers/1")).unwrap();
+            View::from_system(&system, &Context::new().path("/numbers/1")).unwrap();
 
         assert_eq!(view.as_ref(), Some(&"two".to_string()));
 
@@ -565,7 +559,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: View<State, String> =
-            View::from_system(&system, &Context::default().with_path("/numbers/2")).unwrap();
+            View::from_system(&system, &Context::new().path("/numbers/2")).unwrap();
 
         assert_eq!(view.as_ref(), None);
         view.create("three".to_string());
@@ -590,7 +584,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: View<State, String> =
-            View::from_system(&system, &Context::default().with_path("/numbers/1")).unwrap();
+            View::from_system(&system, &Context::new().path("/numbers/1")).unwrap();
 
         // Remove the second element
         view.delete();
@@ -617,7 +611,7 @@ mod tests {
         let system = System::from(state);
 
         let mut view: View<State, String> =
-            View::from_system(&system, &Context::default().with_path("/numbers/2")).unwrap();
+            View::from_system(&system, &Context::new().path("/numbers/2")).unwrap();
 
         // Remove the third element
         view.delete();

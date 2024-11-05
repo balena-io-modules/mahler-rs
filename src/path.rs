@@ -39,7 +39,13 @@ impl AsRef<Pointer> for Path {
 pub(crate) struct PathArgs(pub Vec<(Arc<str>, String)>);
 
 impl PathArgs {
-    pub fn new(params: matchit::Params) -> Self {
+    pub fn new() -> Self {
+        PathArgs(Vec::new())
+    }
+}
+
+impl<'k, 'v> From<matchit::Params<'k, 'v>> for PathArgs {
+    fn from(params: matchit::Params) -> PathArgs {
         let params: Vec<(Arc<str>, String)> = params
             .iter()
             .map(|(k, v)| (Arc::from(k), String::from(v)))
