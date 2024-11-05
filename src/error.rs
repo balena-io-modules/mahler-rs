@@ -6,6 +6,9 @@ pub enum Error {
     SerializationError(#[from] serde_json::error::Error),
 
     #[error(transparent)]
+    FailedToDeserializePathParams(#[from] super::extract::PathDeserializationError),
+
+    #[error(transparent)]
     PatchFailed(#[from] json_patch::PatchError),
 
     #[error("the string `{0}` is not a valid path")]

@@ -1,5 +1,6 @@
 use jsonptr::Pointer;
 use std::fmt::Display;
+use std::ops::Deref;
 use std::sync::Arc;
 
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -41,6 +42,14 @@ pub(crate) struct PathArgs(pub Vec<(Arc<str>, String)>);
 impl PathArgs {
     pub fn new() -> Self {
         PathArgs(Vec::new())
+    }
+}
+
+impl Deref for PathArgs {
+    type Target = Vec<(Arc<str>, String)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

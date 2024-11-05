@@ -126,7 +126,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // The state model
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct State {
     counters: HashMap<String, i32>,
 }
