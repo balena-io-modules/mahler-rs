@@ -1,5 +1,6 @@
 use crate::error::Error;
-use crate::system::{Context, FromSystem, System};
+use crate::system::{FromSystem, System};
+use crate::task::Context;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::marker::PhantomData;

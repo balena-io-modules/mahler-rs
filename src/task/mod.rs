@@ -1,4 +1,5 @@
 mod boxed;
+mod context;
 mod domain;
 mod effect;
 mod handler;
@@ -11,8 +12,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::error::Error;
-use crate::system::{Context, System};
+use crate::system::System;
 
+pub use context::*;
 pub use domain::*;
 pub use effect::*;
 pub use handler::*;
@@ -148,7 +150,7 @@ impl<S> Task<S> {
 mod tests {
     use super::*;
     use crate::extract::{Target, Update};
-    use crate::system::{Context, System};
+    use crate::system::System;
     use json_patch::Patch;
     use serde::{Deserialize, Serialize};
     use serde_json::{from_value, json};

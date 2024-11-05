@@ -1,7 +1,6 @@
 use json_patch::Patch;
 
-use super::{Handler, Task};
-use crate::system::Context;
+use super::{Context, Handler, Task};
 
 pub(crate) struct BoxedIntoTask<S>(Box<dyn ErasedIntoTask<S>>);
 

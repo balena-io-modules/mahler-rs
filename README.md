@@ -37,7 +37,7 @@ While the ideas behind planning systems go back to the 1970s, they have seen ver
 Let's create a system controller for a simple counting system. Let's define a Job that operates on i32
 
 ```rust
-use gustav::*;
+use gustav::task::*;
 use gustav::extract::{Target, Update};
 
 /// Plus one is a job that updates a counter if it is below some target
@@ -192,8 +192,6 @@ On the above example, the job definition is practically identical to the one in 
 As programmers, we want to be able to build code by composing simpler behaviors into more complex ones. We might want to guide the planner towards a specific solution, using the primitives we already have. For instance, let's say we want to help the planner get to a solution faster as adding tasks one by one takes too much time. We want to define a `plus_two` task, that increases the counter by 2. We could create another primitive task to update the counter by two, but as programmers, we would like to reuse the code we have already defined. We can do that using methods.
 
 ```rust
-use gustav::system::Context;
-
 fn plus_two(counter: Update<State, i32>, tgt: Target<State, i32>, Path(name): Path<String>) -> Vec<Task<i32>> {
     if *tgt - *counter < 2 {
         // Returning an empty result tells the planner

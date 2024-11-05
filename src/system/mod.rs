@@ -6,8 +6,6 @@ use crate::error::Error;
 
 mod from_system;
 pub(crate) use from_system::*;
-mod context;
-pub use context::*;
 
 #[derive(Clone)]
 pub struct System {

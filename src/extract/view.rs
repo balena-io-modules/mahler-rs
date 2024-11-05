@@ -7,8 +7,8 @@ use std::ops::{Deref, DerefMut};
 
 use crate::error::Error;
 use crate::path::Path;
-use crate::system::{Context, FromSystem, System};
-use crate::task::{Effect, IntoEffect, IntoResult, Result};
+use crate::system::{FromSystem, System};
+use crate::task::{Context, Effect, IntoEffect, IntoResult, Result};
 
 /// Extracts a sub-element of a state S as indicated by
 /// a path.
@@ -288,7 +288,7 @@ impl<S, T: Serialize> IntoEffect<Patch, Error> for Update<S, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::system::{Context, System};
+    use crate::system::System;
     use json_patch::Patch;
     use serde::{Deserialize, Serialize};
     use serde_json::json;

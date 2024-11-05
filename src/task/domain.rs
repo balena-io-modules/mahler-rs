@@ -137,7 +137,6 @@ mod tests {
 
     use crate::extract::{Target, Update};
     use crate::path::PathArgs;
-    use crate::system::Context;
     use crate::task::*;
 
     fn plus_one(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {

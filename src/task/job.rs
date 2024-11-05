@@ -2,8 +2,8 @@ use json_patch::Patch;
 use std::cmp::Ordering;
 
 use super::boxed::*;
+use super::context::Context;
 use super::{Handler, Task};
-use crate::system::Context;
 
 /// The Job degree denotes its cardinality or its position in a search tree
 ///
