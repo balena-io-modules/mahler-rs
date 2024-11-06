@@ -8,10 +8,11 @@ mod job;
 mod result;
 
 use json_patch::{Patch, PatchOperation};
+use std::fmt::{self, Display};
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::error::Error;
+use crate::error::{Error, IntoError};
 use crate::system::System;
 
 pub use context::*;
@@ -21,6 +22,48 @@ pub use handler::*;
 pub use intent::*;
 pub use job::*;
 pub(crate) use result::*;
+
+#[derive(Debug)]
+pub struct ConditionFailed(String);
+
+impl Default for ConditionFailed {
+    fn default() -> Self {
+        ConditionFailed::new("unknown")
+    }
+}
+
+impl ConditionFailed {
+    fn new(msg: impl Into<String>) -> Self {
+        Self(msg.into())
+    }
+}
+
+impl std::error::Error for ConditionFailed {}
+
+impl Display for ConditionFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl IntoError for ConditionFailed {
+    fn into_error(self) -> Error {
+        Error::TaskConditionFailed(self)
+    }
+}
+
+impl<T, O> IntoResult<O> for Option<T>
+where
+    O: Default,
+    T: IntoResult<O>,
+{
+    fn into_result(self, system: &System) -> Result<O> {
+        match self {
+            None => Err(ConditionFailed::default())?,
+            Some(value) => value.into_result(system),
+        }
+    }
+}
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
 type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result<Patch>>;
@@ -102,12 +145,13 @@ impl<S> Task<S> {
                 let jobs = (expand)(system, context)?;
                 let mut system = system.clone();
                 for job in jobs {
-                    job.dry_run(&system).and_then(|Patch(patch)| {
-                        // Save a copy of the changes
-                        changes.append(&mut patch.clone());
-                        // And apply the changes to the system copy
-                        system.patch(Patch(patch))
-                    })?;
+                    let Patch(patch) = job.dry_run(&system)?;
+
+                    // Append a copy of the patch to the total changes
+                    changes.append(&mut patch.clone());
+
+                    // And apply the changes to the system copy
+                    system.patch(Patch(patch))?;
                 }
                 Ok(Patch(changes))
             }
@@ -115,11 +159,12 @@ impl<S> Task<S> {
     }
 
     /// Run the task sequentially
-    pub async fn run(self, system: &mut System) -> core::result::Result<(), Error> {
+    pub async fn run(self, system: &mut System) -> Result<()> {
         match self {
             Self::Atom { context, run, .. } => {
                 let changes = (run)(system, context).await?;
-                system.patch(changes)
+                system.patch(changes)?;
+                Ok(())
             }
             Self::List {
                 context, expand, ..
@@ -136,9 +181,9 @@ impl<S> Task<S> {
     /// Expand the task into its composing sub-jobs.
     ///
     /// If the task is an atom the expansion will fail
-    pub fn expand(self, system: &System) -> core::result::Result<Vec<Task<S>>, Error> {
+    pub fn expand(self, system: &System) -> Result<Vec<Task<S>>> {
         match self {
-            Self::Atom { .. } => Err(Error::CannotExpandTask),
+            Self::Atom { .. } => Ok(vec![]),
             Self::List {
                 context, expand, ..
             } => (expand)(system, context),

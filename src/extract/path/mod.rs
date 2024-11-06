@@ -12,7 +12,7 @@ pub use error::PathDeserializationError;
 
 impl IntoError for PathDeserializationError {
     fn into_error(self) -> Error {
-        Error::FailedToDeserializePathParams(self)
+        Error::PathExtractFailed(self)
     }
 }
 
