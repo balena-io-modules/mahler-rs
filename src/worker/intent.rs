@@ -1,9 +1,8 @@
-use super::handler::Handler;
-use super::job::Job;
+use crate::task::{Handler, Job};
 use std::cmp::Ordering;
 
 #[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Clone)]
-pub(crate) enum Operation {
+pub enum Operation {
     Create,
     Update,
     Delete,
@@ -39,7 +38,7 @@ impl<S> Intent<S> {
         }
     }
 
-    pub(crate) fn with_operation(self, operation: Operation) -> Self {
+    fn with_operation(self, operation: Operation) -> Self {
         let Intent { priority, job, .. } = self;
         Intent {
             operation,

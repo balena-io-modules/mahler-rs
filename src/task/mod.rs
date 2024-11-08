@@ -1,9 +1,7 @@
 mod boxed;
 mod context;
-mod domain;
 mod effect;
 mod handler;
-mod intent;
 mod job;
 mod result;
 
@@ -16,10 +14,8 @@ use crate::error::{Error, IntoError};
 use crate::system::System;
 
 pub use context::*;
-pub use domain::*;
 pub use effect::*;
 pub use handler::*;
-pub use intent::*;
 pub use job::*;
 pub(crate) use result::*;
 
@@ -133,6 +129,7 @@ impl<S> Task<S> {
 
     /// Run every action in the task sequentially and return the
     /// aggregate changes.
+    /// TODO: this should probably only have crate visibility
     pub fn dry_run(self, system: &System) -> Result<Patch> {
         match self {
             Self::Atom {

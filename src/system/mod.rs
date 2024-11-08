@@ -1,7 +1,10 @@
 use json_patch::{patch, Patch};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use std::fmt::{self, Display};
+use std::{
+    fmt::{self, Display},
+    ops::Deref,
+};
 
 use crate::error::{Error, IntoError};
 
@@ -80,5 +83,13 @@ impl System {
         let s = serde_json::from_value(self.state.clone())
             .map_err(SystemReadError::SerializationFailed)?;
         Ok(s)
+    }
+}
+
+impl Deref for System {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
     }
 }

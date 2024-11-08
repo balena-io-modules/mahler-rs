@@ -133,11 +133,13 @@ impl<S> Domain<S> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::sync::Arc;
 
     use crate::extract::{Target, Update};
     use crate::path::PathArgs;
     use crate::task::*;
+    use crate::worker::*;
 
     fn plus_one(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
         if *counter < *tgt {
