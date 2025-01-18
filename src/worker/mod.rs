@@ -4,4 +4,4 @@ mod target;
 
 pub use domain::*;
 pub use intent::*;
-pub use target::*;
+pub use target::Target;
