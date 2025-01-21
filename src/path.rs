@@ -1,14 +1,18 @@
-use jsonptr::Pointer;
+use jsonptr::{Pointer, PointerBuf};
 use std::fmt::Display;
 use std::ops::Deref;
 use std::sync::Arc;
 
 #[derive(Clone, Default, PartialEq, Debug)]
-pub struct Path(&'static Pointer);
+pub struct Path(PointerBuf);
 
 impl Path {
-    pub fn from_static(s: &'static str) -> Path {
-        Path(Pointer::from_static(s))
+    pub(crate) fn new(pointer: &Pointer) -> Self {
+        Self(pointer.to_buf())
+    }
+
+    pub fn from_static(s: &'static str) -> Self {
+        Path(Pointer::from_static(s).to_buf())
     }
 
     pub fn to_str(&self) -> &str {
@@ -30,7 +34,7 @@ impl From<Path> for String {
 
 impl AsRef<Pointer> for Path {
     fn as_ref(&self) -> &Pointer {
-        self.0
+        &self.0
     }
 }
 

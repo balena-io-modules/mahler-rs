@@ -54,6 +54,7 @@ pub struct System {
     state: Value,
 }
 
+// TODO: replace with TryFrom implementation
 impl<S> From<S> for System
 where
     S: Serialize,
@@ -66,6 +67,10 @@ where
 }
 
 impl System {
+    pub(crate) fn new(state: Value) -> Self {
+        Self { state }
+    }
+
     pub(crate) fn root(&self) -> &Value {
         &self.state
     }

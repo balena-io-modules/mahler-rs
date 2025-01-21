@@ -5,9 +5,10 @@ use serde_json::Value;
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, LinkedList},
-    fmt::{self, Display},
     ops::Deref,
 };
+
+use super::intent;
 
 pub(crate) struct Distance(BTreeSet<Operation>);
 
@@ -20,7 +21,11 @@ impl Distance {
         self.0.insert(o);
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Operation> {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Operation> {
         self.0.iter()
     }
 
@@ -63,23 +68,23 @@ impl Distance {
 
 pub struct Target(Value);
 
-#[derive(Debug)]
-pub enum TargetError {
-    SerializationFailed(serde_json::error::Error),
-}
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub(crate) struct Operation(PatchOperation);
 
-impl std::error::Error for TargetError {}
+impl Operation {
+    pub fn path(&self) -> &Pointer {
+        self.0.path()
+    }
 
-impl Display for TargetError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TargetError::SerializationFailed(err) => err.fmt(f),
+    pub fn matches(&self, op: &intent::Operation) -> bool {
+        match self.0 {
+            PatchOperation::Add(..) => op == &intent::Operation::Create,
+            PatchOperation::Replace(..) => op == &intent::Operation::Update,
+            PatchOperation::Remove(..) => op == &intent::Operation::Delete,
+            _ => false,
         }
     }
 }
-
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub(crate) struct Operation(PatchOperation);
 
 impl PartialOrd for Operation {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -111,8 +116,8 @@ impl Target {
         Self(target.into())
     }
 
-    pub fn from<S: Serialize>(state: S) -> Result<Self, TargetError> {
-        let state = serde_json::to_value(state).map_err(TargetError::SerializationFailed)?;
+    pub fn try_from<S: Serialize>(state: S) -> Result<Self, serde_json::error::Error> {
+        let state = serde_json::to_value(state)?;
         Ok(Target::new(state))
     }
 
@@ -147,7 +152,7 @@ impl Target {
             // get all paths up to the root
             while let Some(newparent) = parent.parent() {
                 // get the target at the parent to use as value
-                // no matter the operation, the parent of the target shoul
+                // no matter the operation, the parent of the target should
                 // always exist. If it doesn't there is a bug (probbly in jsonptr)
                 let value = newparent.resolve(&self.0).unwrap_or_else(|e| {
                     panic!(

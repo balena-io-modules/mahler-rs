@@ -127,6 +127,20 @@ impl<S> Task<S> {
         }
     }
 
+    pub fn id(&self) -> &String {
+        match self {
+            Self::Atom { id, .. } => id,
+            Self::List { id, .. } => id,
+        }
+    }
+
+    pub fn context(&self) -> &Context<S> {
+        match self {
+            Self::Atom { context, .. } => context,
+            Self::List { context, .. } => context,
+        }
+    }
+
     /// Run every action in the task sequentially and return the
     /// aggregate changes.
     /// TODO: this should probably only have crate visibility

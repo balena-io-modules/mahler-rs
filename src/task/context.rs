@@ -32,7 +32,6 @@ impl<S> Context<S> {
     }
 
     // This will be used by the planner
-    #[allow(dead_code)]
     pub(crate) fn path(self, path: &'static str) -> Self {
         Self {
             target: self.target,

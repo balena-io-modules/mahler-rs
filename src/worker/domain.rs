@@ -111,10 +111,6 @@ impl<S> Domain<S> {
     /// Find matches for the given path in the domain
     /// the matches are sorted in order that they should be
     /// tested
-    ///
-    // This will no longer be dead code when the planner
-    // is implemented
-    #[allow(dead_code)]
     pub(crate) fn at(&self, path: &str) -> Option<(PathArgs, impl Iterator<Item = &Intent<S>>)> {
         self.router
             .at(path)
