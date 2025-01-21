@@ -5,9 +5,9 @@ use super::intent::{Intent, Operation};
 use crate::path::PathArgs;
 
 #[derive(Default)]
-pub struct Domain<S> {
+pub struct Domain {
     // The router stores a list of intents matching a route
-    router: Router<BTreeSet<Intent<S>>>,
+    router: Router<BTreeSet<Intent>>,
     // The index stores the reverse relation of job id to a route
     index: HashMap<String, String>,
 }
@@ -16,7 +16,7 @@ pub struct Domain<S> {
 // in a route
 const PLACEHOLDER: &str = "__gustav_placeholder__";
 
-impl<S> Domain<S> {
+impl Domain {
     pub fn new() -> Self {
         Self {
             router: Router::new(),
@@ -24,7 +24,9 @@ impl<S> Domain<S> {
         }
     }
 
-    pub fn job(self, route: &str, intent: Intent<S>) -> Self {
+    // TODO: it would be great to figure out a way to validate
+    // that the pointer is valid for the parent state at compile time
+    pub fn job(self, route: &'static str, intent: Intent) -> Self {
         let Self {
             mut router,
             mut index,
@@ -111,7 +113,7 @@ impl<S> Domain<S> {
     /// Find matches for the given path in the domain
     /// the matches are sorted in order that they should be
     /// tested
-    pub(crate) fn at(&self, path: &str) -> Option<(PathArgs, impl Iterator<Item = &Intent<S>>)> {
+    pub(crate) fn at(&self, path: &str) -> Option<(PathArgs, impl Iterator<Item = &Intent>)> {
         self.router
             .at(path)
             .map(|matched| {
@@ -146,7 +148,7 @@ mod tests {
         counter
     }
 
-    fn plus_two(counter: Update<i32>, tgt: Target<i32>) -> Vec<Task<i32>> {
+    fn plus_two(counter: Update<i32>, tgt: Target<i32>) -> Vec<Task> {
         if *tgt - *counter < 2 {
             // Returning an empty result tells the planner
             // the task is not applicable to reach the target
@@ -154,8 +156,8 @@ mod tests {
         }
 
         vec![
-            plus_one.into_task(Context::new().target(*tgt)),
-            plus_one.into_task(Context::new().target(*tgt)),
+            plus_one.into_task(Context::new().with_target(*tgt)),
+            plus_one.into_task(Context::new().with_target(*tgt)),
         ]
     }
 

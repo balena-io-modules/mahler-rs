@@ -21,27 +21,27 @@ enum Degree {
 /// by calling into_task with a specific context.
 ///
 /// Jobs are re-usable
-pub struct Job<S> {
+pub struct Job {
     id: String,
     degree: Degree,
-    builder: BoxedIntoTask<S>,
+    builder: BoxedIntoTask,
 }
 
-impl<S> PartialEq for Job<S> {
+impl PartialEq for Job {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
-impl<S> PartialOrd for Job<S> {
+impl PartialOrd for Job {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<S> Eq for Job<S> {}
+impl Eq for Job {}
 
-impl<S> Ord for Job<S> {
+impl Ord for Job {
     fn cmp(&self, other: &Self) -> Ordering {
         // We order jobs by degree. When searching for applicable
         // jobs, we want to give List jobs priority over atomic jobs
@@ -50,11 +50,10 @@ impl<S> Ord for Job<S> {
     }
 }
 
-impl<S> Job<S> {
+impl Job {
     pub(crate) fn from_action<A, T, I>(action: A) -> Self
     where
-        A: Handler<S, T, Patch, I>,
-        S: 'static,
+        A: Handler<T, Patch, I>,
         I: 'static,
     {
         let id = String::from(std::any::type_name::<A>());
@@ -68,8 +67,7 @@ impl<S> Job<S> {
 
     pub(crate) fn from_method<M, T>(method: M) -> Self
     where
-        M: Handler<S, T, Vec<Task<S>>>,
-        S: 'static,
+        M: Handler<T, Vec<Task>>,
     {
         let id = String::from(std::any::type_name::<M>());
         Self {
@@ -83,7 +81,7 @@ impl<S> Job<S> {
         &self.id
     }
 
-    pub fn into_task(&self, context: Context<S>) -> Task<S> {
+    pub fn into_task(&self, context: Context) -> Task {
         self.builder.clone().into_task(self.id.as_str(), context)
     }
 }

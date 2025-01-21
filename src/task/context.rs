@@ -1,38 +1,37 @@
 use std::sync::Arc;
 
+use serde::Serialize;
+use serde_json::Value;
+
 use crate::path::{Path, PathArgs};
 
-pub struct Context<S> {
-    pub(crate) target: Option<S>,
+#[derive(Clone, Default)]
+pub struct Context {
+    pub(crate) target: Value,
     pub(crate) path: Path,
     pub(crate) args: PathArgs,
 }
 
-impl<S> Default for Context<S> {
-    fn default() -> Self {
-        Context {
-            target: None,
-            path: Path::default(),
-            args: PathArgs::new(),
-        }
-    }
-}
-
-impl<S> Context<S> {
+impl Context {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn target(self, target: S) -> Self {
+    pub fn with_target<S: Serialize>(self, target: S) -> Self {
+        // TODO: propagate the error. Serialization errors
+        // are probably rare, but it still might be needed
+        let target = serde_json::to_value(target).unwrap();
         Self {
-            target: Some(target),
+            target,
             path: self.path,
             args: self.args,
         }
     }
 
-    // This will be used by the planner
-    pub(crate) fn path(self, path: &'static str) -> Self {
+    /// This is only used for tests, end users should not
+    /// set the context path as that is set when creating
+    /// the job domain
+    pub(crate) fn with_path(self, path: &'static str) -> Self {
         Self {
             target: self.target,
             path: Path::from_static(path),
@@ -40,7 +39,7 @@ impl<S> Context<S> {
         }
     }
 
-    pub fn arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
+    pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         let Self {
             target,
             path,
@@ -50,15 +49,5 @@ impl<S> Context<S> {
         args.0.push((Arc::from(key.as_ref()), value.into()));
 
         Self { target, path, args }
-    }
-}
-
-impl<S: Clone> Clone for Context<S> {
-    fn clone(&self) -> Self {
-        Context {
-            target: self.target.clone(),
-            path: self.path.clone(),
-            args: self.args.clone(),
-        }
     }
 }

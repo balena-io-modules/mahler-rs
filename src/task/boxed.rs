@@ -2,13 +2,12 @@ use json_patch::Patch;
 
 use super::{Context, Handler, Task};
 
-pub(crate) struct BoxedIntoTask<S>(Box<dyn ErasedIntoTask<S>>);
+pub(crate) struct BoxedIntoTask(Box<dyn ErasedIntoTask>);
 
-impl<S> BoxedIntoTask<S> {
+impl BoxedIntoTask {
     pub fn from_action<A, T, I>(action: A) -> Self
     where
-        A: Handler<S, T, Patch, I>,
-        S: 'static,
+        A: Handler<T, Patch, I>,
         I: 'static,
     {
         Self(Box::new(MakeIntoTask {
@@ -19,8 +18,7 @@ impl<S> BoxedIntoTask<S> {
 
     pub fn from_method<M, T>(method: M) -> Self
     where
-        M: Handler<S, T, Vec<Task<S>>>,
-        S: 'static,
+        M: Handler<T, Vec<Task>>,
     {
         Self(Box::new(MakeIntoTask {
             handler: method,
@@ -28,41 +26,40 @@ impl<S> BoxedIntoTask<S> {
         }))
     }
 
-    pub fn into_task(self, id: &str, context: Context<S>) -> Task<S> {
+    pub fn into_task(self, id: &str, context: Context) -> Task {
         self.0.into_task(id, context)
     }
 }
 
-impl<S> Clone for BoxedIntoTask<S> {
+impl Clone for BoxedIntoTask {
     fn clone(&self) -> Self {
         Self(self.0.clone_box())
     }
 }
 
-trait ErasedIntoTask<S> {
-    fn clone_box(&self) -> Box<dyn ErasedIntoTask<S>>;
+trait ErasedIntoTask {
+    fn clone_box(&self) -> Box<dyn ErasedIntoTask>;
 
-    fn into_task(self: Box<Self>, id: &str, context: Context<S>) -> Task<S>;
+    fn into_task(self: Box<Self>, id: &str, context: Context) -> Task;
 }
 
-struct MakeIntoTask<H, S> {
+struct MakeIntoTask<H> {
     pub(crate) handler: H,
-    pub(crate) into_task: fn(&str, H, Context<S>) -> Task<S>,
+    pub(crate) into_task: fn(&str, H, Context) -> Task,
 }
 
-impl<S, H> ErasedIntoTask<S> for MakeIntoTask<H, S>
+impl<H> ErasedIntoTask for MakeIntoTask<H>
 where
-    S: 'static,
     H: Clone + 'static,
 {
-    fn clone_box(&self) -> Box<dyn ErasedIntoTask<S>> {
+    fn clone_box(&self) -> Box<dyn ErasedIntoTask> {
         Box::new(Self {
             handler: self.handler.clone(),
             into_task: self.into_task,
         })
     }
 
-    fn into_task(self: Box<Self>, id: &str, context: Context<S>) -> Task<S> {
+    fn into_task(self: Box<Self>, id: &str, context: Context) -> Task {
         (self.into_task)(id, self.handler, context)
     }
 }

@@ -1,20 +1,85 @@
 use json_patch::{diff, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use jsonptr::Pointer;
-use serde::Serialize;
 use serde_json::Value;
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, LinkedList},
-    ops::Deref,
 };
 
 use super::intent;
 
-pub(crate) struct Distance(BTreeSet<Operation>);
+pub struct Distance(BTreeSet<Operation>);
 
 impl Distance {
-    fn new() -> Self {
-        Distance(BTreeSet::new())
+    /// Calculate the distance between some state and target
+    ///
+    /// The distance is the list of operations required in order to convert the
+    /// the state into the target. The distance also includes alternate paths
+    ///
+    /// For instance if the target creates a new value at the
+    /// pointer `/a/b/c`, that new value could come from a create operation on the
+    /// given pointer, but also from an update operation on `/a/b` or `/a` or `/`.
+    ///
+    /// Similarly, in order to delete a pointer `/a/b`, just removing the path could be enough, but
+    /// it might be necessary to remove every child of `/a/b` before being able to remove the
+    /// path.
+    ///
+    /// The distance encodes all the possible operations that can be used to move
+    /// between two states
+    pub fn new(src: &Value, tgt: &Value) -> Distance {
+        let mut distance = Distance(BTreeSet::new());
+
+        // calculate differences between the system root and
+        // the target
+        let Patch(changes) = diff(src, tgt);
+        for op in changes {
+            // For every operation on the list of changes
+            let path = op.path();
+
+            let mut parent = path;
+
+            // get all paths up to the root
+            while let Some(newparent) = parent.parent() {
+                // get the target at the parent to use as value
+                // no matter the operation, the parent of the target should
+                // always exist. If it doesn't there is a bug (probbly in jsonptr)
+                let value = newparent.resolve(tgt).unwrap_or_else(|e| {
+                    panic!(
+                        "[BUG] Path `{}` should be resolvable on the target, but got error: {}",
+                        newparent, e
+                    )
+                });
+
+                // Insert a replace operation for each one
+                distance.insert(Operation::from(PatchOperation::Replace(ReplaceOperation {
+                    path: newparent.to_buf(),
+                    value: value.clone(),
+                })));
+
+                parent = newparent;
+            }
+
+            // for every delete operation '/a/b/c', add child
+            // nodes of the deleted path with 'remove' operation
+            if let PatchOperation::Remove(_) = op {
+                // By definition of the remove operation the path should be
+                // resolvable on the left side of the diff
+                let value = path.resolve(src).unwrap_or_else(|e| {
+                    panic!(
+                        "[BUG] Path `{}` should be resolvable on the state, but got error: {}",
+                        path, e
+                    )
+                });
+
+                //
+                distance.insert_remove_ops(path, value);
+            }
+
+            // Finally insert the actual operation
+            distance.insert(Operation::from(op));
+        }
+
+        distance
     }
 
     fn insert(&mut self, o: Operation) {
@@ -29,7 +94,7 @@ impl Distance {
         self.0.iter()
     }
 
-    fn add_removes_for_children(&mut self, path: &Pointer, value: &Value) {
+    fn insert_remove_ops(&mut self, path: &Pointer, value: &Value) {
         let mut queue = LinkedList::new();
         queue.push_back((path.to_buf(), value));
 
@@ -65,8 +130,6 @@ impl Distance {
         }
     }
 }
-
-pub struct Target(Value);
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub(crate) struct Operation(PatchOperation);
@@ -111,105 +174,13 @@ impl From<PatchOperation> for Operation {
     }
 }
 
-impl Target {
-    pub fn new(target: impl Into<Value>) -> Self {
-        Self(target.into())
-    }
-
-    pub fn try_from<S: Serialize>(state: S) -> Result<Self, serde_json::error::Error> {
-        let state = serde_json::to_value(state)?;
-        Ok(Target::new(state))
-    }
-
-    #[allow(dead_code)]
-    /// Calculate the distance between some state and the self target
-    ///
-    /// The distance is the list of operations required in order to convert the
-    /// the state into the target. The distance also includes alternate paths
-    ///
-    /// For instance if the target creates a new value at the
-    /// pointer `/a/b/c`, that new value could come from a create operation on the
-    /// given pointer, but also from an update operation on `/a/b` or `/a` or `/`.
-    ///
-    /// Similarly, in order to delete a pointer `/a/b`, just removing the path could be enough, but
-    /// it might be necessary to remove every child of `/a/b` before being able to remove the
-    /// path.
-    ///
-    /// The distance encodes all the possible operations that can be used to move
-    /// between two states
-    pub(crate) fn distance(&self, state: &Value) -> Distance {
-        let mut distance = Distance::new();
-
-        // calculate differences between the system root and
-        // the target
-        let Patch(changes) = diff(state, self);
-        for op in changes {
-            // For every operation on the list of changes
-            let path = op.path();
-
-            let mut parent = path;
-
-            // get all paths up to the root
-            while let Some(newparent) = parent.parent() {
-                // get the target at the parent to use as value
-                // no matter the operation, the parent of the target should
-                // always exist. If it doesn't there is a bug (probbly in jsonptr)
-                let value = newparent.resolve(&self.0).unwrap_or_else(|e| {
-                    panic!(
-                        "[BUG] Path `{}` should be resolvable on the target, but got error: {}",
-                        newparent, e
-                    )
-                });
-
-                // Insert a replace operation for each one
-                distance.insert(Operation::from(PatchOperation::Replace(ReplaceOperation {
-                    path: newparent.to_buf(),
-                    value: value.clone(),
-                })));
-
-                parent = newparent;
-            }
-
-            // for every delete operation '/a/b/c', add child
-            // nodes of the deleted path with 'remove' operation
-            if let PatchOperation::Remove(_) = op {
-                // By definition of the remove operation the path should be
-                // resolvable on the left side of the diff
-                let value = path.resolve(state).unwrap_or_else(|e| {
-                    panic!(
-                        "[BUG] Path `{}` should be resolvable on the state, but got error: {}",
-                        path, e
-                    )
-                });
-
-                //
-                distance.add_removes_for_children(path, value);
-            }
-
-            // Finally insert the actual operation
-            distance.insert(Operation::from(op));
-        }
-
-        distance
-    }
-}
-
-impl Deref for Target {
-    type Target = Value;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     fn distance_eq(src: Value, tgt: Value, result: Vec<Value>) {
-        let target = Target::new(tgt);
-        let distance = target.distance(&src);
+        let distance = Distance::new(&src, &tgt);
 
         // Serialize results to make comparison easier
         let ops: Vec<Value> = distance

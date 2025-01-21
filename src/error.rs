@@ -24,7 +24,7 @@ pub enum Error {
     TaskConditionFailed(#[from] super::task::ConditionFailed),
 
     #[error("plan could not be found: ${0}")]
-    PlanNotFound(#[from] super::worker::PlanSearchError),
+    PlanSearchFailed(#[from] super::worker::PlanSearchError),
 
     #[error(transparent)]
     Other(#[from] Box<dyn std::error::Error>),

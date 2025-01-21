@@ -3,7 +3,6 @@ use jsonptr::resolve::ResolveError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::{self, Display};
-use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 use crate::error::{Error, IntoError};
@@ -17,10 +16,9 @@ use crate::task::{Context, Effect, IntoEffect, IntoResult, Result};
 /// The state is None if the path does not exist under the parent
 /// path and it can be created using the `create` function
 #[derive(Debug, Clone)]
-pub struct View<S, T = S> {
+pub struct View<T> {
     state: Option<T>,
     path: Path,
-    _system: PhantomData<S>,
 }
 
 #[derive(Debug)]
@@ -89,38 +87,36 @@ impl IntoError for ViewResultError {
     }
 }
 
-impl<S, T> View<S, T> {
+impl<T> View<T> {
     pub(super) fn new(state: Option<T>, path: Path) -> Self {
-        View {
-            state,
-            path,
-            _system: PhantomData::<S>,
-        }
+        View { state, path }
     }
 
-    pub fn create(&mut self, value: T) -> &mut T {
-        self.state = Some(value);
+    /// Modify the internal view value to the value
+    /// passed as input
+    pub fn replace(&mut self, value: impl Into<T>) -> &mut T {
+        self.state = Some(value.into());
         self.state.as_mut().unwrap()
     }
 
-    pub fn delete(&mut self) {
+    /// Clear the internal view value
+    pub fn remove(&mut self) {
         self.state = None;
     }
 }
 
-impl<S, T: Default> View<S, T> {
-    pub fn init(&mut self) -> &mut T {
-        self.create(T::default())
+impl<T: Default> View<T> {
+    /// Assign the default value for the type
+    /// to the view
+    pub fn zero(&mut self) -> &mut T {
+        self.replace(T::default())
     }
 }
 
-impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
+impl<T: DeserializeOwned> FromSystem for View<T> {
     type Error = ViewExtractError;
 
-    fn from_system(
-        system: &System,
-        context: &Context<S>,
-    ) -> core::result::Result<Self, Self::Error> {
+    fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
         let pointer = context.path.as_ref();
         let root = system.root();
 
@@ -159,7 +155,7 @@ impl<S, T: DeserializeOwned> FromSystem<S> for View<S, T> {
     }
 }
 
-impl<S, T> Deref for View<S, T> {
+impl<T> Deref for View<T> {
     type Target = Option<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -167,13 +163,13 @@ impl<S, T> Deref for View<S, T> {
     }
 }
 
-impl<S, T> DerefMut for View<S, T> {
+impl<T> DerefMut for View<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.state
     }
 }
 
-impl<S, T: Serialize> IntoResult<Patch> for View<S, T> {
+impl<T: Serialize> IntoResult<Patch> for View<T> {
     fn into_result(self, system: &System) -> Result<Patch> {
         // Get the root value
         let mut after = system.clone();
@@ -200,7 +196,7 @@ impl<S, T: Serialize> IntoResult<Patch> for View<S, T> {
     }
 }
 
-impl<S, T: Serialize> IntoEffect<Patch, Error> for View<S, T> {
+impl<T: Serialize> IntoEffect<Patch, Error> for View<T> {
     fn into_effect(self, system: &System) -> Effect<Patch, Error> {
         Effect::from(self.into_result(system))
     }
@@ -212,19 +208,15 @@ impl<S, T: Serialize> IntoEffect<Patch, Error> for View<S, T> {
 /// The state is always initialized to the type default,
 /// no matter if it already exists.
 #[derive(Debug, Clone)]
-pub struct Create<S, T = S> {
+pub struct Create<T> {
     state: T,
     path: Path,
-    _system: PhantomData<S>,
 }
 
-impl<S, T: DeserializeOwned + Default> FromSystem<S> for Create<S, T> {
+impl<T: DeserializeOwned + Default> FromSystem for Create<T> {
     type Error = ViewExtractError;
 
-    fn from_system(
-        system: &System,
-        context: &Context<S>,
-    ) -> core::result::Result<Self, Self::Error> {
+    fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
         // We unwrap the call to parse because the path should
         // be validated at this point
         let pointer = context.path.as_ref();
@@ -260,24 +252,23 @@ impl<S, T: DeserializeOwned + Default> FromSystem<S> for Create<S, T> {
         Ok(Create {
             state: T::default(),
             path: context.path.clone(),
-            _system: PhantomData::<S>,
         })
     }
 }
 
-impl<S, T: Serialize> IntoResult<Patch> for Create<S, T> {
+impl<T: Serialize> IntoResult<Patch> for Create<T> {
     fn into_result(self, system: &System) -> Result<Patch> {
-        View::<S, T>::new(Some(self.state), self.path).into_result(system)
+        View::<T>::new(Some(self.state), self.path).into_result(system)
     }
 }
 
-impl<S, T: Serialize> IntoEffect<Patch, Error> for Create<S, T> {
+impl<T: Serialize> IntoEffect<Patch, Error> for Create<T> {
     fn into_effect(self, system: &System) -> Effect<Patch, Error> {
         Effect::from(self.into_result(system))
     }
 }
 
-impl<S, T> Deref for Create<S, T> {
+impl<T> Deref for Create<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -285,7 +276,7 @@ impl<S, T> Deref for Create<S, T> {
     }
 }
 
-impl<S, T> DerefMut for Create<S, T> {
+impl<T> DerefMut for Create<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.state
     }
@@ -297,19 +288,15 @@ impl<S, T> DerefMut for Create<S, T> {
 /// Initializing the extractor will fail if there is no value at the
 /// given path
 #[derive(Debug, Clone)]
-pub struct Update<S, T = S> {
+pub struct Update<T> {
     state: T,
     path: Path,
-    _system: PhantomData<S>,
 }
 
-impl<S, T: DeserializeOwned> FromSystem<S> for Update<S, T> {
+impl<T: DeserializeOwned> FromSystem for Update<T> {
     type Error = ViewExtractError;
 
-    fn from_system(
-        system: &System,
-        context: &Context<S>,
-    ) -> core::result::Result<Self, Self::Error> {
+    fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
         let pointer = context.path.as_ref();
         let root = system.root();
 
@@ -327,12 +314,11 @@ impl<S, T: DeserializeOwned> FromSystem<S> for Update<S, T> {
         Ok(Update {
             state,
             path: context.path.clone(),
-            _system: PhantomData::<S>,
         })
     }
 }
 
-impl<S, T> Deref for Update<S, T> {
+impl<T> Deref for Update<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -340,18 +326,18 @@ impl<S, T> Deref for Update<S, T> {
     }
 }
 
-impl<S, T> DerefMut for Update<S, T> {
+impl<T> DerefMut for Update<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.state
     }
 }
 
-impl<S, T: Serialize> IntoResult<Patch> for Update<S, T> {
+impl<T: Serialize> IntoResult<Patch> for Update<T> {
     fn into_result(self, system: &System) -> Result<Patch> {
-        View::<S, T>::new(Some(self.state), self.path).into_result(system)
+        View::<T>::new(Some(self.state), self.path).into_result(system)
     }
 }
-impl<S, T: Serialize> IntoEffect<Patch, Error> for Update<S, T> {
+impl<T: Serialize> IntoEffect<Patch, Error> for Update<T> {
     fn into_effect(self, system: &System) -> Effect<Patch, Error> {
         Effect::from(self.into_result(system))
     }
@@ -386,8 +372,8 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: View<State, i32> =
-            View::from_system(&system, &Context::new().path("/numbers/one")).unwrap();
+        let mut view: View<i32> =
+            View::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
 
         assert_eq!(view.as_ref(), Some(&1));
 
@@ -417,11 +403,11 @@ mod tests {
         let system = System::from(state);
 
         assert!(
-            View::<State, i32>::from_system(&system, &Context::new().path("/numbers/one/two"),)
+            View::<i32>::from_system(&system, &Context::new().with_path("/numbers/one/two"),)
                 .is_err()
         );
         assert!(
-            View::<State, i32>::from_system(&system, &Context::new().path("/none/two"),).is_err()
+            View::<i32>::from_system(&system, &Context::new().with_path("/none/two"),).is_err()
         );
     }
 
@@ -435,12 +421,12 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: View<State, i32> =
-            View::from_system(&system, &Context::new().path("/numbers/three")).unwrap();
+        let mut view: View<i32> =
+            View::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
 
         assert_eq!(view.as_ref(), None);
 
-        view.create(3);
+        view.replace(3);
 
         // Get the list changes to the view
         let changes = view.into_result(&system).unwrap();
@@ -463,8 +449,8 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: Create<State, i32> =
-            Create::from_system(&system, &Context::new().path("/numbers/three")).unwrap();
+        let mut view: Create<i32> =
+            Create::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
         *view = 3;
 
         // Get the list changes to the view
@@ -489,8 +475,7 @@ mod tests {
         let system = System::from(state);
 
         assert!(
-            Create::<State, i32>::from_system(&system, &Context::new().path("/none/three"))
-                .is_err()
+            Create::<i32>::from_system(&system, &Context::new().with_path("/none/three")).is_err()
         );
     }
 
@@ -504,8 +489,8 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: Update<State, i32> =
-            Update::from_system(&system, &Context::new().path("/numbers/two")).unwrap();
+        let mut view: Update<i32> =
+            Update::from_system(&system, &Context::new().with_path("/numbers/two")).unwrap();
         *view = 3;
 
         // Get the list changes to the view
@@ -530,12 +515,11 @@ mod tests {
         let system = System::from(state);
 
         assert!(
-            Update::<State, i32>::from_system(&system, &Context::new().path("/numbers/three"))
+            Update::<i32>::from_system(&system, &Context::new().with_path("/numbers/three"))
                 .is_err()
         );
         assert!(
-            Update::<State, i32>::from_system(&system, &Context::new().path("/none/three"))
-                .is_err()
+            Update::<i32>::from_system(&system, &Context::new().with_path("/none/three")).is_err()
         );
     }
 
@@ -549,12 +533,12 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: View<State, i32> =
-            View::from_system(&system, &Context::new().path("/numbers/three")).unwrap();
+        let mut view: View<i32> =
+            View::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
 
         assert_eq!(view.as_ref(), None);
 
-        let value = view.init();
+        let value = view.zero();
         *value = 3;
 
         // Get the list changes to the view
@@ -578,11 +562,11 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: View<State, i32> =
-            View::from_system(&system, &Context::new().path("/numbers/one")).unwrap();
+        let mut view: View<i32> =
+            View::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
 
         // Delete the value
-        view.delete();
+        view.remove();
 
         // Get the list changes to the view
         let changes = view.into_result(&system).unwrap();
@@ -603,8 +587,8 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: View<State, String> =
-            View::from_system(&system, &Context::new().path("/numbers/1")).unwrap();
+        let mut view: View<String> =
+            View::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
 
         assert_eq!(view.as_ref(), Some(&"two".to_string()));
 
@@ -630,11 +614,11 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: View<State, String> =
-            View::from_system(&system, &Context::new().path("/numbers/2")).unwrap();
+        let mut view: View<String> =
+            View::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
 
         assert_eq!(view.as_ref(), None);
-        view.create("three".to_string());
+        view.replace("three");
 
         // Get the list changes to the view
         let changes = view.into_result(&system).unwrap();
@@ -655,11 +639,11 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: View<State, String> =
-            View::from_system(&system, &Context::new().path("/numbers/1")).unwrap();
+        let mut view: View<String> =
+            View::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
 
         // Remove the second element
-        view.delete();
+        view.remove();
 
         // Get the list changes to the view
         let changes = view.into_result(&system).unwrap();
@@ -682,11 +666,11 @@ mod tests {
 
         let system = System::from(state);
 
-        let mut view: View<State, String> =
-            View::from_system(&system, &Context::new().path("/numbers/2")).unwrap();
+        let mut view: View<String> =
+            View::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
 
         // Remove the third element
-        view.delete();
+        view.remove();
 
         // Get the list changes to the view
         let changes = view.into_result(&system).unwrap();

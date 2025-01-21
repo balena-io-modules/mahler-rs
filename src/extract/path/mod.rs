@@ -19,10 +19,10 @@ impl IntoError for PathDeserializationError {
 #[derive(Debug)]
 pub struct Path<T>(pub T);
 
-impl<S, T: DeserializeOwned + Send> FromSystem<S> for Path<T> {
+impl<T: DeserializeOwned + Send> FromSystem for Path<T> {
     type Error = PathDeserializationError;
 
-    fn from_system(_: &System, context: &Context<S>) -> Result<Self, Self::Error> {
+    fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
         let args = &context.args;
         T::deserialize(de::PathDeserializer::new(args)).map(Path)
     }
@@ -60,7 +60,7 @@ mod tests {
         let system = System::from(state);
 
         let Path(name): Path<String> =
-            Path::from_system(&system, &Context::<State>::new().arg("name", "one")).unwrap();
+            Path::from_system(&system, &Context::new().with_arg("name", "one")).unwrap();
 
         assert_eq!(name, "one");
     }
@@ -77,9 +77,9 @@ mod tests {
 
         let Path((first, second)): Path<(String, String)> = Path::from_system(
             &system,
-            &Context::<State>::new()
-                .arg("first", "one")
-                .arg("second", "two"),
+            &Context::new()
+                .with_arg("first", "one")
+                .with_arg("second", "two"),
         )
         .unwrap();
 
@@ -99,9 +99,9 @@ mod tests {
 
         let Path(map): Path<HashMap<String, String>> = Path::from_system(
             &system,
-            &Context::<State>::new()
-                .arg("first", "one")
-                .arg("second", "two"),
+            &Context::new()
+                .with_arg("first", "one")
+                .with_arg("second", "two"),
         )
         .unwrap();
 

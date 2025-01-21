@@ -40,14 +40,8 @@ impl AsRef<Pointer> for Path {
 
 // Structure to store path arguments when matching
 // against a lens
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct PathArgs(pub Vec<(Arc<str>, String)>);
-
-impl PathArgs {
-    pub fn new() -> Self {
-        PathArgs(Vec::new())
-    }
-}
 
 impl Deref for PathArgs {
     type Target = Vec<(Arc<str>, String)>;

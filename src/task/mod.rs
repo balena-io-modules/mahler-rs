@@ -62,42 +62,41 @@ where
 }
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
-type DryRun<S> = Box<dyn FnOnce(&System, Context<S>) -> Result<Patch>>;
-type Run<S> = Box<dyn FnOnce(&System, Context<S>) -> ActionOutput>;
-type Expand<S> = Box<dyn FnOnce(&System, Context<S>) -> core::result::Result<Vec<Task<S>>, Error>>;
+type DryRun = Box<dyn FnOnce(&System, Context) -> Result<Patch>>;
+type Run = Box<dyn FnOnce(&System, Context) -> ActionOutput>;
+type Expand = Box<dyn FnOnce(&System, Context) -> core::result::Result<Vec<Task>, Error>>;
 
 /// A task is either a concrete unit (atom) of work or a list of tasks
 /// that can be run in sequence or in parallel
-pub enum Task<S> {
+pub enum Task {
     Atom {
         id: String,
-        context: Context<S>,
-        dry_run: DryRun<S>,
-        run: Run<S>,
+        context: Context,
+        dry_run: DryRun,
+        run: Run,
     },
     List {
         id: String,
-        context: Context<S>,
-        expand: Expand<S>,
+        context: Context,
+        expand: Expand,
     },
 }
 
-impl<S> Task<S> {
-    pub(crate) fn atom<H, T, I>(id: &str, handler: H, context: Context<S>) -> Self
+impl Task {
+    pub(crate) fn atom<H, T, I>(id: &str, handler: H, context: Context) -> Self
     where
-        H: Handler<S, T, Patch, I>,
-        S: 'static,
+        H: Handler<T, Patch, I>,
         I: 'static,
     {
         let hc = handler.clone();
         Self::Atom {
             id: String::from(id),
             context,
-            dry_run: Box::new(|system: &System, context: Context<S>| {
+            dry_run: Box::new(|system: &System, context: Context| {
                 let effect = hc.call(system, context);
                 effect.pure()
             }),
-            run: Box::new(|system: &System, context: Context<S>| {
+            run: Box::new(|system: &System, context: Context| {
                 let effect = handler.call(system, context);
 
                 Box::pin(async {
@@ -110,15 +109,14 @@ impl<S> Task<S> {
         }
     }
 
-    pub(crate) fn list<H, T>(id: &str, handler: H, context: Context<S>) -> Self
+    pub(crate) fn list<H, T>(id: &str, handler: H, context: Context) -> Self
     where
-        H: Handler<S, T, Vec<Task<S>>>,
-        S: 'static,
+        H: Handler<T, Vec<Task>>,
     {
         Self::List {
             id: String::from(id),
             context,
-            expand: Box::new(|system: &System, context: Context<S>| {
+            expand: Box::new(|system: &System, context: Context| {
                 // List tasks cannot perform changes to the system
                 // so the Effect returned by this handler is assumed to
                 // be pure
@@ -134,7 +132,7 @@ impl<S> Task<S> {
         }
     }
 
-    pub fn context(&self) -> &Context<S> {
+    pub fn context(&self) -> &Context {
         match self {
             Self::Atom { context, .. } => context,
             Self::List { context, .. } => context,
@@ -192,7 +190,7 @@ impl<S> Task<S> {
     /// Expand the task into its composing sub-jobs.
     ///
     /// If the task is an atom the expansion will fail
-    pub fn expand(self, system: &System) -> Result<Vec<Task<S>>> {
+    pub fn expand(self, system: &System) -> Result<Vec<Task>> {
         match self {
             Self::Atom { .. } => Ok(vec![]),
             Self::List {
@@ -220,8 +218,8 @@ mod tests {
         CounterReached,
     }
 
-    fn plus_one(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
-        if *counter < *tgt {
+    fn plus_one(mut counter: Update<i32>, Target(tgt): Target<i32>) -> Update<i32> {
+        if *counter < tgt {
             *counter += 1;
         }
 
@@ -229,21 +227,24 @@ mod tests {
         counter
     }
 
-    fn plus_two(counter: Update<i32>, tgt: Target<i32>) -> Vec<Task<i32>> {
-        if *tgt - *counter < 2 {
+    fn plus_two(counter: Update<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
+        if tgt - *counter < 2 {
             // Returning an empty result tells the planner
             // the task is not applicable to reach the target
             return vec![];
         }
 
         vec![
-            plus_one.into_task(Context::new().target(*tgt)),
-            plus_one.into_task(Context::new().target(*tgt)),
+            plus_one.into_task(Context::new().with_target(tgt)),
+            plus_one.into_task(Context::new().with_target(tgt)),
         ]
     }
 
-    fn plus_one_async(counter: Update<i32>, tgt: Target<i32>) -> Effect<Update<i32>, MyError> {
-        if *counter >= *tgt {
+    fn plus_one_async(
+        counter: Update<i32>,
+        Target(tgt): Target<i32>,
+    ) -> Effect<Update<i32>, MyError> {
+        if *counter >= tgt {
             return Effect::from_error(MyError::CounterReached);
         }
 
@@ -265,7 +266,7 @@ mod tests {
     fn it_allows_to_dry_run_tasks() {
         let system = System::from(0);
         let job = plus_one.into_job();
-        let task = job.into_task(Context::new().target(1));
+        let task = job.into_task(Context::new().with_target(1));
 
         // Get the list of changes that the action performs
         let changes = task.dry_run(&system).unwrap();
@@ -282,7 +283,7 @@ mod tests {
     fn it_allows_to_dry_run_composite_tasks() {
         let system = System::from(0);
         let job = plus_two.into_job();
-        let task = job.into_task(Context::new().target(2));
+        let task = job.into_task(Context::new().with_target(2));
 
         // Get the list of changes that the method performs
         let changes = task.dry_run(&system).unwrap();
@@ -299,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_to_run_composite_tasks() {
         let mut system = System::from(0);
-        let task = plus_two.into_task(Context::new().target(2));
+        let task = plus_two.into_task(Context::new().with_target(2));
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -313,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn it_runs_async_actions() {
         let mut system = System::from(0);
-        let task = plus_one.into_task(Context::new().target(1));
+        let task = plus_one.into_task(Context::new().with_target(1));
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -328,7 +329,7 @@ mod tests {
     async fn it_allows_extending_actions_with_effect() {
         let mut system = System::from(0);
         let job = plus_one_async.into_job();
-        let task = job.into_task(Context::new().target(1));
+        let task = job.into_task(Context::new().with_target(1));
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -341,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_actions_returning_errors() {
         let mut system = System::from(1);
-        let task = plus_one_async.into_task(Context::new().target(1));
+        let task = plus_one_async.into_task(Context::new().with_target(1));
 
         let res = task.run(&mut system).await;
         assert!(res.is_err());
@@ -354,10 +355,7 @@ mod tests {
         counters: HashMap<String, i32>,
     }
 
-    fn update_counter(
-        mut counter: Update<State, i32>,
-        tgt: Target<State, i32>,
-    ) -> Update<State, i32> {
+    fn update_counter(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
         if *counter < *tgt {
             *counter += 1;
         }
@@ -374,13 +372,7 @@ mod tests {
 
         let mut system = System::from(state);
         let task = update_counter.into_job();
-        let action = task.into_task(
-            Context::new()
-                .target(State {
-                    counters: [("a".to_string(), 2), ("b".to_string(), 1)].into(),
-                })
-                .path("/counters/a"),
-        );
+        let action = task.into_task(Context::new().with_target(2).with_path("/counters/a"));
 
         // Run the action
         action.run(&mut system).await.unwrap();

@@ -1,7 +1,7 @@
 use crate::dag::Dag;
 use crate::task::Task;
 
-pub(crate) struct Action<S> {
+pub(crate) struct Action {
     /**
      * Unique id for the action. This is calculated from the
      * task is and the current runtime state expected
@@ -14,12 +14,12 @@ pub(crate) struct Action<S> {
      *
      * Only atomic tasks should be added to a worflow item
      */
-    task: Task<S>,
+    task: Task,
 }
 
-pub struct Workflow<S>(pub(crate) Dag<Action<S>>);
+pub struct Workflow(pub(crate) Dag<Action>);
 
-impl<S> Default for Workflow<S> {
+impl Default for Workflow {
     fn default() -> Self {
         Workflow(Dag::default())
     }

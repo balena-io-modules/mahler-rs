@@ -10,14 +10,14 @@ pub enum Operation {
     None,
 }
 
-pub struct Intent<S> {
+pub struct Intent {
     pub(crate) operation: Operation,
-    pub(crate) job: Job<S>,
+    pub(crate) job: Job,
     priority: u8,
 }
 
-impl<S> Intent<S> {
-    pub(crate) fn new(job: Job<S>) -> Self {
+impl Intent {
+    pub(crate) fn new(job: Job) -> Self {
         Intent {
             operation: Operation::Update,
             job,
@@ -50,10 +50,9 @@ impl<S> Intent<S> {
 
 macro_rules! define_intent {
     ($func_name:ident, $operation:expr) => {
-        pub fn $func_name<S, H, T, O, I>(handler: H) -> Intent<S>
+        pub fn $func_name<H, T, O, I>(handler: H) -> Intent
         where
-            H: Handler<S, T, O, I>,
-            S: 'static,
+            H: Handler<T, O, I>,
             I: 'static,
         {
             Intent::new(handler.into_job()).with_operation($operation)
@@ -67,20 +66,20 @@ define_intent!(delete, Operation::Delete);
 define_intent!(any, Operation::Any);
 define_intent!(none, Operation::None);
 
-impl<S> PartialEq for Intent<S> {
+impl PartialEq for Intent {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
-impl<S> Eq for Intent<S> {}
+impl Eq for Intent {}
 
-impl<S> PartialOrd for Intent<S> {
+impl PartialOrd for Intent {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<S> Ord for Intent<S> {
+impl Ord for Intent {
     fn cmp(&self, other: &Self) -> Ordering {
         self.job
             .cmp(&other.job)

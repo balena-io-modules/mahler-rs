@@ -6,23 +6,22 @@ use crate::error::{Error, IntoError};
 use crate::path::Path;
 use crate::task::{Context, Task};
 
+use super::distance::Distance;
 use super::domain::Domain;
-use super::target::Target;
 use super::workflow::Workflow;
 use super::Operation;
 
-pub struct Planner<S> {
-    domain: Domain<S>,
-}
-
-pub enum Plan<S> {
-    Found { workflow: Workflow<S>, state: S },
-    NotFound,
+pub struct Planner {
+    domain: Domain,
 }
 
 #[derive(Debug)]
 pub enum PlanSearchError {
     SerializationError(serde_json::error::Error),
+    CannotResolveTarget {
+        path: String,
+        reason: jsonptr::resolve::ResolveError,
+    },
     PathNotFound,
 }
 
@@ -33,22 +32,25 @@ impl Display for PlanSearchError {
         match self {
             PlanSearchError::SerializationError(err) => err.fmt(f),
             PlanSearchError::PathNotFound => write!(f, "not found"),
+            PlanSearchError::CannotResolveTarget { path, reason } => {
+                write!(f, "cannot resolve target path `{}`: {}", path, reason)
+            }
         }
     }
 }
 
 impl IntoError for PlanSearchError {
     fn into_error(self) -> Error {
-        Error::PlanNotFound(self)
+        Error::PlanSearchFailed(self)
     }
 }
 
-impl<S> Planner<S> {
-    pub fn new(domain: Domain<S>) -> Self {
+impl Planner {
+    pub fn new(domain: Domain) -> Self {
         Self { domain }
     }
 
-    fn try_task(&self, task: Task<S>, state: &Value, initial_plan: Workflow<S>) {
+    fn try_task(&self, task: Task, state: &Value, initial_plan: Workflow) {
         match task {
             Task::Atom { .. } => {
                 // Detect loops in the plan
@@ -58,23 +60,23 @@ impl<S> Planner<S> {
         }
     }
 
-    pub fn find_plan(&self, cur: S, tgt: S) -> Result<Workflow<S>, Error>
+    pub fn find_plan<S>(&self, cur: S, tgt: S) -> Result<Workflow, Error>
     where
-        S: Serialize + Clone,
+        S: Serialize,
     {
-        let initial = serde_json::to_value(cur).map_err(PlanSearchError::SerializationError)?;
-        let target = Target::try_from(tgt.clone()).map_err(PlanSearchError::SerializationError)?;
-        let initial_plan = Workflow::<S>::default();
+        let cur = serde_json::to_value(cur).map_err(PlanSearchError::SerializationError)?;
+        let tgt = serde_json::to_value(tgt).map_err(PlanSearchError::SerializationError)?;
 
-        let mut stack = vec![(initial, initial_plan)];
+        // Store the initial state and an empty plan on the stack
+        let mut stack = vec![(cur, Workflow::default())];
 
-        while let Some((state, plan)) = stack.pop() {
-            let distance = target.distance(&state);
+        while let Some((cur, plan)) = stack.pop() {
+            let distance = Distance::new(&cur, &tgt);
 
             // we reached the target
             if distance.is_empty() {
-                // TODO: return the proper plan
-                return Ok(Workflow::default());
+                // return the existing plan
+                return Ok(plan);
             }
 
             for op in distance.iter() {
@@ -82,11 +84,20 @@ impl<S> Planner<S> {
                 let path = Path::new(op.path());
                 let matching = self.domain.at(path.to_str());
                 if let Some((args, intents)) = matching {
+                    // Calculate the target for the job path
+                    let pointer = path.as_ref();
+                    let target = pointer.resolve(&tgt).map_err(|e| {
+                        PlanSearchError::CannotResolveTarget {
+                            path: path.to_string(),
+                            reason: e,
+                        }
+                    })?;
+
                     // Create the calling context for the job
                     let context = Context {
                         path,
                         args,
-                        target: Some(tgt.clone()),
+                        target: target.clone(),
                     };
                     for intent in intents {
                         // If the intent is applicable to the operation
