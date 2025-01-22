@@ -62,9 +62,9 @@ where
 }
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
-type DryRun = Box<dyn FnOnce(&System, Context) -> Result<Patch>>;
-type Run = Box<dyn FnOnce(&System, Context) -> ActionOutput>;
-type Expand = Box<dyn FnOnce(&System, Context) -> core::result::Result<Vec<Task>, Error>>;
+type DryRun = Box<dyn Fn(&System, &Context) -> Result<Patch>>;
+type Run = Box<dyn Fn(&System, &Context) -> ActionOutput>;
+type Expand = Box<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, Error>>;
 
 /// A task is either a concrete unit (atom) of work or a list of tasks
 /// that can be run in sequence or in parallel
@@ -92,11 +92,11 @@ impl Task {
         Self::Atom {
             id,
             context,
-            dry_run: Box::new(|system: &System, context: Context| {
+            dry_run: Box::new(move |system: &System, context: &Context| {
                 let effect = hc.call(system, context);
                 effect.pure()
             }),
-            run: Box::new(|system: &System, context: Context| {
+            run: Box::new(move |system: &System, context: &Context| {
                 let effect = handler.call(system, context);
 
                 Box::pin(async {
@@ -116,7 +116,7 @@ impl Task {
         Self::List {
             id,
             context,
-            expand: Box::new(|system: &System, context: Context| {
+            expand: Box::new(move |system: &System, context: &Context| {
                 // List tasks cannot perform changes to the system
                 // so the Effect returned by this handler is assumed to
                 // be pure
@@ -142,7 +142,7 @@ impl Task {
     /// Run every action in the task sequentially and return the
     /// aggregate changes.
     /// TODO: this should probably only have crate visibility
-    pub fn dry_run(self, system: &System) -> Result<Patch> {
+    pub fn dry_run(&self, system: &System) -> Result<Patch> {
         match self {
             Self::Atom {
                 context, dry_run, ..
@@ -168,7 +168,7 @@ impl Task {
     }
 
     /// Run the task sequentially
-    pub async fn run(self, system: &mut System) -> Result<()> {
+    pub async fn run(&self, system: &mut System) -> Result<()> {
         match self {
             Self::Atom { context, run, .. } => {
                 let changes = (run)(system, context).await?;
@@ -190,7 +190,7 @@ impl Task {
     /// Expand the task into its composing sub-jobs.
     ///
     /// If the task is an atom the expansion will fail
-    pub fn expand(self, system: &System) -> Result<Vec<Task>> {
+    pub fn expand(&self, system: &System) -> Result<Vec<Task>> {
         match self {
             Self::Atom { .. } => Ok(vec![]),
             Self::List {

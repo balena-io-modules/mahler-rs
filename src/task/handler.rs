@@ -5,7 +5,7 @@ use crate::error::{Error, IntoError};
 use crate::system::{FromSystem, System};
 
 pub trait Handler<T, O, I = O>: Clone + Send + 'static {
-    fn call(self, system: &System, context: Context) -> Effect<O, Error, I>;
+    fn call(&self, system: &System, context: &Context) -> Effect<O, Error, I>;
 
     fn into_job(self) -> Job;
 
@@ -67,15 +67,15 @@ macro_rules! impl_action_handler {
         #[allow(non_snake_case, unused)]
         impl<F, $($ty,)* Res, I> Handler<($($ty,)*), Patch, I> for F
         where
-            F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
+            F: Fn($($ty,)*) -> Res + Clone + Send +'static,
             Res: IntoEffect<Patch, Error, I>,
             $($ty: FromSystem,)*
             I: 'static
         {
 
-            fn call(self, system: &System, context: Context) -> Effect<Patch, Error, I>{
+            fn call(&self, system: &System, context: &Context) -> Effect<Patch, Error, I>{
                 $(
-                    let $ty = match $ty::from_system(&system, &context) {
+                    let $ty = match $ty::from_system(system, context) {
                         Ok(value) => value,
                         Err(failure) => return Effect::from_error(failure.into_error())
                     };
@@ -118,14 +118,14 @@ macro_rules! impl_method_handler {
         #[allow(non_snake_case, unused)]
         impl<F, $($ty,)* Res> Handler<($($ty,)*), Vec<Task>> for F
         where
-            F: FnOnce($($ty,)*) -> Res + Clone + Send +'static,
+            F: Fn($($ty,)*) -> Res + Clone + Send +'static,
             Res: IntoEffect<Vec<Task>, Error>,
             $($ty: FromSystem,)*
         {
 
-            fn call(self, system: &System, context: Context) -> Effect<Vec<Task>, Error> {
+            fn call(&self, system: &System, context: &Context) -> Effect<Vec<Task>, Error> {
                 $(
-                    let $ty = match $ty::from_system(&system, &context) {
+                    let $ty = match $ty::from_system(system, context) {
                         Ok(value) => value,
                         Err(failure) => return Effect::from_error(failure.into_error())
                     };
