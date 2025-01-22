@@ -70,27 +70,27 @@ type Expand = Box<dyn FnOnce(&System, Context) -> core::result::Result<Vec<Task>
 /// that can be run in sequence or in parallel
 pub enum Task {
     Atom {
-        id: String,
+        id: &'static str,
         context: Context,
         dry_run: DryRun,
         run: Run,
     },
     List {
-        id: String,
+        id: &'static str,
         context: Context,
         expand: Expand,
     },
 }
 
 impl Task {
-    pub(crate) fn atom<H, T, I>(id: &str, handler: H, context: Context) -> Self
+    pub(crate) fn atom<H, T, I>(id: &'static str, handler: H, context: Context) -> Self
     where
         H: Handler<T, Patch, I>,
         I: 'static,
     {
         let hc = handler.clone();
         Self::Atom {
-            id: String::from(id),
+            id,
             context,
             dry_run: Box::new(|system: &System, context: Context| {
                 let effect = hc.call(system, context);
@@ -109,12 +109,12 @@ impl Task {
         }
     }
 
-    pub(crate) fn list<H, T>(id: &str, handler: H, context: Context) -> Self
+    pub(crate) fn list<H, T>(id: &'static str, handler: H, context: Context) -> Self
     where
         H: Handler<T, Vec<Task>>,
     {
         Self::List {
-            id: String::from(id),
+            id,
             context,
             expand: Box::new(|system: &System, context: Context| {
                 // List tasks cannot perform changes to the system
@@ -125,7 +125,7 @@ impl Task {
         }
     }
 
-    pub fn id(&self) -> &String {
+    pub fn id(&self) -> &str {
         match self {
             Self::Atom { id, .. } => id,
             Self::List { id, .. } => id,
@@ -259,7 +259,7 @@ mod tests {
     fn it_gets_metadata_from_function() {
         let job = plus_one.into_job();
 
-        assert_eq!(job.id().as_str(), "gustav::task::tests::plus_one");
+        assert_eq!(job.id(), "gustav::task::tests::plus_one");
     }
 
     #[test]

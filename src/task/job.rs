@@ -22,7 +22,7 @@ enum Degree {
 ///
 /// Jobs are re-usable
 pub struct Job {
-    id: String,
+    id: &'static str,
     degree: Degree,
     builder: BoxedIntoTask,
 }
@@ -56,7 +56,7 @@ impl Job {
         A: Handler<T, Patch, I>,
         I: 'static,
     {
-        let id = String::from(std::any::type_name::<A>());
+        let id = std::any::type_name::<A>();
 
         Self {
             id,
@@ -69,7 +69,7 @@ impl Job {
     where
         M: Handler<T, Vec<Task>>,
     {
-        let id = String::from(std::any::type_name::<M>());
+        let id = std::any::type_name::<M>();
         Self {
             id,
             degree: Degree::List,
@@ -77,11 +77,11 @@ impl Job {
         }
     }
 
-    pub fn id(&self) -> &String {
-        &self.id
+    pub fn id(&self) -> &str {
+        self.id
     }
 
     pub fn into_task(&self, context: Context) -> Task {
-        self.builder.clone().into_task(self.id.as_str(), context)
+        self.builder.clone().into_task(self.id, context)
     }
 }

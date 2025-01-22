@@ -9,7 +9,7 @@ pub struct Domain {
     // The router stores a list of intents matching a route
     router: Router<BTreeSet<Intent>>,
     // The index stores the reverse relation of job id to a route
-    index: HashMap<String, String>,
+    index: HashMap<Box<str>, String>,
 }
 
 // Placeholder string to replace escaped parameters
@@ -32,7 +32,7 @@ impl Domain {
             mut index,
         } = self;
 
-        let job_id = intent.job.id().clone();
+        let job_id = String::from(intent.job.id());
         let operation = intent.operation.clone();
 
         // Remove the route from the router if it exists or create
@@ -42,7 +42,7 @@ impl Domain {
         // Do not allow the same job to be assigned to
         // multiple operations. This could cause problems at
         // runtime
-        if queue.iter().any(|i| i.job.id() == &job_id) {
+        if queue.iter().any(|i| i.job.id() == job_id) {
             panic!(
                 "cannot assign job '{}' to operation '{:?}', a previous assignment exists",
                 job_id, operation
@@ -57,7 +57,7 @@ impl Domain {
         router.insert(route, queue).expect("route should be valid");
 
         // Only allow one assignment of a job to a route
-        if let Some(oldroute) = index.insert(job_id.clone(), String::from(route)) {
+        if let Some(oldroute) = index.insert(job_id.clone().into_boxed_str(), String::from(route)) {
             panic!(
                 "cannot assign job '{}' to route '{}', a previous assignment exists to '{}'",
                 job_id, route, oldroute
@@ -76,8 +76,7 @@ impl Domain {
     //
     // This will no longer be dead code when the planner
     // is implemented
-    #[allow(dead_code)]
-    pub(crate) fn get_path(&self, job_id: &String, args: PathArgs) -> Option<String> {
+    pub(crate) fn get_path(&self, job_id: &str, args: PathArgs) -> Option<String> {
         if let Some(route) = self.index.get(job_id) {
             let mut route = route.clone();
             let placeholder = PLACEHOLDER.to_string();
@@ -167,7 +166,7 @@ mod tests {
             .job("/counters/{counter}", update(plus_one))
             .job("/counters/{counter}", update(plus_two));
 
-        let jobs: Vec<&String> = domain
+        let jobs: Vec<&str> = domain
             .at("/counters/{counter}")
             .map(|(_, iter)| iter.map(|i| i.job.id()).collect())
             .unwrap();
@@ -185,7 +184,7 @@ mod tests {
             .job("/counters/{counter}", none(plus_one))
             .job("/counters/{counter}", update(plus_two));
 
-        let jobs: Vec<&String> = domain
+        let jobs: Vec<&str> = domain
             .at("/counters/{counter}")
             .map(|(_, iter)| iter.map(|i| i.job.id()).collect())
             .unwrap();

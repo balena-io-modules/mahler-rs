@@ -26,7 +26,7 @@ impl BoxedIntoTask {
         }))
     }
 
-    pub fn into_task(self, id: &str, context: Context) -> Task {
+    pub fn into_task(self, id: &'static str, context: Context) -> Task {
         self.0.into_task(id, context)
     }
 }
@@ -40,12 +40,12 @@ impl Clone for BoxedIntoTask {
 trait ErasedIntoTask {
     fn clone_box(&self) -> Box<dyn ErasedIntoTask>;
 
-    fn into_task(self: Box<Self>, id: &str, context: Context) -> Task;
+    fn into_task(self: Box<Self>, id: &'static str, context: Context) -> Task;
 }
 
 struct MakeIntoTask<H> {
     pub(crate) handler: H,
-    pub(crate) into_task: fn(&str, H, Context) -> Task,
+    pub(crate) into_task: fn(&'static str, H, Context) -> Task,
 }
 
 impl<H> ErasedIntoTask for MakeIntoTask<H>
@@ -59,7 +59,7 @@ where
         })
     }
 
-    fn into_task(self: Box<Self>, id: &str, context: Context) -> Task {
+    fn into_task(self: Box<Self>, id: &'static str, context: Context) -> Task {
         (self.into_task)(id, self.handler, context)
     }
 }

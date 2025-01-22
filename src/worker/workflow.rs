@@ -17,7 +17,13 @@ pub(crate) struct Action {
     task: Task,
 }
 
-pub struct Workflow(pub(crate) Dag<Action>);
+pub struct Workflow(Dag<Action>);
+
+impl Workflow {
+    pub(crate) fn as_dag(&self) -> &Dag<Action> {
+        &self.0
+    }
+}
 
 impl Default for Workflow {
     fn default() -> Self {
