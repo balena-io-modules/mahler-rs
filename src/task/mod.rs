@@ -9,6 +9,7 @@ use json_patch::{Patch, PatchOperation};
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use crate::error::{Error, IntoError};
 use crate::system::System;
@@ -62,12 +63,13 @@ where
 }
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
-type DryRun = Box<dyn Fn(&System, &Context) -> Result<Patch>>;
-type Run = Box<dyn Fn(&System, &Context) -> ActionOutput>;
-type Expand = Box<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, Error>>;
+type DryRun = Rc<dyn Fn(&System, &Context) -> Result<Patch>>;
+type Run = Rc<dyn Fn(&System, &Context) -> ActionOutput>;
+type Expand = Rc<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, Error>>;
 
 /// A task is either a concrete unit (atom) of work or a list of tasks
 /// that can be run in sequence or in parallel
+#[derive(Clone)]
 pub enum Task {
     Atom {
         id: &'static str,
@@ -88,15 +90,15 @@ impl Task {
         H: Handler<T, Patch, I>,
         I: 'static,
     {
-        let hc = handler.clone();
+        let handler_clone = handler.clone();
         Self::Atom {
             id,
             context,
-            dry_run: Box::new(move |system: &System, context: &Context| {
-                let effect = hc.call(system, context);
+            dry_run: Rc::new(move |system: &System, context: &Context| {
+                let effect = handler_clone.call(system, context);
                 effect.pure()
             }),
-            run: Box::new(move |system: &System, context: &Context| {
+            run: Rc::new(move |system: &System, context: &Context| {
                 let effect = handler.call(system, context);
 
                 Box::pin(async {
@@ -116,7 +118,7 @@ impl Task {
         Self::List {
             id,
             context,
-            expand: Box::new(move |system: &System, context: &Context| {
+            expand: Rc::new(move |system: &System, context: &Context| {
                 // List tasks cannot perform changes to the system
                 // so the Effect returned by this handler is assumed to
                 // be pure
@@ -197,6 +199,18 @@ impl Task {
                 context, expand, ..
             } => (expand)(system, context),
         }
+    }
+}
+
+impl Display for Task {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self
+            .id()
+            .split("::")
+            .skip(1)
+            .collect::<Vec<&str>>()
+            .join("::");
+        write!(f, "{}({})", id, self.context().path)
     }
 }
 

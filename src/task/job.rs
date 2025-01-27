@@ -1,5 +1,5 @@
 use json_patch::Patch;
-use std::cmp::Ordering;
+use std::fmt;
 
 use super::boxed::*;
 use super::context::Context;
@@ -11,8 +11,8 @@ use super::{Handler, Task};
 ///   executed and cannot be expanded
 /// - List jobs define work in terms of other tasks, they are expanded recursively
 ///   in order to get to a list of atoms
-#[derive(Clone, PartialEq, PartialOrd, Eq, Ord)]
-enum Degree {
+#[derive(Clone, PartialEq, PartialOrd, Eq, Ord, Debug)]
+pub(crate) enum Degree {
     List,
     Atom,
 }
@@ -22,9 +22,23 @@ enum Degree {
 ///
 /// Jobs are re-usable
 pub struct Job {
-    id: &'static str,
-    degree: Degree,
+    pub(crate) id: &'static str,
+    pub(crate) degree: Degree,
     builder: BoxedIntoTask,
+}
+
+impl fmt::Debug for Job {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct Job<'a> {
+            id: &'a str,
+            degree: &'a Degree,
+        }
+
+        let Self { id, degree, .. } = self;
+        fmt::Debug::fmt(&Job { id, degree }, f)
+    }
 }
 
 impl PartialEq for Job {
@@ -33,22 +47,7 @@ impl PartialEq for Job {
     }
 }
 
-impl PartialOrd for Job {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl Eq for Job {}
-
-impl Ord for Job {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // We order jobs by degree. When searching for applicable
-        // jobs, we want to give List jobs priority over atomic jobs
-        // as these can be used to direct the search
-        self.degree.cmp(&other.degree)
-    }
-}
 
 impl Job {
     pub(crate) fn from_action<A, T, I>(action: A) -> Self

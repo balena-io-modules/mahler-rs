@@ -23,7 +23,7 @@ pub enum Error {
     #[error("condition failed: ${0}")]
     TaskConditionFailed(#[from] super::task::ConditionFailed),
 
-    #[error("plan could not be found: ${0}")]
+    #[error("plan search failed: ${0}")]
     PlanSearchFailed(#[from] super::worker::PlanSearchError),
 
     #[error(transparent)]

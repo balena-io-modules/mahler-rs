@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use super::intent::{Intent, Operation};
 use crate::path::PathArgs;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Domain {
     // The router stores a list of intents matching a route
     router: Router<BTreeSet<Intent>>,
@@ -50,18 +50,22 @@ impl Domain {
         }
 
         // Insert the route to the queue
-        queue.insert(intent);
+        let updated = queue.insert(intent);
 
         // (re)insert the queue to the router, we should not have
         // conflicts here
         router.insert(route, queue).expect("route should be valid");
 
         // Only allow one assignment of a job to a route
-        if let Some(oldroute) = index.insert(job_id.clone().into_boxed_str(), String::from(route)) {
-            panic!(
-                "cannot assign job '{}' to route '{}', a previous assignment exists to '{}'",
-                job_id, route, oldroute
-            )
+        if updated {
+            if let Some(oldroute) =
+                index.insert(job_id.clone().into_boxed_str(), String::from(route))
+            {
+                panic!(
+                    "cannot assign job '{}' to route '{}', a previous assignment exists to '{}'",
+                    job_id, route, oldroute
+                )
+            }
         }
 
         Self { router, index }

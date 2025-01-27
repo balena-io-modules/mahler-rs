@@ -10,6 +10,7 @@ pub enum Operation {
     None,
 }
 
+#[derive(Debug)]
 pub struct Intent {
     pub(crate) operation: Operation,
     pub(crate) job: Job,
@@ -68,7 +69,9 @@ define_intent!(none, Operation::None);
 
 impl PartialEq for Intent {
     fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
+        self.job == other.job
+            && self.operation == other.operation
+            && self.priority == other.priority
     }
 }
 impl Eq for Intent {}
@@ -82,8 +85,10 @@ impl PartialOrd for Intent {
 impl Ord for Intent {
     fn cmp(&self, other: &Self) -> Ordering {
         self.job
-            .cmp(&other.job)
+            .degree
+            .cmp(&other.job.degree)
             .then(self.operation.cmp(&other.operation))
             .then(self.priority.cmp(&other.priority))
+            .then(self.job.id.cmp(other.job.id))
     }
 }

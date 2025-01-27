@@ -120,6 +120,19 @@ impl<T> Dag<T> {
         Dag::default()
     }
 
+    /// Check if the DAG is empty
+    ///
+    /// # Example
+    /// ```rust
+    /// use gustav::Dag;
+    ///
+    /// let dag: Dag<i32> = Dag::default();
+    /// assert!(dag.is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.tail.is_none()
+    }
+
     pub fn with_head(self, value: T) -> Dag<T> {
         let head = Node::item(value, self.head).into_link();
         let mut tail = self.tail;
@@ -212,6 +225,42 @@ impl<T> Dag<T> {
             }
         }
         true
+    }
+
+    /// Traverse the DAG sequentially, applying a fold function at each node.
+    ///
+    /// # Arguments
+    /// - `initial`: Initial accumulator value.
+    /// - `fold_fn`: Function to process each node and update the accumulator.
+    ///
+    /// # Example
+    /// ```rust
+    /// use gustav::Dag;
+    /// use gustav::{dag,seq};
+    ///
+    /// let dag: Dag<char> = dag!(seq!('h', 'e', 'l', 'l', 'o'), seq!(' '), seq!('m', 'y'))
+    ///        + seq!(' ')
+    ///        + dag!(
+    ///            seq!('o', 'l', 'd'),
+    ///            seq!(' '),
+    ///            seq!('f', 'r', 'i', 'e', 'n', 'd')
+    ///        );
+    ///        
+    ///    let msg = dag.fold(
+    ///        String::new(),
+    ///        |acc, c| acc + c.to_string().as_ref(),
+    ///    );
+    ///
+    ///    assert_eq!(msg, "hello my old friend")
+    /// ```
+    pub fn fold<U>(&self, initial: U, fold_fn: impl Fn(U, &T) -> U) -> U {
+        let mut acc = initial;
+        for node in self.iter() {
+            if let Node::Item { value, .. } = &*node.borrow() {
+                acc = fold_fn(acc, value);
+            }
+        }
+        acc
     }
 
     /// Create a linear DAG from a list of elements.

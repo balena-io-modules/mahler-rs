@@ -8,6 +8,7 @@ use std::{
 
 use super::intent;
 
+#[derive(Debug)]
 pub struct Distance(BTreeSet<Operation>);
 
 impl Distance {
