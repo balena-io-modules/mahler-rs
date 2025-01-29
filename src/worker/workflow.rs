@@ -78,6 +78,14 @@ impl Workflow {
     pub(crate) fn as_dag(&self) -> &Dag<Action> {
         &self.dag
     }
+
+    pub(crate) fn reverse(self) -> Self {
+        let Self { dag, pending } = self;
+        Self {
+            dag: dag.reverse(),
+            pending,
+        }
+    }
 }
 
 impl Display for Workflow {

@@ -11,6 +11,11 @@ impl Path {
         Self(pointer.to_buf())
     }
 
+    /// Create a static path from a string
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the string is not a valid path
     pub fn from_static(s: &'static str) -> Self {
         Path(Pointer::from_static(s).to_buf())
     }
@@ -40,8 +45,14 @@ impl AsRef<Pointer> for Path {
 
 // Structure to store path arguments when matching
 // against a lens
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub(crate) struct PathArgs(pub Vec<(Arc<str>, String)>);
+
+impl PathArgs {
+    pub fn iter(&self) -> impl Iterator<Item = &(Arc<str>, String)> {
+        self.0.iter()
+    }
+}
 
 impl Deref for PathArgs {
     type Target = Vec<(Arc<str>, String)>;
@@ -51,7 +62,7 @@ impl Deref for PathArgs {
     }
 }
 
-impl<'k, 'v> From<matchit::Params<'k, 'v>> for PathArgs {
+impl From<matchit::Params<'_, '_>> for PathArgs {
     fn from(params: matchit::Params) -> PathArgs {
         let params: Vec<(Arc<str>, String)> = params
             .iter()

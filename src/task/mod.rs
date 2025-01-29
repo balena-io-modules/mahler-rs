@@ -6,6 +6,7 @@ mod job;
 mod result;
 
 use json_patch::{Patch, PatchOperation};
+use serde::Serialize;
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::pin::Pin;
@@ -141,6 +142,94 @@ impl Task {
         }
     }
 
+    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
+        let target = serde_json::to_value(target)?;
+        let res = match self {
+            Self::Atom {
+                id,
+                context,
+                dry_run,
+                run,
+            } => Self::Atom {
+                id,
+                context: context.with_target(target),
+                dry_run,
+                run,
+            },
+            Self::List {
+                id,
+                context,
+                expand,
+                ..
+            } => {
+                let Context { args, path, .. } = context;
+                Self::List {
+                    id,
+                    context: Context { target, args, path },
+                    expand,
+                }
+            }
+        };
+
+        Ok(res)
+    }
+
+    pub fn with_target<S: Serialize>(self, target: S) -> Self {
+        self.try_target(target).unwrap()
+    }
+
+    pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
+        match self {
+            Self::Atom {
+                id,
+                context,
+                dry_run,
+                run,
+            } => Self::Atom {
+                id,
+                context: context.with_arg(key, value),
+                dry_run,
+                run,
+            },
+            Self::List {
+                id,
+                context,
+                expand,
+                ..
+            } => Self::List {
+                id,
+                context: context.with_arg(key, value),
+                expand,
+            },
+        }
+    }
+
+    pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
+        match self {
+            Self::Atom {
+                id,
+                context,
+                dry_run,
+                run,
+            } => Self::Atom {
+                id,
+                context: context.with_path(path),
+                dry_run,
+                run,
+            },
+            Self::List {
+                id,
+                context,
+                expand,
+                ..
+            } => Self::List {
+                id,
+                context: context.with_path(path),
+                expand,
+            },
+        }
+    }
+
     /// Run every action in the task sequentially and return the
     /// aggregate changes.
     /// TODO: this should probably only have crate visibility
@@ -248,10 +337,7 @@ mod tests {
             return vec![];
         }
 
-        vec![
-            plus_one.into_task(Context::new().with_target(tgt)),
-            plus_one.into_task(Context::new().with_target(tgt)),
-        ]
+        vec![plus_one.with_target(tgt), plus_one.with_target(tgt)]
     }
 
     fn plus_one_async(
@@ -279,8 +365,7 @@ mod tests {
     #[test]
     fn it_allows_to_dry_run_tasks() {
         let system = System::from(0);
-        let job = plus_one.into_job();
-        let task = job.into_task(Context::new().with_target(1));
+        let task = plus_one.with_target(1);
 
         // Get the list of changes that the action performs
         let changes = task.dry_run(&system).unwrap();
@@ -296,8 +381,7 @@ mod tests {
     #[test]
     fn it_allows_to_dry_run_composite_tasks() {
         let system = System::from(0);
-        let job = plus_two.into_job();
-        let task = job.into_task(Context::new().with_target(2));
+        let task = plus_two.with_target(2);
 
         // Get the list of changes that the method performs
         let changes = task.dry_run(&system).unwrap();
@@ -314,7 +398,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_to_run_composite_tasks() {
         let mut system = System::from(0);
-        let task = plus_two.into_task(Context::new().with_target(2));
+        let task = plus_two.with_target(2);
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -328,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn it_runs_async_actions() {
         let mut system = System::from(0);
-        let task = plus_one.into_task(Context::new().with_target(1));
+        let task = plus_one.with_target(1);
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -342,8 +426,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_extending_actions_with_effect() {
         let mut system = System::from(0);
-        let job = plus_one_async.into_job();
-        let task = job.into_task(Context::new().with_target(1));
+        let task = plus_one_async.with_target(1);
 
         // Run the action
         task.run(&mut system).await.unwrap();
@@ -356,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_actions_returning_errors() {
         let mut system = System::from(1);
-        let task = plus_one_async.into_task(Context::new().with_target(1));
+        let task = plus_one_async.with_target(1);
 
         let res = task.run(&mut system).await;
         assert!(res.is_err());
@@ -385,11 +468,10 @@ mod tests {
         };
 
         let mut system = System::from(state);
-        let task = update_counter.into_job();
-        let action = task.into_task(Context::new().with_target(2).with_path("/counters/a"));
+        let task = update_counter.with_target(2).with_path("/counters/a");
 
         // Run the action
-        action.run(&mut system).await.unwrap();
+        task.run(&mut system).await.unwrap();
 
         let state = system.state::<State>().unwrap();
 

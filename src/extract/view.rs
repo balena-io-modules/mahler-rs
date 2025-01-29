@@ -23,7 +23,7 @@ pub struct View<T> {
 
 #[derive(Debug)]
 pub enum ViewExtractError {
-    PathResolveFailed {
+    CannotResolvePath {
         path: String,
         reason: jsonptr::resolve::ResolveError,
     },
@@ -35,7 +35,7 @@ impl std::error::Error for ViewExtractError {}
 impl Display for ViewExtractError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ViewExtractError::PathResolveFailed { path, reason } => {
+            ViewExtractError::CannotResolvePath { path, reason } => {
                 write!(
                     f,
                     "cannot resolve path `{}` on system state: {}",
@@ -126,7 +126,7 @@ impl<T: DeserializeOwned> FromSystem for View<T> {
         // Try to resolve the parent or fail
         parent
             .resolve(root)
-            .map_err(|e| ViewExtractError::PathResolveFailed {
+            .map_err(|e| ViewExtractError::CannotResolvePath {
                 path: context.path.to_string(),
                 reason: e,
             })?;
@@ -143,7 +143,7 @@ impl<T: DeserializeOwned> FromSystem for View<T> {
                 ResolveError::NotFound { .. } => None,
                 ResolveError::OutOfBounds { .. } => None,
                 _ => {
-                    return Err(ViewExtractError::PathResolveFailed {
+                    return Err(ViewExtractError::CannotResolvePath {
                         path: context.path.to_string(),
                         reason: e,
                     })
@@ -228,7 +228,7 @@ impl<T: DeserializeOwned + Default> FromSystem for Create<T> {
         // Try to resolve the parent or fail
         parent
             .resolve(root)
-            .map_err(|e| ViewExtractError::PathResolveFailed {
+            .map_err(|e| ViewExtractError::CannotResolvePath {
                 path: context.path.to_string(),
                 reason: e,
             })?;
@@ -241,7 +241,7 @@ impl<T: DeserializeOwned + Default> FromSystem for Create<T> {
                 ResolveError::NotFound { .. } => (),
                 ResolveError::OutOfBounds { .. } => (),
                 _ => {
-                    return Err(ViewExtractError::PathResolveFailed {
+                    return Err(ViewExtractError::CannotResolvePath {
                         path: context.path.to_string(),
                         reason: e,
                     })
@@ -304,7 +304,7 @@ impl<T: DeserializeOwned> FromSystem for Update<T> {
         // reason, return an error
         let value = pointer
             .resolve(root)
-            .map_err(|e| ViewExtractError::PathResolveFailed {
+            .map_err(|e| ViewExtractError::CannotResolvePath {
                 path: context.path.to_string(),
                 reason: e,
             })?;

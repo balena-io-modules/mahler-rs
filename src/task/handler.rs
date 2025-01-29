@@ -1,4 +1,5 @@
 use json_patch::Patch;
+use serde::Serialize;
 
 use super::{Context, Effect, IntoEffect, IntoResult, Job, Task};
 use crate::error::{Error, IntoError};
@@ -9,11 +10,17 @@ pub trait Handler<T, O, I = O>: Clone + Send + 'static {
 
     fn into_job(self) -> Job;
 
-    fn into_task(self, context: Context) -> Task
-    where
-        T: Send + 'static,
-        I: 'static,
-    {
+    fn into_task(self, context: Context) -> Task {
+        self.into_job().into_task(context)
+    }
+
+    fn try_target<S: Serialize>(self, target: S) -> Result<Task, Error> {
+        let context = Context::new().try_target(target)?;
+        Ok(self.into_job().into_task(context))
+    }
+
+    fn with_target<S: Serialize>(self, target: S) -> Task {
+        let context = Context::new().try_target(target).unwrap();
         self.into_job().into_task(context)
     }
 }

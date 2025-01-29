@@ -19,8 +19,7 @@ fn my_task_effect(mut counter: Update<i32>, tgt: Target<i32>) -> Effect<Update<i
 #[test]
 fn it_allows_to_dry_run_tasks() {
     let system = System::from(0);
-    let job = my_task_effect.into_job();
-    let action = job.into_task(Context::new().with_target(1));
+    let action = my_task_effect.with_target(1);
 
     // Get the list of changes that the action performs
     let changes = action.dry_run(&system).unwrap();

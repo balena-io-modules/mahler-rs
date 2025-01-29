@@ -2,6 +2,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("cannot serialize value: ${0}")]
+    SerializationError(#[from] serde_json::error::Error),
+
     #[error("cannot read system state: ${0}")]
     StateReadFailed(#[from] super::system::SystemReadError),
 
@@ -23,8 +26,8 @@ pub enum Error {
     #[error("condition failed: ${0}")]
     TaskConditionFailed(#[from] super::task::ConditionFailed),
 
-    #[error("plan search failed: ${0}")]
-    PlanSearchFailed(#[from] super::worker::PlanSearchError),
+    #[error("planning error: ${0}")]
+    PlanSearchFailed(#[from] super::worker::PlanningError),
 
     #[error(transparent)]
     Other(#[from] Box<dyn std::error::Error>),
