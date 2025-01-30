@@ -1,4 +1,78 @@
 - commits:
+    - subject: Add planner support for compound tasks
+      hash: ba99082a7b4ebc909b50323e8e3ad573a9f4e84b
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Implement planner for atomic tasks
+      hash: e85e62d5316e2ebfd27117d67f18e4cf28431167
+      body: |
+        First version of the planner
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Create DAG data structure
+      hash: 51f82ad32469d2a2e8da1709ed38f5fa55c21e25
+      body: |
+        This will be needed to produce executable workflows from the
+        planner
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Refactor and create worker target struct
+      hash: 939fa5cc77bcee4696b6f4e02d0064503c85bb2d
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Refactor error management
+      hash: 09399156834bf67657727a5fb6f2eef769680533
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Add Path extractor
+      hash: a8b81ffe9514d1858ef2240431359e3d88df93e4
+      body: |
+        The extractor implementation is based on the [Axum path extractor](https://github.com/tokio-rs/axum/tree/main/axum/src/extract/path)
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Move Context into task module
+      hash: 56821120c99642b46b71d9e7ca1212445c899420
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Add first implementation of Domain
+      hash: 5625b692178b7b3de3f96eda0d7d026fbb924819
+      body: |
+        The domain defines what jobs are applicable for different routes in the
+        state and to which operations.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.2.0
+  title: ""
+  date: 2025-01-30T19:59:07.249Z
+- commits:
     - subject: Allow using array return on compound jobs
       hash: 939f0674c9f9558c89b3c743a5ab1c93a34f741e
       body: ""
