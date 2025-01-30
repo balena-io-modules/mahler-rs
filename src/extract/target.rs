@@ -1,48 +1,53 @@
-use crate::error::Error;
-use crate::system::{Context, FromSystem, System};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
-use std::marker::PhantomData;
+use std::fmt::{self, Display};
 use std::ops::Deref;
 
-pub struct Target<S: Clone, T = S> {
-    target: T,
-    _system: PhantomData<S>,
+use crate::error::{self, IntoError};
+use crate::system::{FromSystem, System};
+use crate::task::Context;
+
+#[derive(Debug)]
+pub enum TargetExtractError {
+    DeserializationFailed(serde_json::error::Error),
 }
 
-impl<S: Serialize + Clone, T: DeserializeOwned> FromSystem<S> for Target<S, T> {
-    type Error = Error;
+impl std::error::Error for TargetExtractError {}
 
-    fn from_system(_: &System, context: &Context<S>) -> Result<Self, Self::Error> {
-        if context.target.is_none() {
-            return Err(Error::TargetIsNone);
-        }
-
-        let tgt = serde_json::to_value(context.target.clone())?;
-
-        // Return an error if the context path does not exist in the target object
-        let pointer = context.path.as_ref();
-        let value = pointer
-            .resolve(&tgt)
-            .map_err(|e| Error::TargetResolveFailed {
-                path: context.path.to_string(),
-                reason: e,
-            })?;
-
-        // This will fail if the value cannot be deserialized into the target type
-        let target = serde_json::from_value::<T>(value.clone())?;
-
-        Ok(Target {
-            target,
-            _system: PhantomData::<S>,
-        })
+impl Display for TargetExtractError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TargetExtractError::DeserializationFailed(err) => err.fmt(f)?,
+        };
+        Ok(())
     }
 }
 
-impl<S: Clone, T> Deref for Target<S, T> {
+impl IntoError for TargetExtractError {
+    fn into_error(self) -> error::Error {
+        error::Error::TargetExtractFailed(self)
+    }
+}
+
+pub struct Target<T>(pub T);
+
+impl<T: DeserializeOwned> FromSystem for Target<T> {
+    type Error = TargetExtractError;
+
+    fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
+        let value = &context.target;
+
+        // This will fail if the value cannot be deserialized into the target type
+        let target = serde_json::from_value::<T>(value.clone())
+            .map_err(TargetExtractError::DeserializationFailed)?;
+
+        Ok(Target(target))
+    }
+}
+
+impl<T> Deref for Target<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.target
+        &self.0
     }
 }

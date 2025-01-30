@@ -1,12 +1,23 @@
-use jsonptr::Pointer;
+use jsonptr::{Pointer, PointerBuf};
 use std::fmt::Display;
+use std::ops::Deref;
+use std::sync::Arc;
 
 #[derive(Clone, Default, PartialEq, Debug)]
-pub struct Path(&'static Pointer);
+pub struct Path(PointerBuf);
 
 impl Path {
-    pub fn from_static(s: &'static str) -> Path {
-        Path(Pointer::from_static(s))
+    pub(crate) fn new(pointer: &Pointer) -> Self {
+        Self(pointer.to_buf())
+    }
+
+    /// Create a static path from a string
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the string is not a valid path
+    pub fn from_static(s: &'static str) -> Self {
+        Path(Pointer::from_static(s).to_buf())
     }
 
     pub fn to_str(&self) -> &str {
@@ -28,7 +39,37 @@ impl From<Path> for String {
 
 impl AsRef<Pointer> for Path {
     fn as_ref(&self) -> &Pointer {
-        self.0
+        &self.0
+    }
+}
+
+// Structure to store path arguments when matching
+// against a lens
+#[derive(Clone, Default, Debug)]
+pub(crate) struct PathArgs(pub Vec<(Arc<str>, String)>);
+
+impl PathArgs {
+    pub fn iter(&self) -> impl Iterator<Item = &(Arc<str>, String)> {
+        self.0.iter()
+    }
+}
+
+impl Deref for PathArgs {
+    type Target = Vec<(Arc<str>, String)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<matchit::Params<'_, '_>> for PathArgs {
+    fn from(params: matchit::Params) -> PathArgs {
+        let params: Vec<(Arc<str>, String)> = params
+            .iter()
+            .map(|(k, v)| (Arc::from(k), String::from(v)))
+            .collect();
+
+        PathArgs(params)
     }
 }
 
