@@ -329,7 +329,7 @@ impl Display for Task {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract::{Target, Update};
+    use crate::extract::{System as Sys, Target, Update};
     use crate::system::System;
     use json_patch::Patch;
     use serde::{Deserialize, Serialize};
@@ -383,6 +383,35 @@ mod tests {
         let job = plus_one.into_job();
 
         assert_eq!(job.id(), "gustav::task::tests::plus_one");
+    }
+
+    #[test]
+    fn it_identifies_task_scoping_based_on_args() {
+        let task = plus_one.with_target(1);
+        assert!(task.is_scoped());
+
+        #[derive(Serialize, Deserialize, Debug)]
+        struct State {
+            numbers: HashMap<String, i32>,
+        }
+
+        fn plus_one_sys(
+            mut counter: Update<i32>,
+            Target(tgt): Target<i32>,
+            Sys(_): Sys<State>,
+        ) -> Update<i32> {
+            if *counter < tgt {
+                *counter += 1;
+            }
+
+            // Update implements IntoResult
+            counter
+        }
+
+        // The plus_one_sys uses the System extractor so
+        // it is not scoped
+        let task = plus_one_sys.with_target(1);
+        assert!(!task.is_scoped());
     }
 
     #[test]

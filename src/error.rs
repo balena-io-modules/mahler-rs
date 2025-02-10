@@ -20,6 +20,9 @@ pub enum Error {
     #[error("cannot extract view: ${0}")]
     ViewExtractFailed(#[from] super::extract::ViewExtractError),
 
+    #[error("cannot extract system")]
+    SystemExtractFailed(#[from] super::extract::SystemExtractError),
+
     #[error("cannot calculate view result: ${0}")]
     ViewResultFailed(#[from] super::extract::ViewResultError),
 
