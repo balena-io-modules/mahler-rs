@@ -10,6 +10,10 @@ pub trait Handler<T, O, I = O>: Clone + Send + 'static {
 
     fn into_job(self) -> Job;
 
+    // Indicates that the handler can be parallelized because
+    // it uses only scoped extractors
+    fn is_scoped(&self) -> bool;
+
     fn into_task(self, context: Context) -> Task {
         self.into_job().into_task(context)
     }
@@ -91,7 +95,12 @@ macro_rules! impl_action_handler {
                 let res = (self)($($ty,)*);
 
                 // Update the system
-                res.into_effect(&system)
+                res.into_effect(system)
+            }
+
+            fn is_scoped(&self) -> bool {
+                // The handler is scoped if all of its arguments are scoped
+                true $(&& $ty::is_scoped())*
             }
 
             fn into_job(self) -> Job {
@@ -141,7 +150,12 @@ macro_rules! impl_method_handler {
                 let res = (self)($($ty,)*);
 
                 // Update the system
-                res.into_effect(&system)
+                res.into_effect(system)
+            }
+
+            fn is_scoped(&self) -> bool {
+                // The handler is scoped if all of its arguments are scoped
+                true $(&& $ty::is_scoped())*
             }
 
             fn into_job(self) -> Job {

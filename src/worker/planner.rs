@@ -264,7 +264,7 @@ mod tests {
 
     use super::*;
     use crate::extract::{Target, Update};
-    use crate::task::Handler;
+    use crate::task::*;
     use crate::worker::{none, update, Domain};
     use crate::{seq, Dag};
 

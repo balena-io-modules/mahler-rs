@@ -74,12 +74,14 @@ type Expand = Rc<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, Er
 pub enum Task {
     Atom {
         id: &'static str,
+        scoped: bool,
         context: Context,
         dry_run: DryRun,
         run: Run,
     },
     List {
         id: &'static str,
+        scoped: bool,
         context: Context,
         expand: Expand,
     },
@@ -94,6 +96,7 @@ impl Task {
         let handler_clone = handler.clone();
         Self::Atom {
             id,
+            scoped: handler.is_scoped(),
             context,
             dry_run: Rc::new(move |system: &System, context: &Context| {
                 let effect = handler_clone.call(system, context);
@@ -118,6 +121,7 @@ impl Task {
     {
         Self::List {
             id,
+            scoped: handler.is_scoped(),
             context,
             expand: Rc::new(move |system: &System, context: &Context| {
                 // List tasks cannot perform changes to the system
@@ -142,22 +146,32 @@ impl Task {
         }
     }
 
+    pub fn is_scoped(&self) -> bool {
+        match self {
+            Self::Atom { scoped, .. } => *scoped,
+            Self::List { scoped, .. } => *scoped,
+        }
+    }
+
     pub fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
         let target = serde_json::to_value(target)?;
         let res = match self {
             Self::Atom {
                 id,
+                scoped,
                 context,
                 dry_run,
                 run,
             } => Self::Atom {
                 id,
+                scoped,
                 context: context.with_target(target),
                 dry_run,
                 run,
             },
             Self::List {
                 id,
+                scoped,
                 context,
                 expand,
                 ..
@@ -165,6 +179,7 @@ impl Task {
                 let Context { args, path, .. } = context;
                 Self::List {
                     id,
+                    scoped,
                     context: Context { target, args, path },
                     expand,
                 }
@@ -182,22 +197,26 @@ impl Task {
         match self {
             Self::Atom {
                 id,
+                scoped,
                 context,
                 dry_run,
                 run,
             } => Self::Atom {
                 id,
+                scoped,
                 context: context.with_arg(key, value),
                 dry_run,
                 run,
             },
             Self::List {
                 id,
+                scoped,
                 context,
                 expand,
                 ..
             } => Self::List {
                 id,
+                scoped,
                 context: context.with_arg(key, value),
                 expand,
             },
@@ -208,22 +227,26 @@ impl Task {
         match self {
             Self::Atom {
                 id,
+                scoped,
                 context,
                 dry_run,
                 run,
             } => Self::Atom {
                 id,
+                scoped,
                 context: context.with_path(path),
                 dry_run,
                 run,
             },
             Self::List {
                 id,
+                scoped: linear,
                 context,
                 expand,
                 ..
             } => Self::List {
                 id,
+                scoped: linear,
                 context: context.with_path(path),
                 expand,
             },
