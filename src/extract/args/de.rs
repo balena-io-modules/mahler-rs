@@ -24,7 +24,7 @@
 // IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use super::error::{ErrorKind, PathDeserializationError};
+use super::error::{ArgsDeserializationError, ErrorKind};
 use serde::{
     de::{self, DeserializeSeed, EnumAccess, Error, MapAccess, SeqAccess, VariantAccess, Visitor},
     forward_to_deserialize_any, Deserializer,
@@ -37,7 +37,7 @@ macro_rules! unsupported_type {
         where
             V: Visitor<'de>,
         {
-            Err(PathDeserializationError::unsupported_type(type_name::<
+            Err(ArgsDeserializationError::unsupported_type(type_name::<
                 V::Value,
             >()))
         }
@@ -51,13 +51,13 @@ macro_rules! parse_single_value {
             V: Visitor<'de>,
         {
             if self.url_params.len() != 1 {
-                return Err(PathDeserializationError::wrong_number_of_parameters()
+                return Err(ArgsDeserializationError::wrong_number_of_parameters()
                     .got(self.url_params.len())
                     .expected(1));
             }
 
             let value = self.url_params[0].1.parse().map_err(|_| {
-                PathDeserializationError::new(ErrorKind::ParseError {
+                ArgsDeserializationError::new(ErrorKind::ParseError {
                     value: self.url_params[0].1.as_str().to_owned(),
                     expected_type: $ty,
                 })
@@ -79,7 +79,7 @@ impl<'de> PathDeserializer<'de> {
 }
 
 impl<'de> Deserializer<'de> for PathDeserializer<'de> {
-    type Error = PathDeserializationError;
+    type Error = ArgsDeserializationError;
 
     unsupported_type!(deserialize_bytes);
     unsupported_type!(deserialize_option);
@@ -115,7 +115,7 @@ impl<'de> Deserializer<'de> for PathDeserializer<'de> {
         V: Visitor<'de>,
     {
         if self.url_params.len() != 1 {
-            return Err(PathDeserializationError::wrong_number_of_parameters()
+            return Err(ArgsDeserializationError::wrong_number_of_parameters()
                 .got(self.url_params.len())
                 .expected(1));
         }
@@ -166,7 +166,7 @@ impl<'de> Deserializer<'de> for PathDeserializer<'de> {
         V: Visitor<'de>,
     {
         if self.url_params.len() < len {
-            return Err(PathDeserializationError::wrong_number_of_parameters()
+            return Err(ArgsDeserializationError::wrong_number_of_parameters()
                 .got(self.url_params.len())
                 .expected(len));
         }
@@ -186,7 +186,7 @@ impl<'de> Deserializer<'de> for PathDeserializer<'de> {
         V: Visitor<'de>,
     {
         if self.url_params.len() < len {
-            return Err(PathDeserializationError::wrong_number_of_parameters()
+            return Err(ArgsDeserializationError::wrong_number_of_parameters()
                 .got(self.url_params.len())
                 .expected(len));
         }
@@ -229,7 +229,7 @@ impl<'de> Deserializer<'de> for PathDeserializer<'de> {
         V: Visitor<'de>,
     {
         if self.url_params.len() != 1 {
-            return Err(PathDeserializationError::wrong_number_of_parameters()
+            return Err(ArgsDeserializationError::wrong_number_of_parameters()
                 .got(self.url_params.len())
                 .expected(1));
         }
@@ -247,7 +247,7 @@ struct MapDeserializer<'de> {
 }
 
 impl<'de> MapAccess<'de> for MapDeserializer<'de> {
-    type Error = PathDeserializationError;
+    type Error = ArgsDeserializationError;
 
     fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
     where
@@ -273,7 +273,7 @@ impl<'de> MapAccess<'de> for MapDeserializer<'de> {
                 key: self.key.take(),
                 value,
             }),
-            None => Err(PathDeserializationError::custom("value is missing")),
+            None => Err(ArgsDeserializationError::custom("value is missing")),
         }
     }
 }
@@ -294,7 +294,7 @@ macro_rules! parse_key {
 }
 
 impl<'de> Deserializer<'de> for KeyDeserializer<'de> {
-    type Error = PathDeserializationError;
+    type Error = ArgsDeserializationError;
 
     parse_key!(deserialize_identifier);
     parse_key!(deserialize_str);
@@ -304,7 +304,7 @@ impl<'de> Deserializer<'de> for KeyDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        Err(PathDeserializationError::custom("Unexpected key type"))
+        Err(ArgsDeserializationError::custom("Unexpected key type"))
     }
 
     forward_to_deserialize_any! {
@@ -334,9 +334,9 @@ macro_rules! parse_value {
                             expected_type: $ty,
                         },
                     };
-                    PathDeserializationError::new(kind)
+                    ArgsDeserializationError::new(kind)
                 } else {
-                    PathDeserializationError::new(ErrorKind::ParseError {
+                    ArgsDeserializationError::new(ErrorKind::ParseError {
                         value: self.value.as_str().to_owned(),
                         expected_type: $ty,
                     })
@@ -354,7 +354,7 @@ struct ValueDeserializer<'de> {
 }
 
 impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
-    type Error = PathDeserializationError;
+    type Error = ArgsDeserializationError;
 
     unsupported_type!(deserialize_map);
     unsupported_type!(deserialize_identifier);
@@ -443,7 +443,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
         }
 
         impl<'de> SeqAccess<'de> for PairDeserializer<'de> {
-            type Error = PathDeserializationError;
+            type Error = ArgsDeserializationError;
 
             fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
             where
@@ -477,7 +477,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
                 None => unreachable!(),
             }
         } else {
-            Err(PathDeserializationError::unsupported_type(type_name::<
+            Err(ArgsDeserializationError::unsupported_type(type_name::<
                 V::Value,
             >()))
         }
@@ -487,7 +487,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        Err(PathDeserializationError::unsupported_type(type_name::<
+        Err(ArgsDeserializationError::unsupported_type(type_name::<
             V::Value,
         >()))
     }
@@ -501,7 +501,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        Err(PathDeserializationError::unsupported_type(type_name::<
+        Err(ArgsDeserializationError::unsupported_type(type_name::<
             V::Value,
         >()))
     }
@@ -515,7 +515,7 @@ impl<'de> Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        Err(PathDeserializationError::unsupported_type(type_name::<
+        Err(ArgsDeserializationError::unsupported_type(type_name::<
             V::Value,
         >()))
     }
@@ -545,7 +545,7 @@ struct EnumDeserializer<'de> {
 }
 
 impl<'de> EnumAccess<'de> for EnumDeserializer<'de> {
-    type Error = PathDeserializationError;
+    type Error = ArgsDeserializationError;
     type Variant = UnitVariant;
 
     fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
@@ -562,7 +562,7 @@ impl<'de> EnumAccess<'de> for EnumDeserializer<'de> {
 struct UnitVariant;
 
 impl<'de> VariantAccess<'de> for UnitVariant {
-    type Error = PathDeserializationError;
+    type Error = ArgsDeserializationError;
 
     fn unit_variant(self) -> Result<(), Self::Error> {
         Ok(())
@@ -572,7 +572,7 @@ impl<'de> VariantAccess<'de> for UnitVariant {
     where
         T: DeserializeSeed<'de>,
     {
-        Err(PathDeserializationError::unsupported_type(
+        Err(ArgsDeserializationError::unsupported_type(
             "newtype enum variant",
         ))
     }
@@ -581,7 +581,7 @@ impl<'de> VariantAccess<'de> for UnitVariant {
     where
         V: Visitor<'de>,
     {
-        Err(PathDeserializationError::unsupported_type(
+        Err(ArgsDeserializationError::unsupported_type(
             "tuple enum variant",
         ))
     }
@@ -594,7 +594,7 @@ impl<'de> VariantAccess<'de> for UnitVariant {
     where
         V: Visitor<'de>,
     {
-        Err(PathDeserializationError::unsupported_type(
+        Err(ArgsDeserializationError::unsupported_type(
             "struct enum variant",
         ))
     }
@@ -606,7 +606,7 @@ struct SeqDeserializer<'de> {
 }
 
 impl<'de> SeqAccess<'de> for SeqDeserializer<'de> {
-    type Error = PathDeserializationError;
+    type Error = ArgsDeserializationError;
 
     fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
     where

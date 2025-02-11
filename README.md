@@ -141,7 +141,7 @@ use tokio::fs;
 use tokio::io::Error;
 
 /// We need to declare both the parent and the child type inside the extractors
-fn plus_one(mut counter: Update<State, i32>, tgt: Target<State, i32>, Path(name): Path<String>) -> Effect<Update<i32>, Error>  {
+fn plus_one(mut counter: Update<State, i32>, tgt: Target<State, i32>, Args(name): Args<String>) -> Effect<Update<i32>, Error>  {
     if *counter < *tgt {
         // Modify the counter value if we are below the target
         *counter += 1;
@@ -192,7 +192,7 @@ On the above example, the job definition is practically identical to the one in 
 As programmers, we want to be able to build code by composing simpler behaviors into more complex ones. We might want to guide the planner towards a specific solution, using the primitives we already have. For instance, let's say we want to help the planner get to a solution faster as adding tasks one by one takes too much time. We want to define a `plus_two` task, that increases the counter by 2. We could create another primitive task to update the counter by two, but as programmers, we would like to reuse the code we have already defined. We can do that using methods.
 
 ```rust
-fn plus_two(counter: Update<State, i32>, tgt: Target<State, i32>, Path(name): Path<String>) -> Vec<Task<i32>> {
+fn plus_two(counter: Update<State, i32>, tgt: Target<State, i32>, Args(name): Args<String>) -> Vec<Task<i32>> {
     if *tgt - *counter < 2 {
         // Returning an empty result tells the planner
         // the task is not applicable to reach the target
@@ -202,8 +202,8 @@ fn plus_two(counter: Update<State, i32>, tgt: Target<State, i32>, Path(name): Pa
     // A compound job returns a list of tasks that need to be executed
     // to achieve a certain goal
     vec![
-        plus_one.into_task(Context::new().target(*tgt).arg("name", &name)),
-        plus_one.into_task(Context::new().target(*tgt).arg("name", &name)),
+        plus_one.with_target(*tgt).with_arg("name", name.clone()),
+        plus_one.with_target(*tgt).with_arg("name", name.clone()),
     ]
 }
 

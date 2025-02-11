@@ -29,11 +29,11 @@ use std::fmt;
 // this wrapper type is used as the deserializer error to hide the `serde::de::Error` impl which
 // would otherwise be public if we used `ErrorKind` as the error directly
 #[derive(Debug)]
-pub struct PathDeserializationError {
+pub struct ArgsDeserializationError {
     pub(super) kind: ErrorKind,
 }
 
-impl PathDeserializationError {
+impl ArgsDeserializationError {
     pub(super) fn new(kind: ErrorKind) -> Self {
         Self { kind }
     }
@@ -60,15 +60,15 @@ impl<G> WrongNumberOfParameters<G> {
 }
 
 impl WrongNumberOfParameters<usize> {
-    pub(super) fn expected(self, expected: usize) -> PathDeserializationError {
-        PathDeserializationError::new(ErrorKind::WrongNumberOfParameters {
+    pub(super) fn expected(self, expected: usize) -> ArgsDeserializationError {
+        ArgsDeserializationError::new(ErrorKind::WrongNumberOfParameters {
             got: self.got,
             expected,
         })
     }
 }
 
-impl serde::de::Error for PathDeserializationError {
+impl serde::de::Error for ArgsDeserializationError {
     #[inline]
     fn custom<T>(msg: T) -> Self
     where
@@ -80,13 +80,13 @@ impl serde::de::Error for PathDeserializationError {
     }
 }
 
-impl fmt::Display for PathDeserializationError {
+impl fmt::Display for ArgsDeserializationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.kind.fmt(f)
     }
 }
 
-impl std::error::Error for PathDeserializationError {}
+impl std::error::Error for ArgsDeserializationError {}
 
 /// The kinds of errors that can happen we deserializing into a [`Path`].
 #[derive(Debug, PartialEq, Eq)]

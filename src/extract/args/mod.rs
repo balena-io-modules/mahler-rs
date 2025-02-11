@@ -8,27 +8,27 @@ use crate::task::Context;
 mod de;
 mod error;
 
-pub use error::PathDeserializationError;
+pub use error::ArgsDeserializationError;
 
-impl IntoError for PathDeserializationError {
+impl IntoError for ArgsDeserializationError {
     fn into_error(self) -> Error {
-        Error::PathExtractFailed(self)
+        Error::ArgsExtractFailed(self)
     }
 }
 
 #[derive(Debug)]
-pub struct Path<T>(pub T);
+pub struct Args<T>(pub T);
 
-impl<T: DeserializeOwned + Send> FromSystem for Path<T> {
-    type Error = PathDeserializationError;
+impl<T: DeserializeOwned + Send> FromSystem for Args<T> {
+    type Error = ArgsDeserializationError;
 
     fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
         let args = &context.args;
-        T::deserialize(de::PathDeserializer::new(args)).map(Path)
+        T::deserialize(de::PathDeserializer::new(args)).map(Args)
     }
 }
 
-impl<S> Deref for Path<S> {
+impl<S> Deref for Args<S> {
     type Target = S;
 
     fn deref(&self) -> &Self::Target {
@@ -59,8 +59,8 @@ mod tests {
 
         let system = System::from(state);
 
-        let Path(name): Path<String> =
-            Path::from_system(&system, &Context::new().with_arg("name", "one")).unwrap();
+        let Args(name): Args<String> =
+            Args::from_system(&system, &Context::new().with_arg("name", "one")).unwrap();
 
         assert_eq!(name, "one");
     }
@@ -75,7 +75,7 @@ mod tests {
 
         let system = System::from(state);
 
-        let Path((first, second)): Path<(String, String)> = Path::from_system(
+        let Args((first, second)): Args<(String, String)> = Args::from_system(
             &system,
             &Context::new()
                 .with_arg("first", "one")
@@ -97,7 +97,7 @@ mod tests {
 
         let system = System::from(state);
 
-        let Path(map): Path<HashMap<String, String>> = Path::from_system(
+        let Args(map): Args<HashMap<String, String>> = Args::from_system(
             &system,
             &Context::new()
                 .with_arg("first", "one")

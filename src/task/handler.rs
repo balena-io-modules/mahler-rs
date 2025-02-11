@@ -10,18 +10,29 @@ pub trait Handler<T, O, I = O>: Clone + Send + 'static {
 
     fn into_job(self) -> Job;
 
-    fn into_task(self, context: Context) -> Task {
-        self.into_job().into_task(context)
+    // Indicates that the handler can be parallelized because
+    // it uses only scoped extractors
+    fn is_scoped(&self) -> bool;
+
+    // Convenience functions to create a task from a handler
+    fn into_task(self) -> Task {
+        self.into_job().into_task(Context::new())
     }
 
     fn try_target<S: Serialize>(self, target: S) -> Result<Task, Error> {
-        let context = Context::new().try_target(target)?;
-        Ok(self.into_job().into_task(context))
+        self.into_job().into_task(Context::new()).try_target(target)
     }
 
     fn with_target<S: Serialize>(self, target: S) -> Task {
-        let context = Context::new().try_target(target).unwrap();
-        self.into_job().into_task(context)
+        self.into_job()
+            .into_task(Context::new())
+            .with_target(target)
+    }
+
+    fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Task {
+        self.into_job()
+            .into_task(Context::new())
+            .with_arg(key, value)
     }
 }
 
@@ -84,6 +95,7 @@ macro_rules! impl_action_handler {
                 $(
                     let $ty = match $ty::from_system(system, context) {
                         Ok(value) => value,
+                        // TODO: communicate the function name as part of the error
                         Err(failure) => return Effect::from_error(failure.into_error())
                     };
                 )*
@@ -91,7 +103,12 @@ macro_rules! impl_action_handler {
                 let res = (self)($($ty,)*);
 
                 // Update the system
-                res.into_effect(&system)
+                res.into_effect(system)
+            }
+
+            fn is_scoped(&self) -> bool {
+                // The handler is scoped if all of its arguments are scoped
+                true $(&& $ty::is_scoped())*
             }
 
             fn into_job(self) -> Job {
@@ -141,7 +158,12 @@ macro_rules! impl_method_handler {
                 let res = (self)($($ty,)*);
 
                 // Update the system
-                res.into_effect(&system)
+                res.into_effect(system)
+            }
+
+            fn is_scoped(&self) -> bool {
+                // The handler is scoped if all of its arguments are scoped
+                true $(&& $ty::is_scoped())*
             }
 
             fn into_job(self) -> Job {
