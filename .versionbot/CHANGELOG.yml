@@ -1,4 +1,55 @@
 - commits:
+    - subject: Rename Path extractor to Args
+      hash: 661ff15ea95cfae384cb045639b03d137c92853f
+      body: |
+        This is to be more consistent with the `with_arg` context/task method.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Fix bug when adding args to Context
+      hash: 2385d3133483ab46817ff654816c7d1708e14beb
+      body: |
+        The `with_arg` method in Context was additive, meaning repeated keys
+        would be added independently of whether there was a value already. This
+        caused a bug with the Path extractor. This update the PathArgs type with
+        an `insert` method, that checks for a key before adding it.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Add System extractor
+      hash: 6df9f4e1c3a35421f1fb0af888dd5750a523f504
+      body: |
+        The `System` extractor allow tasks to get read access to the global
+        system state.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Introduce the concept of scoped extractors
+      hash: 5e65156bce2d624413a101ad87503cbe969678f1
+      body: |
+        Refines the `FromSystem` trait, allowing implementors to define a type
+        as non-scoped, indicating that it performs read-access to the global
+        system state rather than a part of it indicated by the path linking the
+        job on the domain.
+
+        This also updates the handler and task definitions. An `is_scoped`
+        function has been added to handler to indicate that the handler uses
+        only scope extractors and is parallelizable.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.3.0
+  title: ""
+  date: 2025-02-11T21:39:22.326Z
+- commits:
     - subject: Add planner support for compound tasks
       hash: ba99082a7b4ebc909b50323e8e3ad573a9f4e84b
       body: ""
