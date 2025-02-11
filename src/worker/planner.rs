@@ -260,10 +260,11 @@ impl Planner {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
     use std::collections::HashMap;
 
     use super::*;
-    use crate::extract::{Target, Update};
+    use crate::extract::{Path, System, Target, Update};
     use crate::task::*;
     use crate::worker::{none, update, Domain};
     use crate::{seq, Dag};
@@ -467,6 +468,231 @@ mod tests {
             "worker::planner::tests::plus_one(/counters/one)",
             "worker::planner::tests::plus_one(/counters/one)",
             "worker::planner::tests::plus_one(/counters/one)",
+        );
+
+        assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
+    #[test]
+    fn test_stacking_problem() {
+        #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Debug)]
+        enum Block {
+            A,
+            B,
+            C,
+        }
+
+        impl From<Block> for String {
+            fn from(blk: Block) -> String {
+                match blk {
+                    Block::A => "A".to_string(),
+                    Block::B => "B".to_string(),
+                    Block::C => "C".to_string(),
+                }
+            }
+        }
+
+        #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+        enum Location {
+            Blk(Block),
+            Table,
+            Hand,
+        }
+
+        impl Location {
+            fn is_block(&self) -> bool {
+                matches!(self, Location::Blk(_))
+            }
+        }
+
+        type Blocks = HashMap<Block, Location>;
+
+        #[derive(Serialize, Deserialize)]
+        struct State {
+            blocks: Blocks,
+        }
+
+        fn is_clear(blocks: &Blocks, loc: &Location) -> bool {
+            if loc.is_block() || loc == &Location::Hand {
+                // No block is on top of the location
+                return blocks.iter().all(|(_, l)| l != loc);
+            }
+            true
+        }
+
+        fn is_holding(blocks: &Blocks) -> bool {
+            !is_clear(blocks, &Location::Hand)
+        }
+
+        fn all_clear(blocks: &Blocks) -> Vec<&Block> {
+            blocks
+                .iter()
+                .filter(|(_, l)| is_clear(blocks, l))
+                .map(|(b, _)| b)
+                .collect()
+        }
+
+        // Get a block from the table
+        fn pickup(
+            mut loc: Update<Location>,
+            System(sys): System<State>,
+            Path(block): Path<Block>,
+        ) -> Update<Location> {
+            // if the block is clear and we are not holding any other blocks
+            // we can grab the block
+            if *loc == Location::Table
+                && is_clear(&sys.blocks, &Location::Blk(block))
+                && !is_holding(&sys.blocks)
+            {
+                *loc = Location::Hand;
+            }
+
+            loc
+        }
+
+        // Unstack a block from other block
+        fn unstack(
+            mut loc: Update<Location>,
+            System(sys): System<State>,
+            Path(block): Path<Block>,
+        ) -> Update<Location> {
+            // if the block is clear and we are not holding any other blocks
+            // we can grab the block
+            if loc.is_block()
+                && is_clear(&sys.blocks, &Location::Blk(block))
+                && !is_holding(&sys.blocks)
+            {
+                *loc = Location::Hand;
+            }
+
+            loc
+        }
+
+        // There is really not that much of a difference between putdown and stack
+        // this is just to test that the planner can work with nested methods
+        fn putdown(mut loc: Update<Location>) -> Update<Location> {
+            // If we are holding the block and the target is clear
+            // then we can modify the block location
+            if *loc == Location::Hand {
+                *loc = Location::Table
+            }
+
+            loc
+        }
+
+        fn stack(
+            mut loc: Update<Location>,
+            Target(tgt): Target<Location>,
+            System(sys): System<State>,
+        ) -> Update<Location> {
+            // If we are holding the block and the target is clear
+            // then we can modify the block location
+            if *loc == Location::Hand && is_clear(&sys.blocks, &tgt) {
+                *loc = tgt
+            }
+
+            loc
+        }
+
+        fn take(loc: Update<Location>, System(sys): System<State>) -> Vec<Task> {
+            if is_clear(&sys.blocks, &loc) {
+                if *loc == Location::Table {
+                    return vec![pickup.into_task()];
+                } else {
+                    return vec![unstack.into_task()];
+                }
+            }
+            vec![]
+        }
+
+        fn put(loc: Update<Location>, Target(tgt): Target<Location>) -> Vec<Task> {
+            if *loc == Location::Hand {
+                if tgt == Location::Table {
+                    return vec![putdown.into_task()];
+                } else {
+                    return vec![stack.with_target(tgt)];
+                }
+            }
+            vec![]
+        }
+
+        //
+        //  This method implements the following block-stacking algorithm [1]:
+        //
+        //  - If there's a clear block x that can be moved to a place where it won't
+        //    need to be moved again, then return a todo list that includes goals to
+        //    move it there, followed by mgoal (to achieve the remaining goals).
+        //    Otherwise, if there's a clear block x that needs to be moved out of the
+        //    way to make another block movable, then return a todo list that includes
+        //    goals to move x to the table, followed by mgoal.
+        //  - Otherwise, no blocks need to be moved.
+        //    [1] N. Gupta and D. S. Nau. On the complexity of blocks-world
+        //    planning. Artificial Intelligence 56(2-3):223–254, 1992.
+        //
+        //  Source: https://github.com/dananau/GTPyhop/blob/main/Examples/blocks_hgn/methods.py
+        //
+        fn move_blks(blocks: Update<Blocks>, Target(target): Target<Blocks>) -> Vec<Task> {
+            for b in all_clear(&blocks) {
+                // we assume that the target is well formed
+                let tgt_blk = target.get(b).unwrap();
+
+                // The block is free and it can be moved to the final target (another block or the table)
+                if is_clear(&blocks, tgt_blk) {
+                    return vec![
+                        take.with_arg("block", b.clone()),
+                        put.with_target(tgt_blk).with_arg("block", b.clone()),
+                    ];
+                }
+            }
+
+            // If we get here, no blocks can be moved to the final location so
+            // we move it to the table
+            let mut to_table: Vec<Task> = vec![];
+            for b in all_clear(&blocks) {
+                to_table.push(take.with_arg("block", b.clone()));
+                to_table.push(
+                    put.with_target(Location::Table)
+                        .with_arg("block", b.clone()),
+                );
+            }
+
+            to_table
+        }
+        let domain = Domain::new()
+            .job("/blocks/{block}", update(pickup))
+            .job("/blocks/{block}", update(putdown))
+            .job("/blocks/{block}", update(stack))
+            .job("/blocks/{block}", update(unstack))
+            .job("/blocks/{block}", update(take))
+            .job("/blocks/{block}", update(put))
+            .job("/blocks", update(move_blks));
+
+        let planner = Planner::new(domain);
+
+        let initial = State {
+            blocks: HashMap::from([
+                (Block::A, Location::Table),
+                (Block::B, Location::Blk(Block::A)),
+                (Block::C, Location::Blk(Block::B)),
+            ]),
+        };
+        let target = State {
+            blocks: HashMap::from([
+                (Block::A, Location::Blk(Block::B)),
+                (Block::B, Location::Blk(Block::C)),
+                (Block::C, Location::Table),
+            ]),
+        };
+
+        let workflow = planner.find_plan(initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!(
+            "worker::planner::tests::test_stacking_problem::unstack(/blocks/C)",
+            "worker::planner::tests::test_stacking_problem::stack(/blocks/C)",
+            "worker::planner::tests::test_stacking_problem::unstack(/blocks/B)",
+            "worker::planner::tests::test_stacking_problem::stack(/blocks/B)",
+            "worker::planner::tests::test_stacking_problem::pickup(/blocks/A)",
+            "worker::planner::tests::test_stacking_problem::stack(/blocks/A)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
