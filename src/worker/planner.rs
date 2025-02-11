@@ -264,7 +264,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::extract::{Path, System, Target, Update};
+    use crate::extract::{Args, System, Target, Update};
     use crate::task::*;
     use crate::worker::{none, update, Domain};
     use crate::{seq, Dag};
@@ -536,7 +536,7 @@ mod tests {
         fn pickup(
             mut loc: Update<Location>,
             System(sys): System<State>,
-            Path(block): Path<Block>,
+            Args(block): Args<Block>,
         ) -> Update<Location> {
             // if the block is clear and we are not holding any other blocks
             // we can grab the block
@@ -554,7 +554,7 @@ mod tests {
         fn unstack(
             mut loc: Update<Location>,
             System(sys): System<State>,
-            Path(block): Path<Block>,
+            Args(block): Args<Block>,
         ) -> Update<Location> {
             // if the block is clear and we are not holding any other blocks
             // we can grab the block
