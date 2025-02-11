@@ -52,6 +52,18 @@ impl PathArgs {
     pub fn iter(&self) -> impl Iterator<Item = &(Arc<str>, String)> {
         self.0.iter()
     }
+
+    pub fn insert(&mut self, key: impl AsRef<str>, value: impl Into<String>) -> Option<String> {
+        let existing = self.0.iter_mut().find(|(k, _)| k.as_ref() == key.as_ref());
+        if let Some((_, v)) = existing {
+            let old = v.clone();
+            *v = value.into();
+            return Some(old);
+        } else {
+            self.0.push((Arc::from(key.as_ref()), value.into()))
+        }
+        None
+    }
 }
 
 impl Deref for PathArgs {
@@ -94,5 +106,31 @@ mod tests {
     #[should_panic]
     fn it_panics_on_an_invalid_path() {
         Path::from_static("a/b/c");
+    }
+
+    #[test]
+    fn it_replaces_existing_key_with_insert() {
+        let mut args = PathArgs::default();
+        args.insert("one", "a");
+        args.insert("two", "b");
+
+        assert_eq!(
+            args.0,
+            vec![
+                (Arc::from("one"), "a".to_string()),
+                (Arc::from("two"), "b".to_string())
+            ]
+        );
+
+        // Replace the key
+        let old = args.insert("one", "c");
+        assert_eq!(
+            args.0,
+            vec![
+                (Arc::from("one"), "c".to_string()),
+                (Arc::from("two"), "b".to_string())
+            ]
+        );
+        assert_eq!(old, Some("a".to_string()))
     }
 }

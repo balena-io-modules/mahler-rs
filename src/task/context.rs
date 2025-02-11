@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use jsonptr::PointerBuf;
 use serde::Serialize;
 use serde_json::Value;
@@ -7,7 +5,7 @@ use serde_json::Value;
 use super::result::Result;
 use crate::path::{Path, PathArgs};
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Context {
     pub(crate) target: Value,
     pub(crate) path: Path,
@@ -54,7 +52,7 @@ impl Context {
             mut args,
         } = self;
 
-        args.0.push((Arc::from(key.as_ref()), value.into()));
+        args.insert(key, value);
 
         Self { target, path, args }
     }
