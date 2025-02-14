@@ -1,4 +1,23 @@
 - commits:
+    - subject: Implement first version of the Worker
+      hash: f81fc1d69efa071be3f6bf620cb59b252fac828e
+      body: |
+        This is a very basic version of the worker. It allows to seek a target
+        searched via planning. This is very limited for now
+
+        - it does not support parallelism in workflows
+        - it does not support multi-threading in async calls (it requires a
+          tokio::task::LocalSet to seek a new state).
+        - it does not provide any mechanism to follow progress of the state
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.4.0
+  title: ""
+  date: 2025-02-14T18:23:35.402Z
+- commits:
     - subject: Rename Path extractor to Args
       hash: 661ff15ea95cfae384cb045639b03d137c92853f
       body: |
