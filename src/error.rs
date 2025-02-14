@@ -32,6 +32,9 @@ pub enum Error {
     #[error("planning error: ${0}")]
     PlanSearchFailed(#[from] super::worker::PlanningError),
 
+    #[error("workflow interrupted")]
+    WorkflowInterrupted(#[from] super::worker::Interrupted),
+
     #[error(transparent)]
     Other(#[from] Box<dyn std::error::Error>),
 }

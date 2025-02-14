@@ -3,9 +3,26 @@ use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::AtomicBool;
 
-use crate::dag::Dag;
-use crate::task::Task;
+use crate::dag::{Dag, Node};
+use crate::system::System;
+use crate::task::{IntoTask, Task};
+use crate::{Error, IntoError};
+
+#[derive(Debug)]
+pub struct Interrupted {}
+impl std::error::Error for Interrupted {}
+impl Display for Interrupted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "execution of the workflow was interrupted")
+    }
+}
+impl IntoError for Interrupted {
+    fn into_error(self) -> Error {
+        Error::WorkflowInterrupted(self)
+    }
+}
 
 #[derive(Hash)]
 struct ActionId<'s> {
@@ -62,9 +79,42 @@ impl Action {
     }
 }
 
+impl IntoTask for Action {
+    fn into_task(self) -> Task {
+        self.task
+    }
+}
+
 impl Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.task.fmt(f)
+    }
+}
+
+impl<T: IntoTask + Clone> Dag<T> {
+    pub async fn execute(self, system: &mut System, interrupted: &AtomicBool) -> Result<(), Error> {
+        // TODO: implement parallel execution of the DAG
+        for node in self.iter() {
+            let value = {
+                if let Node::Item { value, .. } = &*node.borrow() {
+                    // This clone is necessary for now because of the iterator, but a future version
+                    // of execute will just consume the DAG, avoiding the need
+                    // for cloning
+                    value.clone()
+                } else {
+                    continue;
+                }
+            };
+
+            let task = value.into_task();
+            task.run(system).await?;
+
+            // Check if the task was interrupted before continuing
+            if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(Interrupted {})?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -85,6 +135,18 @@ impl Workflow {
             dag: dag.reverse(),
             pending,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dag.is_empty()
+    }
+
+    pub(crate) async fn execute(
+        self,
+        system: &mut System,
+        interrupted: &AtomicBool,
+    ) -> Result<(), Error> {
+        self.dag.execute(system, interrupted).await
     }
 }
 

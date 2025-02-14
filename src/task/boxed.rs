@@ -37,7 +37,7 @@ impl Clone for BoxedIntoTask {
     }
 }
 
-trait ErasedIntoTask {
+trait ErasedIntoTask: Send {
     fn clone_box(&self) -> Box<dyn ErasedIntoTask>;
 
     fn into_task(self: Box<Self>, id: &'static str, context: Context) -> Task;
@@ -50,7 +50,7 @@ struct MakeIntoTask<H> {
 
 impl<H> ErasedIntoTask for MakeIntoTask<H>
 where
-    H: Clone + 'static,
+    H: Send + Clone + 'static,
 {
     fn clone_box(&self) -> Box<dyn ErasedIntoTask> {
         Box::new(Self {

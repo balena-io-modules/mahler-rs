@@ -63,6 +63,10 @@ where
     }
 }
 
+pub trait IntoTask {
+    fn into_task(self) -> Task;
+}
+
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
 type DryRun = Rc<dyn Fn(&System, &Context) -> Result<Patch>>;
 type Run = Rc<dyn Fn(&System, &Context) -> ActionOutput>;

@@ -54,7 +54,6 @@ pub struct System {
     state: Value,
 }
 
-// TODO: replace with TryFrom implementation
 impl<S> From<S> for System
 where
     S: Serialize,
