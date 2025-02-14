@@ -1,4 +1,16 @@
 - commits:
+    - subject: Rename Worker methods for readability
+      hash: 6708fb238af343e07a69b826e44f261662fea9e8
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.5.0
+  title: ""
+  date: 2025-02-14T18:53:50.044Z
+- commits:
     - subject: Implement first version of the Worker
       hash: f81fc1d69efa071be3f6bf620cb59b252fac828e
       body: |
