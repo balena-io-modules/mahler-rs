@@ -1,6 +1,7 @@
 use json_patch::Patch;
 use log::warn;
 use serde::Serialize;
+use serde_json::Value;
 use std::fmt::{self, Display};
 
 use crate::error::{Error, IntoError};
@@ -13,9 +14,7 @@ use super::domain::Domain;
 use super::workflow::{Action, Workflow};
 use super::{DomainSearchError, Operation};
 
-pub struct Planner {
-    domain: Domain,
-}
+pub struct Planner(Domain);
 
 #[derive(Debug, PartialEq)]
 pub enum PlanningError {
@@ -65,7 +64,7 @@ impl IntoError for PlanningError {
 
 impl Planner {
     pub fn new(domain: Domain) -> Self {
-        Self { domain }
+        Self(domain)
     }
 
     fn try_task(
@@ -94,8 +93,8 @@ impl Planner {
                 // Test the task
                 let Patch(changes) = dry_run(cur_state, context)?;
 
-                // If no changes are returned, then assume the condition has failed
-                // unless we are inside a compound task
+                // if we are at the top of the stack and no changes are introduced
+                // then assume the condition has failed
                 if stack_len == 0 && changes.is_empty() {
                     return Err(ConditionFailed::default())?;
                 }
@@ -120,7 +119,7 @@ impl Planner {
                         t = t.with_arg(k, v)
                     }
                     let path = self
-                        .domain
+                        .0
                         .get_path(t.id(), &t.context().args)
                         // The user may have not have put the child task in the
                         // domain, in which case we need to return an error
@@ -139,6 +138,12 @@ impl Planner {
                     cur_state.patch(Patch(pending.clone()))?;
                     cur_plan = Workflow { dag, pending };
                 }
+
+                // if we are at the top of the stack and no changes are introduced
+                // then assume the condition has failed
+                if stack_len == 0 && cur_plan.pending.is_empty() {
+                    return Err(ConditionFailed::default())?;
+                }
                 Ok(cur_plan)
             }
         }
@@ -152,9 +157,12 @@ impl Planner {
         let tgt = serde_json::to_value(tgt)?;
 
         let system = System::new(cur);
+        self.find_workflow(&system, tgt)
+    }
 
+    pub(crate) fn find_workflow(&self, system: &System, tgt: Value) -> Result<Workflow, Error> {
         // Store the initial state and an empty plan on the stack
-        let mut stack = vec![(system, Workflow::default(), 0)];
+        let mut stack = vec![(system.clone(), Workflow::default(), 0)];
 
         // TODO: we should merge non conflicting workflows
         // for parallelism
@@ -177,7 +185,7 @@ impl Planner {
             for op in distance.iter() {
                 // Find applicable tasks
                 let path = Path::new(op.path());
-                let matching = self.domain.at(path.to_str());
+                let matching = self.0.at(path.to_str());
                 if let Some((args, intents)) = matching {
                     // Calculate the target for the job path
                     let pointer = path.as_ref();
@@ -207,13 +215,9 @@ impl Planner {
                             // it and put the new state with the new plan on the stack
                             match self.try_task(task, &cur_state, cur_plan.clone(), 0) {
                                 Ok(Workflow { dag, pending }) => {
-                                    // If there are no changes introduced by the task, then it doesn't
-                                    // contribute to the plan
+                                    // If the task is not progressing the plan, we can ignore it
+                                    // this should never happen
                                     if pending.is_empty() {
-                                        warn!(
-                                        "ignoring task {} that does not make changes to the state",
-                                        task_id
-                                    );
                                         continue;
                                     }
 
@@ -235,12 +239,13 @@ impl Planner {
                                 Err(Error::TaskConditionFailed(_)) => {}
                                 Err(Error::PlanSearchFailed(PlanningError::LoopDetected)) => {}
                                 Err(Error::PlanSearchFailed(PlanningError::WorkflowNotFound)) => {}
-                                // Otherwise return the error if debugging or raise a
-                                // warning if on a final release
                                 Err(err) => {
                                     if cfg!(debug_assertions) {
+                                        // Interrupt the search if we find an unexpected error on
+                                        // debugging
                                         return Err(err);
                                     } else {
+                                        // Otherwise, just log the error and continue
                                         warn!(
                                     "ignoring task {} due to unexpected error during planning: {}",
                                     task_id, err

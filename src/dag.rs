@@ -21,7 +21,7 @@ type Link<T> = Option<Rc<RefCell<Node<T>>>>;
 * will contain 7 value nodes (a-g), one fork node (after b) and one join node
 * (before g)
 */
-enum Node<T> {
+pub(crate) enum Node<T> {
     Item { value: T, next: Link<T> },
     Fork { next: Vec<Link<T>> },
     Join { next: Link<T> },
@@ -45,7 +45,7 @@ impl<T> Node<T> {
     }
 }
 
-struct Iter<T> {
+pub(crate) struct Iter<T> {
     /// Holds the current node
     /// and a stack to keep  track of the branching
     /// so the iteration knows when to continue after finding
@@ -195,7 +195,7 @@ impl<T> Dag<T> {
     ///
     /// This function is not public as not to expose the Dag internal implementation
     /// details
-    fn iter(&self) -> Iter<T> {
+    pub(crate) fn iter(&self) -> Iter<T> {
         Iter {
             stack: vec![(self.head.clone(), Vec::new())],
         }
