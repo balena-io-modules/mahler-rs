@@ -132,7 +132,7 @@ impl<T> Worker<T, Uninitialized> {
         Worker::from_inner(inner)
     }
 
-    pub fn with_state(self, state: T) -> Worker<T, Ready>
+    pub fn initial_state(self, state: T) -> Worker<T, Ready>
     where
         T: Serialize + DeserializeOwned,
     {
@@ -152,7 +152,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
         self.inner.system.state().unwrap()
     }
 
-    pub fn seek(self, tgt: T, local_set: &LocalSet) -> Worker<T, Running> {
+    pub fn seek_target(self, tgt: T, local_set: &LocalSet) -> Worker<T, Running> {
         let Ready {
             planner,
             system,
@@ -314,29 +314,32 @@ impl<T: DeserializeOwned> Worker<T, Running> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use super::*;
     use crate::extract::{Target, Update};
     use crate::task::*;
+    use serde::Deserialize;
     use tokio::time::sleep;
 
-    fn plus_one(counter: Update<i32>, Target(tgt): Target<i32>) -> Effect<Update<i32>> {
-        if *counter >= tgt {
-            // We reached the target, no further changes
-            // are needed
-            return Effect::of(counter);
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct Counters(HashMap<String, i32>);
+
+    fn plus_one(mut counter: Update<i32>, Target(tgt): Target<i32>) -> Effect<Update<i32>> {
+        if *counter < tgt {
+            // Modify the counter if we are below target
+            *counter += 1;
         }
 
-        Effect::of(counter)
-            .map(|mut counter| {
-                *counter += 1;
-                counter
-            })
-            .with_io(|counter| async {
-                sleep(Duration::from_millis(10)).await;
-                Ok(counter)
-            })
+        // Return the updated counter. The I/O part of the
+        // effect will only be called if the job is chosen
+        // in the workflow which will only happens if there are
+        // changes
+        Effect::of(counter).with_io(|counter| async {
+            sleep(Duration::from_millis(10)).await;
+            Ok(counter)
+        })
     }
 
     fn init() {
@@ -348,15 +351,30 @@ mod tests {
         init();
         let local_set = LocalSet::new();
         let worker = Worker::new()
-            .job("", update(plus_one))
-            .with_state(0)
-            .seek(2, &local_set);
+            .job("/{counter}", update(plus_one))
+            .initial_state(Counters(HashMap::from([
+                ("one".to_string(), 0),
+                ("two".to_string(), 0),
+            ])))
+            .seek_target(
+                Counters(HashMap::from([
+                    ("one".to_string(), 2),
+                    ("two".to_string(), 0),
+                ])),
+                &local_set,
+            );
 
         local_set
             .run_until(async move {
                 let worker = worker.wait(None).await.unwrap();
                 let state = worker.state();
-                assert_eq!(state, 2);
+                assert_eq!(
+                    state,
+                    Counters(HashMap::from([
+                        ("one".to_string(), 2),
+                        ("two".to_string(), 0),
+                    ]))
+                );
             })
             .await;
     }
@@ -367,8 +385,8 @@ mod tests {
         let local_set = LocalSet::new();
         let worker = Worker::new()
             .job("", update(plus_one))
-            .with_state(0)
-            .seek(2, &local_set);
+            .initial_state(0)
+            .seek_target(2, &local_set);
 
         local_set
             .run_until(async move {
@@ -387,8 +405,8 @@ mod tests {
         let local_set = LocalSet::new();
         let worker = Worker::new()
             .job("", update(plus_one))
-            .with_state(0)
-            .seek(2, &local_set);
+            .initial_state(0)
+            .seek_target(2, &local_set);
 
         local_set
             .run_until(async move {
