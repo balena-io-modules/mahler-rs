@@ -65,12 +65,12 @@ async fn main() {
         // for global state
         .job("/", update(plus_one))
         // The initial state of the worker
-        .with_state(0)
+        .initial_state(0)
 
 
     // Tell the agent to find a plan from the initial state (0)
     // to the target state (3) and execute it
-    agent.seek(3);
+    agent.seek_target(3);
 
     // Wait for the agent to return a result
     let res = agent.wait(0).await;
@@ -82,7 +82,7 @@ async fn main() {
 }
 ```
 
-When receiving a call to `seek`, the worker looks for a plan to get the system to a state equal to 3 target and then executes it.
+When receiving a call to `seek_target`, the worker looks for a plan to get the system to a state equal to 3 target and then executes it.
 In this case it will identify that 3 sequential calls to `plus_one` are necessary to reach the target.
 
 ## Performing IO
@@ -168,12 +168,12 @@ async fn main() {
         // on any given counter
         .job("/counters/{name}", update(plus_one))
         // Initialize two counters "a" and "b" to 0
-        .with_state(State {counters: HashMap::from([("a".to_string(), 0), ("b".to_string(), 0)])})
+        .initial_state(State {counters: HashMap::from([("a".to_string(), 0), ("b".to_string(), 0)])})
 
 
     // Tell the agent to find a plan from the initial state
     // to the target state and execute it
-    agent.seek(State {counters: HashMap::from([("a".to_string(), 3), ("b".to_string(), 2)])});
+    agent.seek_target(State {counters: HashMap::from([("a".to_string(), 3), ("b".to_string(), 2)])});
 
     // Wait for the agent to return a result
     let res = agent.wait(0).await;
@@ -214,7 +214,7 @@ async fn main() {
         .job("/counters/{name}", update(plus_one))
         .job("/counters/{name}", update(plus_two))
         // Initialize two counters "a" and "b" to 0
-        .with_state(State {counters: HashMap::from([("a".to_string(), 0), ("b".to_string(), 0)])})
+        .initial_state(State {counters: HashMap::from([("a".to_string(), 0), ("b".to_string(), 0)])})
 
     // Seek some state, etc
 }
