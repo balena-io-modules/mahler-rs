@@ -1,4 +1,18 @@
 - commits:
+    - subject: Make implementation multi-threading compatible
+      hash: 95d21b85ba4b12ea6c8de5f1ff1e395008e47c19
+      body: |
+        Refactor the codebase to ensure types are Send. This also removes the
+        requirement for a LocalSet when calling `seek_target`
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.6.0
+  title: ""
+  date: 2025-02-16T22:51:18.365Z
+- commits:
     - subject: Rename Worker methods for readability
       hash: 6708fb238af343e07a69b826e44f261662fea9e8
       body: ""
