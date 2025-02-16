@@ -96,7 +96,7 @@ impl<T: IntoTask + Clone> Dag<T> {
         // TODO: implement parallel execution of the DAG
         for node in self.iter() {
             let value = {
-                if let Node::Item { value, .. } = &*node.borrow() {
+                if let Node::Item { value, .. } = &*node.read().unwrap() {
                     // This clone is necessary for now because of the iterator, but a future version
                     // of execute will just consume the DAG, avoiding the need
                     // for cloning

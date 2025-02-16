@@ -8,7 +8,7 @@ impl BoxedIntoTask {
     pub fn from_action<A, T, I>(action: A) -> Self
     where
         A: Handler<T, Patch, I>,
-        I: 'static,
+        I: Send + 'static,
     {
         Self(Box::new(MakeIntoTask {
             handler: action,
@@ -37,7 +37,7 @@ impl Clone for BoxedIntoTask {
     }
 }
 
-trait ErasedIntoTask: Send {
+trait ErasedIntoTask: Send + Sync {
     fn clone_box(&self) -> Box<dyn ErasedIntoTask>;
 
     fn into_task(self: Box<Self>, id: &'static str, context: Context) -> Task;
@@ -50,7 +50,7 @@ struct MakeIntoTask<H> {
 
 impl<H> ErasedIntoTask for MakeIntoTask<H>
 where
-    H: Send + Clone + 'static,
+    H: Send + Sync + Clone + 'static,
 {
     fn clone_box(&self) -> Box<dyn ErasedIntoTask> {
         Box::new(Self {

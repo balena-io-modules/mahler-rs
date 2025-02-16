@@ -53,7 +53,7 @@ impl Job {
     pub(crate) fn from_action<A, T, I>(action: A) -> Self
     where
         A: Handler<T, Patch, I>,
-        I: 'static,
+        I: Send + 'static,
     {
         let id = std::any::type_name::<A>();
 

@@ -36,7 +36,7 @@ pub enum Error {
     WorkflowInterrupted(#[from] super::worker::Interrupted),
 
     #[error(transparent)]
-    Other(#[from] Box<dyn std::error::Error>),
+    Other(#[from] Box<dyn std::error::Error + Send>),
 }
 
 pub trait IntoError {
