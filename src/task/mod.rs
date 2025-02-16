@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::error::{Error, IntoError};
 use crate::system::System;
@@ -67,10 +67,11 @@ pub trait IntoTask {
     fn into_task(self) -> Task;
 }
 
-type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>>>>;
-type DryRun = Rc<dyn Fn(&System, &Context) -> Result<Patch>>;
-type Run = Rc<dyn Fn(&System, &Context) -> ActionOutput>;
-type Expand = Rc<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, Error>>;
+type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
+type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
+type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
+type Expand =
+    Arc<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, Error> + Send + Sync>;
 
 /// A task is either a concrete unit (atom) of work or a list of tasks
 /// that can be run in sequence or in parallel
@@ -95,18 +96,18 @@ impl Task {
     pub(crate) fn atom<H, T, I>(id: &'static str, handler: H, context: Context) -> Self
     where
         H: Handler<T, Patch, I>,
-        I: 'static,
+        I: Send + 'static,
     {
         let handler_clone = handler.clone();
         Self::Atom {
             id,
             scoped: handler.is_scoped(),
             context,
-            dry_run: Rc::new(move |system: &System, context: &Context| {
+            dry_run: Arc::new(move |system: &System, context: &Context| {
                 let effect = handler_clone.call(system, context);
                 effect.pure()
             }),
-            run: Rc::new(move |system: &System, context: &Context| {
+            run: Arc::new(move |system: &System, context: &Context| {
                 let effect = handler.call(system, context);
 
                 Box::pin(async {
@@ -127,7 +128,7 @@ impl Task {
             id,
             scoped: handler.is_scoped(),
             context,
-            expand: Rc::new(move |system: &System, context: &Context| {
+            expand: Arc::new(move |system: &System, context: &Context| {
                 // List tasks cannot perform changes to the system
                 // so the Effect returned by this handler is assumed to
                 // be pure

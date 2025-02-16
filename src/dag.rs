@@ -1,9 +1,8 @@
-use std::cell::RefCell;
 use std::fmt;
 use std::ops::Add;
-use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 
-type Link<T> = Option<Rc<RefCell<Node<T>>>>;
+type Link<T> = Option<Arc<RwLock<Node<T>>>>;
 
 /**
 * A node in a DAG is a recursive data structure that
@@ -41,7 +40,7 @@ impl<T> Node<T> {
     }
 
     pub fn into_link(self) -> Link<T> {
-        Some(Rc::new(RefCell::new(self)))
+        Some(Arc::new(RwLock::new(self)))
     }
 }
 
@@ -54,12 +53,12 @@ pub(crate) struct Iter<T> {
 }
 
 impl<T> Iterator for Iter<T> {
-    type Item = Rc<RefCell<Node<T>>>;
+    type Item = Arc<RwLock<Node<T>>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((link, branching)) = self.stack.pop() {
             if let Some(node_rc) = link {
-                let node_ref = node_rc.borrow();
+                let node_ref = node_rc.read().unwrap();
                 match &*node_ref {
                     Node::Item { next, .. } => {
                         // Push the next node onto the stack for continuation
@@ -153,7 +152,7 @@ impl<T> Dag<T> {
         let Dag { head, tail } = dag;
 
         if let Some(tail_rc) = tail {
-            match *tail_rc.borrow_mut() {
+            match *tail_rc.write().unwrap() {
                 Node::Item { ref mut next, .. } => *next = self.head,
                 Node::Join { ref mut next } => *next = self.head,
                 _ => unreachable!(),
@@ -173,7 +172,7 @@ impl<T> Dag<T> {
     pub fn concat(self, other: Dag<T>) -> Self {
         debug_assert!(self.tail.is_some());
         if let Some(tail_node) = self.tail {
-            match *tail_node.borrow_mut() {
+            match *tail_node.write().unwrap() {
                 Node::Item { ref mut next, .. } => {
                     *next = other.head;
                 }
@@ -205,7 +204,7 @@ impl<T> Dag<T> {
     /// condition given as argument
     pub fn some(&self, condition: impl Fn(&T) -> bool) -> bool {
         for node in self.iter() {
-            if let Node::Item { value, .. } = &*node.borrow() {
+            if let Node::Item { value, .. } = &*node.read().unwrap() {
                 if condition(value) {
                     return true;
                 }
@@ -218,7 +217,7 @@ impl<T> Dag<T> {
     /// as argument
     pub fn every(&self, condition: impl Fn(&T) -> bool) -> bool {
         for node in self.iter() {
-            if let Node::Item { value, .. } = &*node.borrow() {
+            if let Node::Item { value, .. } = &*node.read().unwrap() {
                 if !condition(value) {
                     return false;
                 }
@@ -256,7 +255,7 @@ impl<T> Dag<T> {
     pub fn fold<U>(&self, initial: U, fold_fn: impl Fn(U, &T) -> U) -> U {
         let mut acc = initial;
         for node in self.iter() {
-            if let Node::Item { value, .. } = &*node.borrow() {
+            if let Node::Item { value, .. } = &*node.read().unwrap() {
                 acc = fold_fn(acc, value);
             }
         }
@@ -290,7 +289,7 @@ impl<T> Dag<T> {
             for value in iter {
                 let new_node = Node::item(value.into(), None).into_link();
                 if let Some(tail_node) = tail {
-                    if let Node::Item { ref mut next, .. } = *tail_node.borrow_mut() {
+                    if let Node::Item { ref mut next, .. } = *tail_node.write().unwrap() {
                         *next = new_node.clone();
                     }
                 }
@@ -340,7 +339,7 @@ impl<T> Dag<T> {
             debug_assert!(branch.tail.is_some());
             // Link each branch tail to the join node
             if let Some(tail_rc) = branch.tail {
-                match *tail_rc.borrow_mut() {
+                match *tail_rc.write().unwrap() {
                     Node::Item { ref mut next, .. } => {
                         *next = tail.clone();
                     }
@@ -393,7 +392,7 @@ impl<T> Dag<T> {
 
         while let Some((head, prev, branching)) = stack.pop() {
             if let Some(node_rc) = head.clone() {
-                match *node_rc.borrow_mut() {
+                match *node_rc.write().unwrap() {
                     Node::Item { ref mut next, .. } => {
                         // copy the next node to continue the operation
                         let newhead = next.clone();
@@ -500,7 +499,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
                     write!(f, "- {}", value)?;
 
                     if let Some(next_rc) = next {
-                        fmt_node(f, &*next_rc.borrow(), indent, index + 1, branching)?;
+                        fmt_node(f, &*next_rc.read().unwrap(), indent, index + 1, branching)?;
                     }
                 }
                 Node::Fork { next } => {
@@ -515,7 +514,13 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
                             let mut updated_branching = branching.clone();
                             updated_branching.push((index, br_idx == next.len() - 1));
 
-                            fmt_node(f, &*branch_head.borrow(), indent + 2, 0, updated_branching)?;
+                            fmt_node(
+                                f,
+                                &*branch_head.read().unwrap(),
+                                indent + 2,
+                                0,
+                                updated_branching,
+                            )?;
                         }
                     }
                 }
@@ -524,7 +529,13 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
                     if let Some((index, is_last)) = branching.pop() {
                         if is_last {
                             if let Some(next_rc) = next {
-                                fmt_node(f, &*next_rc.borrow(), indent - 2, index + 1, branching)?;
+                                fmt_node(
+                                    f,
+                                    &*next_rc.read().unwrap(),
+                                    indent - 2,
+                                    index + 1,
+                                    branching,
+                                )?;
                             }
                         }
                     }
@@ -536,7 +547,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
         if let Some(root) = &self.head {
             fmt_node(
                 f,
-                &*root.borrow(),
+                &*root.read().unwrap(),
                 0,          // Initial indent level
                 0,          // Initial index
                 Vec::new(), // Initial branching
@@ -565,8 +576,8 @@ mod tests {
     use super::*;
     use dedent::dedent;
 
-    fn is_item<T>(node: &Rc<RefCell<Node<T>>>) -> bool {
-        if let Node::Item { .. } = &*node.borrow() {
+    fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
+        if let Node::Item { .. } = &*node.read().unwrap() {
             return true;
         }
         false
@@ -591,7 +602,7 @@ mod tests {
                 if let Node::Item {
                     value: node_value,
                     next,
-                } = &*head_rc.borrow()
+                } = &*head_rc.read().unwrap()
                 {
                     assert_eq!(*node_value, value);
                     head = next.clone();
@@ -609,14 +620,14 @@ mod tests {
 
         assert!(dag.head.is_some());
         if let Some(head_rc) = dag.head {
-            if let Node::Item { value, .. } = &*head_rc.borrow() {
+            if let Node::Item { value, .. } = &*head_rc.read().unwrap() {
                 assert_eq!(value, &1)
             }
         }
 
         assert!(dag.tail.is_some());
         if let Some(tail_rc) = dag.tail {
-            if let Node::Item { value, .. } = &*tail_rc.borrow() {
+            if let Node::Item { value, .. } = &*tail_rc.read().unwrap() {
                 assert_eq!(value, &4)
             }
         }
@@ -631,7 +642,7 @@ mod tests {
         let mut result = Vec::new();
 
         for node in dag.iter() {
-            let node_ref = node.borrow();
+            let node_ref = node.read().unwrap();
             match &*node_ref {
                 Node::Item { value, .. } => result.push(*value), // Collect the value
                 Node::Fork { .. } => panic!("unexpected fork node in a linear graph"),
@@ -654,7 +665,7 @@ mod tests {
         let elems: Vec<i32> = dag
             .iter()
             .filter(is_item)
-            .map(|node| match &*node.borrow() {
+            .map(|node| match &*node.read().unwrap() {
                 Node::Item { value, .. } => *value,
                 _ => unreachable!(),
             })
@@ -668,7 +679,7 @@ mod tests {
         let elems: Vec<i32> = dag
             .iter()
             .filter(is_item)
-            .map(|node| match &*node.borrow() {
+            .map(|node| match &*node.read().unwrap() {
                 Node::Item { value, .. } => *value,
                 _ => unreachable!(),
             })
@@ -687,7 +698,7 @@ mod tests {
         let elems: Vec<i32> = dag
             .iter()
             .filter(is_item)
-            .map(|node| match &*node.borrow() {
+            .map(|node| match &*node.read().unwrap() {
                 Node::Item { value, .. } => *value,
                 _ => unreachable!(),
             })
@@ -707,7 +718,7 @@ mod tests {
         let elems: Vec<i32> = dag
             .iter()
             .filter(is_item)
-            .map(|node| match &*node.borrow() {
+            .map(|node| match &*node.read().unwrap() {
                 Node::Item { value, .. } => *value,
                 _ => unreachable!(),
             })
@@ -727,7 +738,7 @@ mod tests {
         let mut reverse: Vec<i32> = dag
             .iter()
             .filter(is_item)
-            .map(|node| match &*node.borrow() {
+            .map(|node| match &*node.read().unwrap() {
                 Node::Item { value, .. } => *value,
                 _ => unreachable!(),
             })
@@ -738,7 +749,7 @@ mod tests {
             .reverse()
             .iter()
             .filter(is_item)
-            .map(|node| match &*node.borrow() {
+            .map(|node| match &*node.read().unwrap() {
                 Node::Item { value, .. } => *value,
                 _ => unreachable!(),
             })

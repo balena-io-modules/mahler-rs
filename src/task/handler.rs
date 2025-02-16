@@ -5,7 +5,7 @@ use super::{Context, Effect, IntoEffect, IntoResult, Job, Task};
 use crate::error::{Error, IntoError};
 use crate::system::{FromSystem, System};
 
-pub trait Handler<T, O, I = O>: Clone + Send + 'static {
+pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     fn call(&self, system: &System, context: &Context) -> Effect<O, Error, I>;
 
     fn into_job(self) -> Job;
@@ -39,8 +39,8 @@ pub trait Handler<T, O, I = O>: Clone + Send + 'static {
 /// Implement IntoEffect for any effect that has an IntoResult as the output. This means that, for
 /// instance, Effect<View<T>> implements into effect, so effects can use extractors to interact
 /// with the state
-impl<I: IntoResult<Patch> + 'static, E: std::error::Error + 'static> IntoEffect<Patch, Error, I>
-    for Effect<I, E>
+impl<I: IntoResult<Patch> + Send + 'static, E: std::error::Error + Send + 'static>
+    IntoEffect<Patch, Error, I> for Effect<I, E>
 {
     fn into_effect(self, system: &System) -> Effect<Patch, Error, I> {
         let system = system.clone();
@@ -55,7 +55,7 @@ impl IntoEffect<Vec<Task>, Error> for Vec<Task> {
     }
 }
 
-impl<E: std::error::Error + 'static> IntoEffect<Vec<Task>, Error> for Result<Vec<Task>, E> {
+impl<E: std::error::Error + Send + 'static> IntoEffect<Vec<Task>, Error> for Result<Vec<Task>, E> {
     fn into_effect(self, _: &System) -> Effect<Vec<Task>, Error> {
         Effect::from(self.map_err(|e| Error::Other(Box::new(e))))
     }
@@ -67,7 +67,7 @@ impl<const N: usize> IntoEffect<Vec<Task>, Error> for [Task; N] {
     }
 }
 
-impl<E: std::error::Error + 'static, const N: usize> IntoEffect<Vec<Task>, Error>
+impl<E: std::error::Error + Send + 'static, const N: usize> IntoEffect<Vec<Task>, Error>
     for Result<[Task; N], E>
 {
     fn into_effect(self, _: &System) -> Effect<Vec<Task>, Error> {
@@ -85,10 +85,10 @@ macro_rules! impl_action_handler {
         #[allow(non_snake_case, unused)]
         impl<F, $($ty,)* Res, I> Handler<($($ty,)*), Patch, I> for F
         where
-            F: Fn($($ty,)*) -> Res + Clone + Send +'static,
-            Res: IntoEffect<Patch, Error, I>,
+            F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
+            Res: IntoEffect<Patch, Error, I> + Send,
             $($ty: FromSystem,)*
-            I: 'static
+            I: Send + 'static
         {
 
             fn call(&self, system: &System, context: &Context) -> Effect<Patch, Error, I>{
@@ -142,7 +142,7 @@ macro_rules! impl_method_handler {
         #[allow(non_snake_case, unused)]
         impl<F, $($ty,)* Res> Handler<($($ty,)*), Vec<Task>> for F
         where
-            F: Fn($($ty,)*) -> Res + Clone + Send +'static,
+            F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
             Res: IntoEffect<Vec<Task>, Error>,
             $($ty: FromSystem,)*
         {

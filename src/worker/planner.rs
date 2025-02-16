@@ -114,7 +114,11 @@ impl Planner {
                 let mut cur_state = cur_state.clone();
                 let mut cur_plan = cur_plan;
                 for mut t in tasks.into_iter() {
-                    // Merge the parent args into the child task args
+                    // A task cannot override the context set by the
+                    // parent task. For instance a method for `/a/b` cannot
+                    // have a sub-task for `/a/c`, it can however have a task
+                    // for `/a/b` or `/a/b/c`.
+                    // TODO: should we error if that happens or raise a warning
                     for (k, v) in context.args.iter() {
                         t = t.with_arg(k, v)
                     }

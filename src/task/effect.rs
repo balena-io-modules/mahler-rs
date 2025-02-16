@@ -14,9 +14,9 @@ impl<O, E, I> IntoEffect<O, E, I> for Effect<O, E, I> {
     }
 }
 
-type IOResult<O, E> = Pin<Box<dyn Future<Output = Result<O, E>>>>;
-type IO<O, E = Infallible, I = O> = Box<dyn FnOnce(I) -> IOResult<O, E>>;
-type Pure<O, E, I> = Box<dyn FnOnce(I) -> Result<O, E>>;
+type IOResult<O, E> = Pin<Box<dyn Future<Output = Result<O, E>> + Send>>;
+type IO<O, E = Infallible, I = O> = Box<dyn FnOnce(I) -> IOResult<O, E> + Send>;
+type Pure<O, E, I> = Box<dyn FnOnce(I) -> Result<O, E> + Send>;
 
 pub enum Effect<O, E = Infallible, I = O> {
     Pure(Result<O, E>),
@@ -32,12 +32,15 @@ impl<O, E> Effect<O, E> {
         Effect::Pure(Ok(o))
     }
 
-    pub fn with_io<F: FnOnce(O) -> Res + 'static, Res: Future<Output = Result<O, E>>>(
+    pub fn with_io<
+        F: FnOnce(O) -> Res + Send + 'static,
+        Res: Future<Output = Result<O, E>> + Send,
+    >(
         self,
         f: F,
     ) -> Effect<O, E>
     where
-        O: 'static,
+        O: Send + 'static,
     {
         let io: IO<O, E> = Box::new(|o| Box::pin(async { f(o).await }));
         let pure = Box::new(|o| Ok(o));
@@ -52,12 +55,12 @@ impl<O, E> Effect<O, E> {
     }
 }
 
-impl<T: 'static, E: 'static, I: 'static> Effect<T, E, I> {
+impl<T: 'static, E: 'static, I: Send + 'static> Effect<T, E, I> {
     pub fn from_error(e: E) -> Self {
         Effect::Pure(Err(e))
     }
 
-    pub fn map<O, F: FnOnce(T) -> O + Clone + 'static>(self, fu: F) -> Effect<O, E, I> {
+    pub fn map<O, F: FnOnce(T) -> O + Clone + Send + 'static>(self, fu: F) -> Effect<O, E, I> {
         match self {
             Effect::Pure(output) => Effect::Pure(output.map(fu)),
             Effect::IO { input, pure, io } => {
@@ -76,7 +79,7 @@ impl<T: 'static, E: 'static, I: 'static> Effect<T, E, I> {
         }
     }
 
-    pub fn map_io<F: FnOnce(T) -> T + 'static>(self, fu: F) -> Effect<T, E, I> {
+    pub fn map_io<F: FnOnce(T) -> T + Send + 'static>(self, fu: F) -> Effect<T, E, I> {
         match self {
             Effect::Pure(output) => Effect::Pure(output),
             Effect::IO { input, pure, io } => Effect::IO {
@@ -92,7 +95,7 @@ impl<T: 'static, E: 'static, I: 'static> Effect<T, E, I> {
         }
     }
 
-    pub fn and_then<O, F: FnOnce(T) -> Result<O, E> + Clone + 'static>(
+    pub fn and_then<O, F: FnOnce(T) -> Result<O, E> + Clone + Send + 'static>(
         self,
         fu: F,
     ) -> Effect<O, E, I> {
@@ -114,7 +117,10 @@ impl<T: 'static, E: 'static, I: 'static> Effect<T, E, I> {
         }
     }
 
-    pub fn map_err<E1, F: FnOnce(E) -> E1 + Clone + 'static>(self, fe: F) -> Effect<T, E1, I> {
+    pub fn map_err<E1, F: FnOnce(E) -> E1 + Clone + Send + 'static>(
+        self,
+        fe: F,
+    ) -> Effect<T, E1, I> {
         match self {
             Effect::Pure(output) => Effect::Pure(output.map_err(fe)),
             Effect::IO { input, pure, io } => {

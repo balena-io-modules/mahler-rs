@@ -14,7 +14,7 @@ use std::{
         Arc,
     },
 };
-use tokio::task::{JoinHandle, LocalSet};
+use tokio::task::JoinHandle;
 
 pub use domain::*;
 pub use intent::*;
@@ -152,7 +152,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
         self.inner.system.state().unwrap()
     }
 
-    pub fn seek_target(self, tgt: T, local_set: &LocalSet) -> Worker<T, Running> {
+    pub fn seek_target(self, tgt: T) -> Worker<T, Running> {
         let Ready {
             planner,
             system,
@@ -188,7 +188,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let interrupted = cancelled.clone();
 
-        let handle = local_set.spawn_local(async move {
+        let handle = tokio::task::spawn(async move {
             let mut system = system;
             let mut tries = 0;
 
@@ -349,70 +349,52 @@ mod tests {
     #[tokio::test]
     async fn test_worker() {
         init();
-        let local_set = LocalSet::new();
         let worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .initial_state(Counters(HashMap::from([
                 ("one".to_string(), 0),
                 ("two".to_string(), 0),
             ])))
-            .seek_target(
-                Counters(HashMap::from([
-                    ("one".to_string(), 2),
-                    ("two".to_string(), 0),
-                ])),
-                &local_set,
-            );
+            .seek_target(Counters(HashMap::from([
+                ("one".to_string(), 2),
+                ("two".to_string(), 0),
+            ])));
 
-        local_set
-            .run_until(async move {
-                let worker = worker.wait(None).await.unwrap();
-                let state = worker.state();
-                assert_eq!(
-                    state,
-                    Counters(HashMap::from([
-                        ("one".to_string(), 2),
-                        ("two".to_string(), 0),
-                    ]))
-                );
-            })
-            .await;
+        let worker = worker.wait(None).await.unwrap();
+        let state = worker.state();
+        assert_eq!(
+            state,
+            Counters(HashMap::from([
+                ("one".to_string(), 2),
+                ("two".to_string(), 0),
+            ]))
+        );
     }
 
     #[tokio::test]
     async fn test_worker_cancel() {
         init();
-        let local_set = LocalSet::new();
         let worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
-            .seek_target(2, &local_set);
+            .seek_target(2);
 
-        local_set
-            .run_until(async move {
-                // interrupt the workflow after the first step
-                sleep(Duration::from_millis(10)).await;
-                let worker = worker.cancel().await;
-                let state = worker.state();
-                assert_eq!(state, 1);
-            })
-            .await;
+        // interrupt the workflow after the first step
+        sleep(Duration::from_millis(10)).await;
+        let worker = worker.cancel().await;
+        let state = worker.state();
+        assert_eq!(state, 1);
     }
 
     #[tokio::test]
     async fn test_worker_timeout() {
         init();
-        let local_set = LocalSet::new();
         let worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
-            .seek_target(2, &local_set);
+            .seek_target(2);
 
-        local_set
-            .run_until(async move {
-                let worker = worker.wait(Some(Duration::from_millis(1))).await;
-                assert!(worker.is_err());
-            })
-            .await;
+        let worker = worker.wait(Some(Duration::from_millis(1))).await;
+        assert!(worker.is_err());
     }
 }
