@@ -5,6 +5,9 @@ pub enum Error {
     #[error("failed to extract task input: ${0}")]
     InputError(#[from] super::extract::InputError),
 
+    #[error("failed to calculate task result: ${0}")]
+    OutputError(#[from] super::extract::OutputError),
+
     #[error("cannot serialize value: ${0}")]
     SerializationError(#[from] serde_json::error::Error),
 
@@ -13,9 +16,6 @@ pub enum Error {
 
     #[error("cannot write system state: ${0}")]
     StateWriteFailed(#[from] super::system::SystemWriteError),
-
-    #[error("cannot calculate view result: ${0}")]
-    ViewResultFailed(#[from] super::extract::ViewResultError),
 
     #[error("condition failed: ${0}")]
     TaskConditionFailed(#[from] super::task::ConditionFailed),

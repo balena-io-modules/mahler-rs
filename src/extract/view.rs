@@ -3,11 +3,10 @@ use json_patch::{diff, Patch};
 use jsonptr::resolve::ResolveError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::fmt::{self, Display};
 use std::ops::{Deref, DerefMut};
 
-use super::errors::InputError;
-use crate::error::{Error, IntoError};
+use super::errors::{InputError, OutputError};
+use crate::error::Error;
 use crate::path::Path;
 use crate::system::{FromSystem, System};
 use crate::task::{Context, Effect, IntoEffect, IntoResult, Result};
@@ -21,38 +20,6 @@ use crate::task::{Context, Effect, IntoEffect, IntoResult, Result};
 pub struct View<T> {
     state: Option<T>,
     path: Path,
-}
-
-#[derive(Debug)]
-pub enum ViewResultError {
-    PathAssignFailed {
-        path: String,
-        reason: jsonptr::assign::AssignError,
-    },
-    DeserializationFailed(serde_json::error::Error),
-}
-
-impl std::error::Error for ViewResultError {}
-
-impl Display for ViewResultError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ViewResultError::PathAssignFailed { path, reason } => {
-                write!(
-                    f,
-                    "cannot assign path `{}` on system state: {}",
-                    path, reason
-                )
-            }
-            ViewResultError::DeserializationFailed(err) => err.fmt(f),
-        }
-    }
-}
-
-impl IntoError for ViewResultError {
-    fn into_error(self) -> Error {
-        Error::ViewResultFailed(self)
-    }
 }
 
 impl<T> View<T> {
@@ -145,16 +112,15 @@ impl<T: Serialize> IntoResult<Patch> for View<T> {
         let pointer = self.path.as_ref();
 
         if let Some(state) = self.state {
-            let value =
-                serde_json::to_value(state).map_err(ViewResultError::DeserializationFailed)?;
+            let value = serde_json::to_value(state)
+                .with_context(|| "Failed to serialize view state")
+                .map_err(OutputError)?;
 
             // Assign the state to the copy
             pointer
                 .assign(root, value)
-                .map_err(|e| ViewResultError::PathAssignFailed {
-                    path: self.path.to_string(),
-                    reason: e,
-                })?;
+                .with_context(|| format!("Failed to assign path {}", self.path))
+                .map_err(OutputError)?;
         } else {
             // Otherwise delete the path at the pointer
             pointer.delete(root);
