@@ -12,23 +12,19 @@ mod from_system;
 pub(crate) use from_system::*;
 
 #[derive(Debug)]
-pub enum SystemReadError {
-    SerializationFailed(serde_json::error::Error),
-}
+pub struct SystemReadError(serde_json::error::Error);
 
 impl std::error::Error for SystemReadError {}
 
 impl Display for SystemReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SystemReadError::SerializationFailed(err) => err.fmt(f),
-        }
+        self.0.fmt(f)
     }
 }
 
 impl IntoError for SystemReadError {
     fn into_error(self) -> Error {
-        Error::StateReadFailed(self)
+        Error::SystemReadError(self)
     }
 }
 
@@ -45,7 +41,7 @@ impl Display for SystemWriteError {
 
 impl IntoError for SystemWriteError {
     fn into_error(self) -> Error {
-        Error::StateWriteFailed(self)
+        Error::SystemWriteError(self)
     }
 }
 
@@ -84,8 +80,7 @@ impl System {
     }
 
     pub fn state<S: DeserializeOwned>(&self) -> Result<S, SystemReadError> {
-        let s = serde_json::from_value(self.state.clone())
-            .map_err(SystemReadError::SerializationFailed)?;
+        let s = serde_json::from_value(self.state.clone()).map_err(SystemReadError)?;
         Ok(s)
     }
 }

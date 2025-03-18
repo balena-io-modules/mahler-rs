@@ -11,11 +11,11 @@ pub enum Error {
     #[error("cannot serialize value: ${0}")]
     SerializationError(#[from] serde_json::error::Error),
 
-    #[error("cannot read system state: ${0}")]
-    StateReadFailed(#[from] super::system::SystemReadError),
+    #[error("failed to read system state: ${0}")]
+    SystemReadError(#[from] super::system::SystemReadError),
 
-    #[error("cannot write system state: ${0}")]
-    StateWriteFailed(#[from] super::system::SystemWriteError),
+    #[error("failed to update system state: ${0}")]
+    SystemWriteError(#[from] super::system::SystemWriteError),
 
     #[error("condition failed: ${0}")]
     TaskConditionFailed(#[from] super::task::ConditionFailed),
