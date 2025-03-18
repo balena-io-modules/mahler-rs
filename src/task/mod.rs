@@ -1,6 +1,7 @@
 mod boxed;
 mod context;
 mod effect;
+mod errors;
 mod handler;
 mod job;
 mod result;
@@ -12,56 +13,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::error::{Error, IntoError};
+use crate::error::Error;
 use crate::system::System;
 
 pub use context::*;
 pub use effect::*;
+pub use errors::*;
 pub use handler::*;
 pub use job::*;
 pub(crate) use result::*;
-
-#[derive(Debug)]
-pub struct ConditionFailed(String);
-
-impl Default for ConditionFailed {
-    fn default() -> Self {
-        ConditionFailed::new("unknown")
-    }
-}
-
-impl ConditionFailed {
-    fn new(msg: impl Into<String>) -> Self {
-        Self(msg.into())
-    }
-}
-
-impl std::error::Error for ConditionFailed {}
-
-impl Display for ConditionFailed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl IntoError for ConditionFailed {
-    fn into_error(self) -> Error {
-        Error::TaskConditionFailed(self)
-    }
-}
-
-impl<T, O> IntoResult<O> for Option<T>
-where
-    O: Default,
-    T: IntoResult<O>,
-{
-    fn into_result(self, system: &System) -> Result<O> {
-        match self {
-            None => Err(ConditionFailed::default())?,
-            Some(value) => value.into_result(system),
-        }
-    }
-}
 
 pub trait IntoTask {
     fn into_task(self) -> Task;
