@@ -6,6 +6,7 @@ mod handler;
 mod job;
 mod result;
 
+use anyhow::Context as AnyhowCtx;
 use json_patch::{Patch, PatchOperation};
 use serde::Serialize;
 use std::fmt::{self, Display};
@@ -119,7 +120,9 @@ impl Task {
     }
 
     pub fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
-        let target = serde_json::to_value(target)?;
+        let target = serde_json::to_value(target)
+            .with_context(|| "Failed to serialize target state")
+            .map_err(InvalidTarget)?;
         let res = match self {
             Self::Atom {
                 id,
