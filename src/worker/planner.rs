@@ -273,7 +273,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::extract::{Args, System, Target, Update};
+    use crate::extract::{Args, System, Target, View};
     use crate::task::*;
     use crate::worker::{none, update, Domain};
     use crate::{seq, Dag};
@@ -282,7 +282,7 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
     }
 
-    fn plus_one(mut counter: Update<i32>, Target(tgt): Target<i32>) -> Update<i32> {
+    fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
         if *counter < tgt {
             *counter += 1;
         }
@@ -290,7 +290,7 @@ mod tests {
         counter
     }
 
-    fn buggy_plus_one(mut counter: Update<i32>, Target(tgt): Target<i32>) -> Update<i32> {
+    fn buggy_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
         if *counter < tgt {
             // This is the wrong operation
             *counter -= 1;
@@ -299,7 +299,7 @@ mod tests {
         counter
     }
 
-    fn plus_two(counter: Update<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
+    fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
         if tgt - *counter > 1 {
             return vec![plus_one.with_target(tgt), plus_one.with_target(tgt)];
         }
@@ -307,7 +307,7 @@ mod tests {
         vec![]
     }
 
-    fn plus_three(counter: Update<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
+    fn plus_three(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
         if tgt - *counter > 2 {
             return vec![plus_two.with_target(tgt), plus_one.with_target(tgt)];
         }
@@ -315,7 +315,7 @@ mod tests {
         vec![]
     }
 
-    fn minus_one(mut counter: Update<i32>, Target(tgt): Target<i32>) -> Update<i32> {
+    fn minus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
         if *counter > tgt {
             *counter -= 1;
         }
@@ -543,10 +543,10 @@ mod tests {
 
         // Get a block from the table
         fn pickup(
-            mut loc: Update<Location>,
+            mut loc: View<Location>,
             System(sys): System<State>,
             Args(block): Args<Block>,
-        ) -> Update<Location> {
+        ) -> View<Location> {
             // if the block is clear and we are not holding any other blocks
             // we can grab the block
             if *loc == Location::Table
@@ -561,10 +561,10 @@ mod tests {
 
         // Unstack a block from other block
         fn unstack(
-            mut loc: Update<Location>,
+            mut loc: View<Location>,
             System(sys): System<State>,
             Args(block): Args<Block>,
-        ) -> Update<Location> {
+        ) -> View<Location> {
             // if the block is clear and we are not holding any other blocks
             // we can grab the block
             if loc.is_block()
@@ -579,7 +579,7 @@ mod tests {
 
         // There is really not that much of a difference between putdown and stack
         // this is just to test that the planner can work with nested methods
-        fn putdown(mut loc: Update<Location>) -> Update<Location> {
+        fn putdown(mut loc: View<Location>) -> View<Location> {
             // If we are holding the block and the target is clear
             // then we can modify the block location
             if *loc == Location::Hand {
@@ -590,10 +590,10 @@ mod tests {
         }
 
         fn stack(
-            mut loc: Update<Location>,
+            mut loc: View<Location>,
             Target(tgt): Target<Location>,
             System(sys): System<State>,
-        ) -> Update<Location> {
+        ) -> View<Location> {
             // If we are holding the block and the target is clear
             // then we can modify the block location
             if *loc == Location::Hand && is_clear(&sys.blocks, &tgt) {
@@ -603,7 +603,7 @@ mod tests {
             loc
         }
 
-        fn take(loc: Update<Location>, System(sys): System<State>) -> Vec<Task> {
+        fn take(loc: View<Location>, System(sys): System<State>) -> Vec<Task> {
             if is_clear(&sys.blocks, &loc) {
                 if *loc == Location::Table {
                     return vec![pickup.into_task()];
@@ -614,7 +614,7 @@ mod tests {
             vec![]
         }
 
-        fn put(loc: Update<Location>, Target(tgt): Target<Location>) -> Vec<Task> {
+        fn put(loc: View<Location>, Target(tgt): Target<Location>) -> Vec<Task> {
             if *loc == Location::Hand {
                 if tgt == Location::Table {
                     return vec![putdown.into_task()];
@@ -640,7 +640,7 @@ mod tests {
         //
         //  Source: https://github.com/dananau/GTPyhop/blob/main/Examples/blocks_hgn/methods.py
         //
-        fn move_blks(blocks: Update<Blocks>, Target(target): Target<Blocks>) -> Vec<Task> {
+        fn move_blks(blocks: View<Blocks>, Target(target): Target<Blocks>) -> Vec<Task> {
             for b in all_clear(&blocks) {
                 // we assume that the target is well formed
                 let tgt_blk = target.get(b).unwrap();

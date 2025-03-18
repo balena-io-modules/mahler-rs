@@ -318,7 +318,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::extract::{Target, Update};
+    use crate::extract::{Target, View};
     use crate::task::*;
     use serde::Deserialize;
     use tokio::time::sleep;
@@ -326,7 +326,7 @@ mod tests {
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct Counters(HashMap<String, i32>);
 
-    fn plus_one(mut counter: Update<i32>, Target(tgt): Target<i32>) -> Effect<Update<i32>> {
+    fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
         if *counter < tgt {
             // Modify the counter if we are below target
             *counter += 1;

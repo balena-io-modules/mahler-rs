@@ -297,7 +297,7 @@ impl Display for Task {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract::{System as Sys, Target, Update};
+    use crate::extract::{System as Sys, Target, View};
     use crate::system::System;
     use json_patch::Patch;
     use serde::{Deserialize, Serialize};
@@ -312,7 +312,7 @@ mod tests {
         CounterReached,
     }
 
-    fn plus_one(mut counter: Update<i32>, Target(tgt): Target<i32>) -> Update<i32> {
+    fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
         if *counter < tgt {
             *counter += 1;
         }
@@ -321,7 +321,7 @@ mod tests {
         counter
     }
 
-    fn plus_two(counter: Update<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
+    fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
         if tgt - *counter < 2 {
             // Returning an empty result tells the planner
             // the task is not applicable to reach the target
@@ -331,10 +331,7 @@ mod tests {
         vec![plus_one.with_target(tgt), plus_one.with_target(tgt)]
     }
 
-    fn plus_one_async(
-        counter: Update<i32>,
-        Target(tgt): Target<i32>,
-    ) -> Effect<Update<i32>, MyError> {
+    fn plus_one_async(counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>, MyError> {
         if *counter >= tgt {
             return Effect::from_error(MyError::CounterReached);
         }
@@ -364,10 +361,10 @@ mod tests {
         }
 
         fn plus_one_sys(
-            mut counter: Update<i32>,
+            mut counter: View<i32>,
             Target(tgt): Target<i32>,
             Sys(_): Sys<State>,
-        ) -> Update<i32> {
+        ) -> View<i32> {
             if *counter < tgt {
                 *counter += 1;
             }
@@ -472,7 +469,7 @@ mod tests {
         counters: HashMap<String, i32>,
     }
 
-    fn update_counter(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
+    fn update_counter(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
             *counter += 1;
         }

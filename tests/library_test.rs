@@ -1,10 +1,10 @@
-use gustav::extract::{Target, Update};
+use gustav::extract::{Target, View};
 use gustav::system::System;
 use gustav::task::*;
 use json_patch::Patch;
 use serde_json::{from_value, json};
 
-fn my_task_effect(mut counter: Update<i32>, tgt: Target<i32>) -> Effect<Update<i32>> {
+fn my_task_effect(mut counter: View<i32>, tgt: Target<i32>) -> Effect<View<i32>> {
     if *counter < *tgt {
         *counter += 1;
     }

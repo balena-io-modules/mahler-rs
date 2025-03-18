@@ -189,12 +189,12 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::extract::{Target, Update};
+    use crate::extract::{Target, View};
     use crate::path::PathArgs;
     use crate::task::*;
     use crate::worker::*;
 
-    fn plus_one(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
+    fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
             *counter += 1;
         }
@@ -203,7 +203,7 @@ mod tests {
         counter
     }
 
-    fn plus_two(counter: Update<i32>, tgt: Target<i32>) -> Vec<Task> {
+    fn plus_two(counter: View<i32>, tgt: Target<i32>) -> Vec<Task> {
         if *tgt - *counter < 2 {
             // Returning an empty result tells the planner
             // the task is not applicable to reach the target
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_parameter_replacement() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new().job("/files/{*path}", update(func));
 
         let args = PathArgs(vec![(
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_escaped_parameters_remain() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new().job("/data/{{counter}}/edit", update(func));
 
         let args = PathArgs(vec![(Arc::from("counter"), "456".to_string())]);
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_mixed_placeholders() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new().job("/users/{id}/files/{{file}}/{*path}", update(func));
 
         let args = PathArgs(vec![
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_no_replacement_if_job_not_found() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new();
 
         let args = PathArgs(vec![(Arc::from("counter"), "999".to_string())]);
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_error_if_unmatched_placeholders_remain() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new().job("/tasks/{task_id}/check", update(func));
 
         let args = PathArgs(vec![]); // No arguments provided
