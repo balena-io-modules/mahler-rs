@@ -2,6 +2,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("failed to extract task input: ${0}")]
+    InputError(#[from] super::extract::InputError),
+
     #[error("cannot serialize value: ${0}")]
     SerializationError(#[from] serde_json::error::Error),
 
@@ -10,18 +13,6 @@ pub enum Error {
 
     #[error("cannot write system state: ${0}")]
     StateWriteFailed(#[from] super::system::SystemWriteError),
-
-    #[error("cannot extract args: ${0}")]
-    ArgsExtractFailed(#[from] super::extract::ArgsDeserializationError),
-
-    #[error("cannot extract target: ${0}")]
-    TargetExtractFailed(#[from] super::extract::TargetExtractError),
-
-    #[error("cannot extract view: ${0}")]
-    ViewExtractFailed(#[from] super::extract::ViewExtractError),
-
-    #[error("cannot extract system")]
-    SystemExtractFailed(#[from] super::extract::SystemExtractError),
 
     #[error("cannot calculate view result: ${0}")]
     ViewResultFailed(#[from] super::extract::ViewResultError),

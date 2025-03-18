@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::{diff, Patch};
 use jsonptr::resolve::ResolveError;
 use serde::de::DeserializeOwned;
@@ -5,6 +6,7 @@ use serde::Serialize;
 use std::fmt::{self, Display};
 use std::ops::{Deref, DerefMut};
 
+use super::errors::InputError;
 use crate::error::{Error, IntoError};
 use crate::path::Path;
 use crate::system::{FromSystem, System};
@@ -19,40 +21,6 @@ use crate::task::{Context, Effect, IntoEffect, IntoResult, Result};
 pub struct View<T> {
     state: Option<T>,
     path: Path,
-}
-
-#[derive(Debug)]
-pub enum ViewExtractError {
-    CannotResolvePath {
-        path: String,
-        reason: jsonptr::resolve::ResolveError,
-    },
-    DeserializationFailed(serde_json::error::Error),
-}
-
-impl std::error::Error for ViewExtractError {}
-
-impl Display for ViewExtractError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ViewExtractError::CannotResolvePath { path, reason } => {
-                write!(
-                    f,
-                    "cannot resolve path `{}` on system state: {}",
-                    path, reason
-                )?;
-            }
-            ViewExtractError::DeserializationFailed(err) => err.fmt(f)?,
-        }
-
-        Ok(())
-    }
-}
-
-impl IntoError for ViewExtractError {
-    fn into_error(self) -> Error {
-        Error::ViewExtractFailed(self)
-    }
 }
 
 #[derive(Debug)]
@@ -88,7 +56,7 @@ impl IntoError for ViewResultError {
 }
 
 impl<T> View<T> {
-    pub(super) fn new(state: Option<T>, path: Path) -> Self {
+    fn new(state: Option<T>, path: Path) -> Self {
         View { state, path }
     }
 
@@ -103,18 +71,19 @@ impl<T> View<T> {
     pub fn remove(&mut self) {
         self.state = None;
     }
-}
 
-impl<T: Default> View<T> {
     /// Assign the default value for the type
     /// to the view
-    pub fn zero(&mut self) -> &mut T {
+    pub fn zero(&mut self) -> &mut T
+    where
+        T: Default,
+    {
         self.replace(T::default())
     }
 }
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
-    type Error = ViewExtractError;
+    type Error = InputError;
 
     fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
         let pointer = context.path.as_ref();
@@ -126,27 +95,25 @@ impl<T: DeserializeOwned> FromSystem for View<T> {
         // Try to resolve the parent or fail
         parent
             .resolve(root)
-            .map_err(|e| ViewExtractError::CannotResolvePath {
-                path: context.path.to_string(),
-                reason: e,
-            })?;
+            .with_context(|| format!("Failed to resolve path {}", context.path))?;
 
         // At this point we assume that if the pointer cannot be
         // resolved is because the value does not exist yet unless
         // the parent is a scalar
         let state: Option<T> = match pointer.resolve(root) {
-            Ok(value) => Some(
-                serde_json::from_value::<T>(value.clone())
-                    .map_err(ViewExtractError::DeserializationFailed)?,
-            ),
+            Ok(value) => Some(serde_json::from_value::<T>(value.clone()).with_context(|| {
+                format!(
+                    "Failed to deserialize {value} into {}",
+                    std::any::type_name::<T>()
+                )
+            })?),
             Err(e) => match e {
                 ResolveError::NotFound { .. } => None,
                 ResolveError::OutOfBounds { .. } => None,
                 _ => {
-                    return Err(ViewExtractError::CannotResolvePath {
-                        path: context.path.to_string(),
-                        reason: e,
-                    })
+                    return Err(
+                        anyhow!(e).context(format!("Failed to resolve path {}", context.path))
+                    )?;
                 }
             },
         };
@@ -214,7 +181,7 @@ pub struct Create<T> {
 }
 
 impl<T: DeserializeOwned + Default> FromSystem for Create<T> {
-    type Error = ViewExtractError;
+    type Error = InputError;
 
     fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
         // We unwrap the call to parse because the path should
@@ -228,10 +195,7 @@ impl<T: DeserializeOwned + Default> FromSystem for Create<T> {
         // Try to resolve the parent or fail
         parent
             .resolve(root)
-            .map_err(|e| ViewExtractError::CannotResolvePath {
-                path: context.path.to_string(),
-                reason: e,
-            })?;
+            .with_context(|| format!("Failed to resolve path {}", context.path))?;
 
         // At this point we assume that if the pointer cannot be
         // resolved is because the value does not exist yet unless
@@ -241,10 +205,9 @@ impl<T: DeserializeOwned + Default> FromSystem for Create<T> {
                 ResolveError::NotFound { .. } => (),
                 ResolveError::OutOfBounds { .. } => (),
                 _ => {
-                    return Err(ViewExtractError::CannotResolvePath {
-                        path: context.path.to_string(),
-                        reason: e,
-                    })
+                    return Err(
+                        anyhow!(e).context(format!("Failed to resolve path {}", context.path))
+                    )?;
                 }
             };
         }
@@ -294,7 +257,7 @@ pub struct Update<T> {
 }
 
 impl<T: DeserializeOwned> FromSystem for Update<T> {
-    type Error = ViewExtractError;
+    type Error = InputError;
 
     fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
         let pointer = context.path.as_ref();
@@ -304,12 +267,13 @@ impl<T: DeserializeOwned> FromSystem for Update<T> {
         // reason, return an error
         let value = pointer
             .resolve(root)
-            .map_err(|e| ViewExtractError::CannotResolvePath {
-                path: context.path.to_string(),
-                reason: e,
-            })?;
-        let state = serde_json::from_value::<T>(value.clone())
-            .map_err(ViewExtractError::DeserializationFailed)?;
+            .with_context(|| format!("Failed to resolve path {}", context.path))?;
+        let state = serde_json::from_value::<T>(value.clone()).with_context(|| {
+            format!(
+                "Failed to deserialize {value} into {}",
+                std::any::type_name::<T>()
+            )
+        })?;
 
         Ok(Update {
             state,

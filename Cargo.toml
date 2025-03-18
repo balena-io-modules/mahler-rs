@@ -5,6 +5,7 @@ edition = "2021"
 description = "An automated job orchestration library to build and execute dynamic workflows"
 
 [dependencies]
+anyhow = "1.0.97"
 json-patch = "3"
 jsonptr = "0.6.0"
 log = "0.4.25"
