@@ -7,7 +7,7 @@ use std::fmt::{self, Display};
 use crate::error::{Error, IntoError};
 use crate::path::Path;
 use crate::system::System;
-use crate::task::{ConditionFailed, Context, Task};
+use crate::task::{AtomTask, ConditionFailed, Context, ListTask, Task};
 
 use super::distance::Distance;
 use super::domain::Domain;
@@ -75,9 +75,9 @@ impl Planner {
         stack_len: u32,
     ) -> Result<Workflow, Error> {
         match &task {
-            Task::Atom {
+            Task::Atom(AtomTask {
                 context, dry_run, ..
-            } => {
+            }) => {
                 let action_id = Action::new_id(&task, cur_state.root()).map_err(|e| {
                     PlanningError::CannotResolvePath {
                         path: task.context().path.to_string(),
@@ -106,9 +106,9 @@ impl Planner {
 
                 Ok(Workflow { dag, pending })
             }
-            Task::List {
+            Task::List(ListTask {
                 context, expand, ..
-            } => {
+            }) => {
                 let tasks = expand(cur_state, context)?;
 
                 let mut cur_state = cur_state.clone();

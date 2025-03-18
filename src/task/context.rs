@@ -11,38 +11,27 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     pub(crate) fn with_target(self, target: Value) -> Self {
-        Self {
-            target,
-            path: self.path,
-            args: self.args,
-        }
+        Self { target, ..self }
     }
 
-    /// This is only used for tests, end users should not
-    /// set the context path as that is set from the information
-    /// in the Domain
     pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
-        Self {
-            target: self.target,
-            path: Path::new(PointerBuf::parse(&path).unwrap().as_ptr()),
-            args: self.args,
-        }
+        let path = Path::new(
+            PointerBuf::parse(&path)
+                // this is a bug if it happens
+                .expect("invalid JSON Pointer path")
+                .as_ptr(),
+        );
+        Self { path, ..self }
     }
 
-    pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
-        let Self {
-            target,
-            path,
-            mut args,
-        } = self;
-
+    pub(crate) fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
+        let Self { mut args, .. } = self;
         args.insert(key, value);
-
-        Self { target, path, args }
+        Self { args, ..self }
     }
 }

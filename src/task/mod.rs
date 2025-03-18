@@ -7,7 +7,8 @@ mod job;
 mod result;
 
 use anyhow::Context as AnyhowCtx;
-use json_patch::{Patch, PatchOperation};
+use json_patch::Patch;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::{self, Display};
 use std::future::Future;
@@ -34,33 +35,91 @@ type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
 type Expand =
     Arc<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, Error> + Send + Sync>;
 
+#[derive(Clone)]
+pub struct AtomTask {
+    id: &'static str,
+    scoped: bool,
+    pub(crate) context: Context,
+    pub(crate) dry_run: DryRun,
+    run: Run,
+}
+
+impl AtomTask {
+    fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
+        let target = serde_json::to_value(target)
+            .with_context(|| "Failed to serialize target state")
+            .map_err(InvalidTarget)?;
+        Ok(Self {
+            context: self.context.with_target(target),
+            ..self
+        })
+    }
+
+    fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
+        Self {
+            context: self.context.with_arg(key, value),
+            ..self
+        }
+    }
+
+    fn with_path(self, path: impl AsRef<str>) -> Self {
+        Self {
+            context: self.context.with_path(path),
+            ..self
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ListTask {
+    id: &'static str,
+    scoped: bool,
+    pub(crate) context: Context,
+    pub(crate) expand: Expand,
+}
+
+impl ListTask {
+    fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
+        let target = serde_json::to_value(target)
+            .with_context(|| "Failed to serialize target state")
+            .map_err(InvalidTarget)?;
+        Ok(Self {
+            context: self.context.with_target(target),
+            ..self
+        })
+    }
+
+    fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
+        Self {
+            context: self.context.with_arg(key, value),
+            ..self
+        }
+    }
+
+    fn with_path(self, path: impl AsRef<str>) -> Self {
+        Self {
+            context: self.context.with_path(path),
+            ..self
+        }
+    }
+}
+
 /// A task is either a concrete unit (atom) of work or a list of tasks
 /// that can be run in sequence or in parallel
 #[derive(Clone)]
 pub enum Task {
-    Atom {
-        id: &'static str,
-        scoped: bool,
-        context: Context,
-        dry_run: DryRun,
-        run: Run,
-    },
-    List {
-        id: &'static str,
-        scoped: bool,
-        context: Context,
-        expand: Expand,
-    },
+    Atom(AtomTask),
+    List(ListTask),
 }
 
 impl Task {
-    pub(crate) fn atom<H, T, I>(id: &'static str, handler: H, context: Context) -> Self
+    pub(crate) fn from_atom<H, T, I>(id: &'static str, handler: H, context: Context) -> Self
     where
         H: Handler<T, Patch, I>,
         I: Send + 'static,
     {
         let handler_clone = handler.clone();
-        Self::Atom {
+        Self::Atom(AtomTask {
             id,
             scoped: handler.is_scoped(),
             context,
@@ -78,14 +137,14 @@ impl Task {
                     }
                 })
             }),
-        }
+        })
     }
 
-    pub(crate) fn list<H, T>(id: &'static str, handler: H, context: Context) -> Self
+    pub(crate) fn from_list<H, T>(id: &'static str, handler: H, context: Context) -> Self
     where
         H: Handler<T, Vec<Task>>,
     {
-        Self::List {
+        Self::List(ListTask {
             id,
             scoped: handler.is_scoped(),
             context,
@@ -95,66 +154,35 @@ impl Task {
                 // be pure
                 handler.call(system, context).pure()
             }),
-        }
+        })
     }
 
     pub fn id(&self) -> &str {
         match self {
-            Self::Atom { id, .. } => id,
-            Self::List { id, .. } => id,
+            Self::Atom(AtomTask { id, .. }) => id,
+            Self::List(ListTask { id, .. }) => id,
         }
     }
 
-    pub fn context(&self) -> &Context {
+    pub(crate) fn context(&self) -> &Context {
         match self {
-            Self::Atom { context, .. } => context,
-            Self::List { context, .. } => context,
+            Self::Atom(AtomTask { context, .. }) => context,
+            Self::List(ListTask { context, .. }) => context,
         }
     }
 
     pub fn is_scoped(&self) -> bool {
         match self {
-            Self::Atom { scoped, .. } => *scoped,
-            Self::List { scoped, .. } => *scoped,
+            Self::Atom(AtomTask { scoped, .. }) => *scoped,
+            Self::List(ListTask { scoped, .. }) => *scoped,
         }
     }
 
     pub fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
-        let target = serde_json::to_value(target)
-            .with_context(|| "Failed to serialize target state")
-            .map_err(InvalidTarget)?;
-        let res = match self {
-            Self::Atom {
-                id,
-                scoped,
-                context,
-                dry_run,
-                run,
-            } => Self::Atom {
-                id,
-                scoped,
-                context: context.with_target(target),
-                dry_run,
-                run,
-            },
-            Self::List {
-                id,
-                scoped,
-                context,
-                expand,
-                ..
-            } => {
-                let Context { args, path, .. } = context;
-                Self::List {
-                    id,
-                    scoped,
-                    context: Context { target, args, path },
-                    expand,
-                }
-            }
-        };
-
-        Ok(res)
+        match self {
+            Self::Atom(task) => task.try_target(target).map(Self::Atom),
+            Self::List(task) => task.try_target(target).map(Self::List),
+        }
     }
 
     pub fn with_target<S: Serialize>(self, target: S) -> Self {
@@ -163,122 +191,62 @@ impl Task {
 
     pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         match self {
-            Self::Atom {
-                id,
-                scoped,
-                context,
-                dry_run,
-                run,
-            } => Self::Atom {
-                id,
-                scoped,
-                context: context.with_arg(key, value),
-                dry_run,
-                run,
-            },
-            Self::List {
-                id,
-                scoped,
-                context,
-                expand,
-                ..
-            } => Self::List {
-                id,
-                scoped,
-                context: context.with_arg(key, value),
-                expand,
-            },
+            Self::Atom(task) => Self::Atom(task.with_arg(key, value)),
+            Self::List(task) => Self::List(task.with_arg(key, value)),
         }
     }
 
     pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
         match self {
-            Self::Atom {
-                id,
-                scoped,
-                context,
-                dry_run,
-                run,
-            } => Self::Atom {
-                id,
-                scoped,
-                context: context.with_path(path),
-                dry_run,
-                run,
-            },
-            Self::List {
-                id,
-                scoped: linear,
-                context,
-                expand,
-                ..
-            } => Self::List {
-                id,
-                scoped: linear,
-                context: context.with_path(path),
-                expand,
-            },
-        }
-    }
-
-    /// Run every action in the task sequentially and return the
-    /// aggregate changes.
-    /// TODO: this should probably only have crate visibility
-    pub fn dry_run(&self, system: &System) -> Result<Patch> {
-        match self {
-            Self::Atom {
-                context, dry_run, ..
-            } => (dry_run)(system, context),
-            Self::List {
-                context, expand, ..
-            } => {
-                let mut changes: Vec<PatchOperation> = vec![];
-                let jobs = (expand)(system, context)?;
-                let mut system = system.clone();
-                for job in jobs {
-                    let Patch(patch) = job.dry_run(&system)?;
-
-                    // Append a copy of the patch to the total changes
-                    changes.append(&mut patch.clone());
-
-                    // And apply the changes to the system copy
-                    system.patch(Patch(patch))?;
-                }
-                Ok(Patch(changes))
-            }
+            Self::Atom(task) => Self::Atom(task.with_path(path)),
+            Self::List(task) => Self::List(task.with_path(path)),
         }
     }
 
     /// Run the task sequentially
-    pub async fn run(&self, system: &mut System) -> Result<()> {
+    pub(crate) async fn run(&self, system: &mut System) -> Result<()> {
         match self {
-            Self::Atom { context, run, .. } => {
+            Self::Atom(AtomTask { context, run, .. }) => {
                 let changes = (run)(system, context).await?;
                 system.patch(changes)?;
                 Ok(())
             }
-            Self::List {
-                context, expand, ..
-            } => {
-                let jobs = (expand)(system, context)?;
-                for job in jobs {
-                    Box::pin(job.run(system)).await?;
-                }
-                Ok(())
+            Self::List(..) => {
+                panic!("Cannot run a list task directly");
             }
         }
     }
+}
 
-    /// Expand the task into its composing sub-jobs.
-    ///
-    /// If the task is an atom the expansion will fail
-    pub fn expand(&self, system: &System) -> Result<Vec<Task>> {
-        match self {
-            Self::Atom { .. } => Ok(vec![]),
-            Self::List {
+#[cfg(debug_assertions)]
+impl Task {
+    /// TODO: this actually doesn't support composite tasks in a hierarchy
+    /// the path is only used for the parent, but there is no way to know
+    /// the path of the children. This function needs to move to Domain
+    pub async fn test<S: Serialize + DeserializeOwned>(
+        &self,
+        path: &'static str,
+        state: S,
+    ) -> Result<S> {
+        let mut system = System::from(state);
+        let task = self.clone().with_path(path);
+
+        match &task {
+            Self::Atom(AtomTask { context, run, .. }) => {
+                let changes = (run)(&system, context).await?;
+                system.patch(changes)?;
+            }
+            Self::List(ListTask {
                 context, expand, ..
-            } => (expand)(system, context),
+            }) => {
+                let jobs = (expand)(&system, context)?;
+                for job in jobs {
+                    Box::pin(job.run(&mut system)).await?;
+                }
+            }
         }
+
+        Ok(system.state::<S>().unwrap())
     }
 }
 
@@ -299,9 +267,7 @@ mod tests {
     use super::*;
     use crate::extract::{System as Sys, Target, View};
     use crate::system::System;
-    use json_patch::Patch;
     use serde::{Deserialize, Serialize};
-    use serde_json::{from_value, json};
     use std::collections::HashMap;
     use thiserror::Error;
     use tokio::time::{sleep, Duration};
@@ -379,48 +345,12 @@ mod tests {
         assert!(!task.is_scoped());
     }
 
-    #[test]
-    fn it_allows_to_dry_run_tasks() {
-        let system = System::from(0);
-        let task = plus_one.with_target(1);
-
-        // Get the list of changes that the action performs
-        let changes = task.dry_run(&system).unwrap();
-        assert_eq!(
-            changes,
-            from_value::<Patch>(json!([
-              { "op": "replace", "path": "", "value": 1 },
-            ]))
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn it_allows_to_dry_run_composite_tasks() {
-        let system = System::from(0);
-        let task = plus_two.with_target(2);
-
-        // Get the list of changes that the method performs
-        let changes = task.dry_run(&system).unwrap();
-        assert_eq!(
-            changes,
-            from_value::<Patch>(json!([
-              { "op": "replace", "path": "", "value": 1 },
-              { "op": "replace", "path": "", "value": 2 },
-            ]))
-            .unwrap()
-        );
-    }
-
     #[tokio::test]
-    async fn it_allows_to_run_composite_tasks() {
-        let mut system = System::from(0);
+    async fn it_allows_to_test_composite_tasks() {
         let task = plus_two.with_target(2);
 
-        // Run the action
-        task.run(&mut system).await.unwrap();
-
-        let state = system.state::<i32>().unwrap();
+        // Test the action
+        let state = task.test("", 0).await.unwrap();
 
         // The referenced value was modified
         assert_eq!(state, 2);
