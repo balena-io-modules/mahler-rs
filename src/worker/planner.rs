@@ -1,4 +1,5 @@
 use json_patch::Patch;
+use jsonptr::Pointer;
 use log::warn;
 use serde::Serialize;
 use serde_json::Value;
@@ -124,7 +125,7 @@ impl Planner {
                     }
                     let path = self
                         .0
-                        .get_path(t.id(), &t.context().args)
+                        .find_path_for_job(t.id(), &t.context().args)
                         // The user may have not have put the child task in the
                         // domain, in which case we need to return an error
                         .map_err(|e| match e {
@@ -189,7 +190,7 @@ impl Planner {
             for op in distance.iter() {
                 // Find applicable tasks
                 let path = Path::new(op.path());
-                let matching = self.0.at(path.to_str());
+                let matching = self.0.find_jobs_at(path.to_str());
                 if let Some((args, intents)) = matching {
                     // Calculate the target for the job path
                     let pointer = path.as_ref();
@@ -668,12 +669,17 @@ mod tests {
             to_table
         }
         let domain = Domain::new()
-            .job("/blocks/{block}", update(pickup))
-            .job("/blocks/{block}", update(putdown))
-            .job("/blocks/{block}", update(stack))
-            .job("/blocks/{block}", update(unstack))
-            .job("/blocks/{block}", update(take))
-            .job("/blocks/{block}", update(put))
+            .jobs(
+                "/blocks/{block}",
+                [
+                    update(pickup),
+                    update(unstack),
+                    update(putdown),
+                    update(stack),
+                    update(take),
+                    update(put),
+                ],
+            )
             .job("/blocks", update(move_blks));
 
         let planner = Planner::new(domain);

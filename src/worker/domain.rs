@@ -79,10 +79,16 @@ impl Domain {
         Self { router, index }
     }
 
+    pub fn jobs<const N: usize>(self, route: &'static str, intents: [Intent; N]) -> Self {
+        intents
+            .into_iter()
+            .fold(self, |domain, intent| domain.job(route, intent))
+    }
+
     // This allows to find the path that a task relates to from the
     // job it belongs to and the arguments given by the user as part
     // of the context.
-    pub(crate) fn get_path(
+    pub(crate) fn find_path_for_job(
         &self,
         job_id: &str,
         args: &PathArgs,
@@ -168,7 +174,10 @@ impl Domain {
     /// Find matches for the given path in the domain
     /// the matches are sorted in order that they should be
     /// tested
-    pub(crate) fn at(&self, path: &str) -> Option<(PathArgs, impl Iterator<Item = &Intent>)> {
+    pub(crate) fn find_jobs_at(
+        &self,
+        path: &str,
+    ) -> Option<(PathArgs, impl Iterator<Item = &Intent>)> {
         self.router
             .at(path)
             .map(|matched| {
@@ -220,7 +229,7 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let jobs: Vec<&str> = domain
-            .at("/counters/{counter}")
+            .find_jobs_at("/counters/{counter}")
             .map(|(_, iter)| iter.map(|i| i.job.id()).collect())
             .unwrap();
 
@@ -238,7 +247,7 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let jobs: Vec<&str> = domain
-            .at("/counters/{counter}")
+            .find_jobs_at("/counters/{counter}")
             .map(|(_, iter)| iter.map(|i| i.job.id()).collect())
             .unwrap();
 
@@ -269,7 +278,9 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let args = PathArgs(vec![(Arc::from("counter"), String::from("one"))]);
-        let path = domain.get_path(plus_one.into_job().id(), &args).unwrap();
+        let path = domain
+            .find_path_for_job(plus_one.into_job().id(), &args)
+            .unwrap();
         assert_eq!(path, String::from("/counters/one"))
     }
 
@@ -282,7 +293,7 @@ mod tests {
             Arc::from("path"),
             "documents/report.pdf".to_string(),
         )]);
-        let result = domain.get_path(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.into_job().id(), &args);
 
         assert_eq!(result, Ok("/files/documents/report.pdf".to_string()));
     }
@@ -293,7 +304,7 @@ mod tests {
         let domain = Domain::new().job("/data/{{counter}}/edit", update(func));
 
         let args = PathArgs(vec![(Arc::from("counter"), "456".to_string())]);
-        let result = domain.get_path(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.into_job().id(), &args);
 
         assert_eq!(result, Ok("/data/{counter}/edit".to_string())); // Escaped `{counter}` remains unchanged
     }
@@ -307,7 +318,7 @@ mod tests {
             (Arc::from("id"), "42".to_string()),
             (Arc::from("path"), "reports/january.csv".to_string()),
         ]);
-        let result = domain.get_path(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.into_job().id(), &args);
 
         assert_eq!(
             result,
@@ -322,7 +333,7 @@ mod tests {
 
         let args = PathArgs(vec![(Arc::from("counter"), "999".to_string())]);
 
-        let result = domain.get_path(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.into_job().id(), &args);
         assert_eq!(result, Err(DomainSearchError::JobNotFound));
     }
 
@@ -332,7 +343,7 @@ mod tests {
         let domain = Domain::new().job("/tasks/{task_id}/check", update(func));
 
         let args = PathArgs(vec![]); // No arguments provided
-        let result = domain.get_path(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.into_job().id(), &args);
 
         assert_eq!(
             result,
