@@ -5,24 +5,10 @@ use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicBool;
 
+use super::RuntimeError;
 use crate::dag::{Dag, Node};
 use crate::system::System;
 use crate::task::{IntoTask, Task};
-use crate::{Error, IntoError};
-
-#[derive(Debug)]
-pub struct Interrupted {}
-impl std::error::Error for Interrupted {}
-impl Display for Interrupted {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "execution of the workflow was interrupted")
-    }
-}
-impl IntoError for Interrupted {
-    fn into_error(self) -> Error {
-        Error::WorkflowInterrupted(self)
-    }
-}
 
 #[derive(Hash)]
 struct ActionId<'s> {
@@ -92,7 +78,11 @@ impl Display for Action {
 }
 
 impl<T: IntoTask + Clone> Dag<T> {
-    pub async fn execute(self, system: &mut System, interrupted: &AtomicBool) -> Result<(), Error> {
+    pub(crate) async fn execute(
+        self,
+        system: &mut System,
+        interrupted: &AtomicBool,
+    ) -> Result<(), RuntimeError> {
         // TODO: implement parallel execution of the DAG
         for node in self.iter() {
             let value = {
@@ -111,7 +101,7 @@ impl<T: IntoTask + Clone> Dag<T> {
 
             // Check if the task was interrupted before continuing
             if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(Interrupted {})?;
+                return Err(RuntimeError::Interrupted)?;
             }
         }
         Ok(())
@@ -145,7 +135,7 @@ impl Workflow {
         self,
         system: &mut System,
         interrupted: &AtomicBool,
-    ) -> Result<(), Error> {
+    ) -> Result<(), RuntimeError> {
         self.dag.execute(system, interrupted).await
     }
 }

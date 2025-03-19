@@ -1,27 +1,14 @@
 use anyhow::anyhow;
 use matchit::Router;
 use std::collections::{BTreeSet, HashMap};
-use std::fmt::{self, Display};
+use thiserror::Error;
 
 use crate::path::PathArgs;
 use crate::task::{Intent, Operation};
 
-#[derive(Debug)]
-pub struct PathSearchError(anyhow::Error);
-
-impl std::error::Error for PathSearchError {}
-
-impl Display for PathSearchError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<anyhow::Error> for PathSearchError {
-    fn from(err: anyhow::Error) -> Self {
-        PathSearchError(err)
-    }
-}
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct PathSearchError(#[from] anyhow::Error);
 
 #[derive(Default, Debug)]
 pub struct Domain {
@@ -184,7 +171,7 @@ impl Domain {
             Ok(final_route)
         } else {
             Err(anyhow!(
-                "Could not find a job with id {job_id} in the domain"
+                "Could not find a job with id {job_id} in the search domain"
             ))?
         }
     }

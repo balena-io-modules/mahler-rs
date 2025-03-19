@@ -57,7 +57,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
 /// Implement IntoEffect for any effect that has an IntoResult as the output. This means that, for
 /// instance, Effect<View<T>> implements into effect, so effects can use extractors to interact
 /// with the state
-impl<I: IntoResult<Patch> + Send + 'static, E: std::error::Error + Send + 'static>
+impl<I: IntoResult<Patch> + Send + 'static, E: std::error::Error + Send + Sync + 'static>
     IntoEffect<Patch, Error, I> for Effect<I, E>
 {
     fn into_effect(self, system: &System) -> Effect<Patch, Error, I> {
@@ -73,7 +73,9 @@ impl IntoEffect<Vec<Task>, Error> for Vec<Task> {
     }
 }
 
-impl<E: std::error::Error + Send + 'static> IntoEffect<Vec<Task>, Error> for Result<Vec<Task>, E> {
+impl<E: std::error::Error + Send + Sync + 'static> IntoEffect<Vec<Task>, Error>
+    for Result<Vec<Task>, E>
+{
     fn into_effect(self, _: &System) -> Effect<Vec<Task>, Error> {
         Effect::from(self.map_err(|e| Error::Other(Box::new(e))))
     }
@@ -85,7 +87,7 @@ impl<const N: usize> IntoEffect<Vec<Task>, Error> for [Task; N] {
     }
 }
 
-impl<E: std::error::Error + Send + 'static, const N: usize> IntoEffect<Vec<Task>, Error>
+impl<E: std::error::Error + Send + Sync + 'static, const N: usize> IntoEffect<Vec<Task>, Error>
     for Result<[Task; N], E>
 {
     fn into_effect(self, _: &System) -> Effect<Vec<Task>, Error> {

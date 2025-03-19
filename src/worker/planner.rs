@@ -1,13 +1,13 @@
+use anyhow::Context as AnyhowCtx;
 use json_patch::Patch;
-use log::warn;
 use serde::Serialize;
 use serde_json::Value;
-use std::fmt::{self, Display};
+use thiserror::Error;
 
-use crate::error::{Error, IntoError};
+use crate::error::Error as TaskError;
 use crate::path::Path;
 use crate::system::System;
-use crate::task::{AtomTask, ConditionFailed, Context, ListTask, Operation, Task};
+use crate::task::{AtomTask, Context, ListTask, Operation, Task};
 
 use super::distance::Distance;
 use super::domain::Domain;
@@ -16,38 +16,30 @@ use super::PathSearchError;
 
 pub struct Planner(Domain);
 
-#[derive(Debug)]
-pub enum PlanningError {
+#[derive(Debug, Error)]
+pub(crate) enum PlanningError {
+    #[error(transparent)]
     TaskNotFound(PathSearchError),
-    LoopDetected,
-    WorkflowNotFound,
+
+    #[error(transparent)]
+    TaskError(#[from] TaskError),
+
+    #[error("task not applicable")]
+    TaskNotApplicable,
+
+    #[error("plan not found")]
+    NotFound,
+
+    #[error("max search depth reached")]
     MaxDepthReached,
+
+    #[error("unexpected error: {0}")]
+    UnexpectedError(#[from] anyhow::Error),
 }
 
-impl std::error::Error for PlanningError {}
-
-impl Display for PlanningError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PlanningError::LoopDetected => {
-                write!(f, "loop detected")
-            }
-            PlanningError::WorkflowNotFound => {
-                write!(f, "plan not found")
-            }
-            PlanningError::TaskNotFound(e) => e.fmt(f),
-            PlanningError::MaxDepthReached => {
-                write!(f, "max search depth reached while looking for a plan")
-            }
-        }
-    }
-}
-
-impl IntoError for PlanningError {
-    fn into_error(self) -> Error {
-        Error::PlanSearchFailed(self)
-    }
-}
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct NotFound(#[from] anyhow::Error);
 
 impl Planner {
     pub fn new(domain: Domain) -> Self {
@@ -60,21 +52,22 @@ impl Planner {
         cur_state: &System,
         cur_plan: Workflow,
         stack_len: u32,
-    ) -> Result<Workflow, Error> {
+    ) -> Result<Workflow, PlanningError> {
         match &task {
             Task::Atom(AtomTask {
                 context, dry_run, ..
             }) => {
-                let action_id = Action::new_id(&task, cur_state.root()).unwrap_or_else(|e| {
-                    panic!(
-                        "failed to resolve path {} on state, reason: {e}",
-                        context.path
+                let action_id = Action::new_id(&task, cur_state.root()).with_context(|| {
+                    format!(
+                        "failed to resolve path {} for task {}",
+                        context.path,
+                        task.id()
                     )
-                });
+                })?;
 
                 // Detect loops in the plan
                 if cur_plan.as_dag().some(|a| a.id == action_id) {
-                    return Err(PlanningError::LoopDetected)?;
+                    return Err(PlanningError::TaskNotApplicable)?;
                 }
 
                 // Test the task
@@ -83,7 +76,7 @@ impl Planner {
                 // if we are at the top of the stack and no changes are introduced
                 // then assume the condition has failed
                 if stack_len == 0 && changes.is_empty() {
-                    return Err(ConditionFailed::default())?;
+                    return Err(PlanningError::TaskNotApplicable)?;
                 }
 
                 // Otherwise add the task to the plan
@@ -121,32 +114,41 @@ impl Planner {
                         self.try_task(task, &cur_state, cur_plan, stack_len + 1)?;
 
                     // patch the state before passing it to the next task
-                    cur_state.patch(Patch(pending.clone()))?;
+                    cur_state
+                        .patch(Patch(pending.clone()))
+                        .context("Failed to patch state")?;
                     cur_plan = Workflow { dag, pending };
                 }
 
                 // if we are at the top of the stack and no changes are introduced
                 // then assume the condition has failed
                 if stack_len == 0 && cur_plan.pending.is_empty() {
-                    return Err(ConditionFailed::default())?;
+                    return Err(PlanningError::TaskNotApplicable)?;
                 }
                 Ok(cur_plan)
             }
         }
     }
 
-    pub fn find_plan<S>(&self, cur: S, tgt: S) -> Result<Workflow, Error>
+    pub fn find_plan<S>(&self, cur: S, tgt: S) -> Result<Workflow, NotFound>
     where
         S: Serialize,
     {
-        let cur = serde_json::to_value(cur)?;
-        let tgt = serde_json::to_value(tgt)?;
+        let cur = serde_json::to_value(cur).context("Failed to serialize current state")?;
+        let tgt = serde_json::to_value(tgt).context("Failed to serialize target state")?;
 
         let system = System::new(cur);
-        self.find_workflow(&system, tgt)
+        let res = self
+            .find_workflow(&system, tgt)
+            .context("Failed to find a plan")?;
+        Ok(res)
     }
 
-    pub(crate) fn find_workflow(&self, system: &System, tgt: Value) -> Result<Workflow, Error> {
+    pub(crate) fn find_workflow(
+        &self,
+        system: &System,
+        tgt: Value,
+    ) -> Result<Workflow, PlanningError> {
         // Store the initial state and an empty plan on the stack
         let mut stack = vec![(system.clone(), Workflow::default(), 0)];
 
@@ -177,9 +179,9 @@ impl Planner {
                     let pointer = path.as_ref();
 
                     // This should technically never happen
-                    let target = pointer.resolve(&tgt).unwrap_or_else(|e| {
-                        panic!("failed to resolve path {path} on state, reason: {e}")
-                    });
+                    let target = pointer.resolve(&tgt).with_context(|| {
+                        format!("Failed to resolve path {path} on system state")
+                    })?;
 
                     // Create the calling context for the job
                     let context = Context {
@@ -191,7 +193,6 @@ impl Planner {
                         // If the intent is applicable to the operation
                         if op.matches(&intent.operation) || intent.operation != Operation::Any {
                             let task = intent.job.build_task(context.clone());
-                            let task_id = task.to_string();
 
                             // apply the task to the state, if it progresses the plan, then select
                             // it and put the new state with the new plan on the stack
@@ -208,7 +209,9 @@ impl Planner {
                                     let mut new_sys = cur_state.clone();
 
                                     // Update the state and the workflow
-                                    new_sys.patch(Patch(pending))?;
+                                    new_sys
+                                        .patch(Patch(pending))
+                                        .expect("Failed to patch state");
                                     let new_plan = Workflow {
                                         dag,
                                         pending: vec![],
@@ -218,21 +221,13 @@ impl Planner {
                                     stack.push((new_sys, new_plan, depth + 1));
                                 }
                                 // Ignore harmless errors
-                                Err(Error::TaskConditionFailed(_)) => {}
-                                Err(Error::PlanSearchFailed(PlanningError::LoopDetected)) => {}
-                                Err(Error::PlanSearchFailed(PlanningError::WorkflowNotFound)) => {}
+                                Err(PlanningError::TaskError(TaskError::TaskConditionFailed(
+                                    _,
+                                ))) => {}
+                                Err(PlanningError::TaskNotApplicable) => {}
+                                Err(PlanningError::NotFound) => {}
                                 Err(err) => {
-                                    if cfg!(debug_assertions) {
-                                        // Interrupt the search if we find an unexpected error on
-                                        // debugging
-                                        return Err(err);
-                                    } else {
-                                        // Otherwise, just log the error and continue
-                                        warn!(
-                                    "ignoring task {} due to unexpected error during planning: {}",
-                                    task_id, err
-                                );
-                                    }
+                                    return Err(err);
                                 }
                             }
                         }
@@ -241,7 +236,7 @@ impl Planner {
             }
         }
 
-        Err(PlanningError::WorkflowNotFound)?
+        Err(PlanningError::NotFound)?
     }
 }
 
@@ -332,9 +327,6 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = planner.find_plan(0, 2);
         assert!(workflow.is_err());
-        if let Err(Error::PlanSearchFailed(err)) = workflow {
-            assert!(matches!(err, PlanningError::MaxDepthReached));
-        }
     }
 
     #[test]

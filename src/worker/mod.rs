@@ -6,20 +6,18 @@ mod workflow;
 use log::{debug, error, info, warn};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use std::{
-    fmt::{self, Display},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
+use thiserror::Error;
 use tokio::task::JoinHandle;
 
 pub use domain::*;
 pub use planner::*;
 pub use workflow::*;
 
-use crate::{error::Error, system::System, task::Intent};
+use crate::{error::Error as TaskError, system::System, task::Intent};
 
 pub struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.
@@ -145,6 +143,18 @@ impl<T> Worker<T, Uninitialized> {
     }
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum RuntimeError {
+    #[error(transparent)]
+    TaskFailed(#[from] TaskError),
+
+    #[error("workflow interrupted")]
+    Interrupted,
+
+    #[error(transparent)]
+    PlanningFailed(#[from] PlanningError),
+}
+
 impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
     pub fn state(self) -> T {
         self.inner.system.state().unwrap()
@@ -166,7 +176,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
             system: &mut System,
             tgt: &Value,
             interrupted: &AtomicBool,
-        ) -> Result<bool, Error> {
+        ) -> Result<bool, RuntimeError> {
             // TODO: maybe use a timeout to finding the plan
             let workflow = planner.find_workflow(system, tgt.clone())?;
             if workflow.is_empty() {
@@ -197,20 +207,21 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                 {
                     Ok(true) => break,
                     Ok(false) => true,
-                    Err(Error::WorkflowInterrupted(_)) => {
+                    Err(RuntimeError::Interrupted) => {
                         // TODO: implement some way to report the worker status
                         // rather than just logging
                         info!("workflow interrupted due to user request");
                         return (planner, system);
                     }
-                    Err(Error::PlanSearchFailed(PlanningError::WorkflowNotFound)) => {
+                    Err(RuntimeError::PlanningFailed(PlanningError::NotFound)) => {
                         warn!("no plan found");
                         false
                     }
-                    Err(Error::PlanSearchFailed(e)) => {
+                    Err(RuntimeError::PlanningFailed(e)) => {
                         if cfg!(debug_assertions) {
                             // Return the error in debug mode
                             error!("plan search failed: {}", e);
+                            // TODO: do we want to return an error here too?
                             return (planner, system);
                         } else {
                             warn!("plan search failed: {}", e);
@@ -246,14 +257,9 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("timeout reached while waiting for the worker to finish")]
 pub struct Timeout;
-impl std::error::Error for Timeout {}
-impl Display for Timeout {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "timeout reached while waiting for the worker to finish")
-    }
-}
 
 impl<T: DeserializeOwned> Worker<T, Running> {
     pub async fn cancel(self) -> Worker<T, Ready> {
