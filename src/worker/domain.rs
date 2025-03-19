@@ -1,13 +1,26 @@
+use anyhow::anyhow;
 use matchit::Router;
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::{self, Display};
 
 use crate::path::PathArgs;
 use crate::task::{Intent, Operation};
 
-#[derive(Debug, PartialEq)]
-pub(crate) enum DomainSearchError {
-    JobNotFound,
-    MissingArgs(Vec<String>),
+#[derive(Debug)]
+pub struct PathSearchError(anyhow::Error);
+
+impl std::error::Error for PathSearchError {}
+
+impl Display for PathSearchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<anyhow::Error> for PathSearchError {
+    fn from(err: anyhow::Error) -> Self {
+        PathSearchError(err)
+    }
 }
 
 #[derive(Default, Debug)]
@@ -92,7 +105,7 @@ impl Domain {
         &self,
         job_id: &str,
         args: &PathArgs,
-    ) -> Result<String, DomainSearchError> {
+    ) -> Result<String, PathSearchError> {
         if let Some(route) = self.index.get(job_id) {
             let mut route = route.clone();
             let mut replacements = Vec::new();
@@ -155,7 +168,10 @@ impl Domain {
 
             // If there are missing placeholders, return an error
             if !missing_args.is_empty() {
-                return Err(DomainSearchError::MissingArgs(missing_args));
+                return Err(anyhow!(
+                    "Missing arguments for task {job_id}: {:?}",
+                    missing_args
+                ))?;
             }
 
             // Restore escaped parameters `{{param}}` → `{param}`
@@ -167,7 +183,9 @@ impl Domain {
 
             Ok(final_route)
         } else {
-            Err(DomainSearchError::JobNotFound)
+            Err(anyhow!(
+                "Could not find a job with id {job_id} in the domain"
+            ))?
         }
     }
 
@@ -287,9 +305,9 @@ mod tests {
             Arc::from("path"),
             "documents/report.pdf".to_string(),
         )]);
-        let result = domain.find_path_for_job(func.id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args).unwrap();
 
-        assert_eq!(result, Ok("/files/documents/report.pdf".to_string()));
+        assert_eq!(result, "/files/documents/report.pdf".to_string());
     }
 
     #[test]
@@ -298,9 +316,9 @@ mod tests {
         let domain = Domain::new().job("/data/{{counter}}/edit", update(func));
 
         let args = PathArgs(vec![(Arc::from("counter"), "456".to_string())]);
-        let result = domain.find_path_for_job(func.id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args).unwrap();
 
-        assert_eq!(result, Ok("/data/{counter}/edit".to_string())); // Escaped `{counter}` remains unchanged
+        assert_eq!(result, "/data/{counter}/edit".to_string()); // Escaped `{counter}` remains unchanged
     }
 
     #[test]
@@ -312,11 +330,11 @@ mod tests {
             (Arc::from("id"), "42".to_string()),
             (Arc::from("path"), "reports/january.csv".to_string()),
         ]);
-        let result = domain.find_path_for_job(func.id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args).unwrap();
 
         assert_eq!(
             result,
-            Ok("/users/42/files/{file}/reports/january.csv".to_string())
+            "/users/42/files/{file}/reports/january.csv".to_string()
         );
     }
 
@@ -328,7 +346,7 @@ mod tests {
         let args = PathArgs(vec![(Arc::from("counter"), "999".to_string())]);
 
         let result = domain.find_path_for_job(func.id(), &args);
-        assert_eq!(result, Err(DomainSearchError::JobNotFound));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -338,12 +356,6 @@ mod tests {
 
         let args = PathArgs(vec![]); // No arguments provided
         let result = domain.find_path_for_job(func.id(), &args);
-
-        assert_eq!(
-            result,
-            Err(DomainSearchError::MissingArgs(
-                vec!["{task_id}".to_string()]
-            ))
-        ); // Unmatched placeholders remain
+        assert!(result.is_err());
     }
 }

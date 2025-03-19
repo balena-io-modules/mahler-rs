@@ -12,18 +12,13 @@ use crate::task::{AtomTask, ConditionFailed, Context, ListTask, Operation, Task}
 use super::distance::Distance;
 use super::domain::Domain;
 use super::workflow::{Action, Workflow};
-use super::DomainSearchError;
+use super::PathSearchError;
 
 pub struct Planner(Domain);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum PlanningError {
-    CannotResolvePath {
-        path: String,
-        reason: jsonptr::resolve::ResolveError,
-    },
-    MissingArgs(Vec<String>),
-    TaskNotFound,
+    TaskNotFound(PathSearchError),
     LoopDetected,
     WorkflowNotFound,
     MaxDepthReached,
@@ -37,18 +32,10 @@ impl Display for PlanningError {
             PlanningError::LoopDetected => {
                 write!(f, "loop detected")
             }
-            PlanningError::CannotResolvePath { path, reason } => {
-                write!(f, "cannot resolve path `{}`: {}", path, reason)
-            }
             PlanningError::WorkflowNotFound => {
                 write!(f, "plan not found")
             }
-            PlanningError::MissingArgs(args) => {
-                write!(f, "missing args: {:?}", args)
-            }
-            PlanningError::TaskNotFound => {
-                write!(f, "task not found on the planning domain")
-            }
+            PlanningError::TaskNotFound(e) => e.fmt(f),
             PlanningError::MaxDepthReached => {
                 write!(f, "max search depth reached while looking for a plan")
             }
@@ -78,12 +65,12 @@ impl Planner {
             Task::Atom(AtomTask {
                 context, dry_run, ..
             }) => {
-                let action_id = Action::new_id(&task, cur_state.root()).map_err(|e| {
-                    PlanningError::CannotResolvePath {
-                        path: task.context().path.to_string(),
-                        reason: e,
-                    }
-                })?;
+                let action_id = Action::new_id(&task, cur_state.root()).unwrap_or_else(|e| {
+                    panic!(
+                        "failed to resolve path {} on state, reason: {e}",
+                        context.path
+                    )
+                });
 
                 // Detect loops in the plan
                 if cur_plan.as_dag().some(|a| a.id == action_id) {
@@ -127,12 +114,7 @@ impl Planner {
                         .find_path_for_job(t.id(), &t.context().args)
                         // The user may have not have put the child task in the
                         // domain, in which case we need to return an error
-                        .map_err(|e| match e {
-                            DomainSearchError::JobNotFound => PlanningError::TaskNotFound,
-                            DomainSearchError::MissingArgs(args) => {
-                                PlanningError::MissingArgs(args)
-                            }
-                        })?;
+                        .map_err(PlanningError::TaskNotFound)?;
 
                     let task = t.with_path(path);
                     let Workflow { dag, pending } =
@@ -195,13 +177,9 @@ impl Planner {
                     let pointer = path.as_ref();
 
                     // This should technically never happen
-                    let target =
-                        pointer
-                            .resolve(&tgt)
-                            .map_err(|e| PlanningError::CannotResolvePath {
-                                path: path.to_string(),
-                                reason: e,
-                            })?;
+                    let target = pointer.resolve(&tgt).unwrap_or_else(|e| {
+                        panic!("failed to resolve path {path} on state, reason: {e}")
+                    });
 
                     // Create the calling context for the job
                     let context = Context {
@@ -355,7 +333,7 @@ mod tests {
         let workflow = planner.find_plan(0, 2);
         assert!(workflow.is_err());
         if let Err(Error::PlanSearchFailed(err)) = workflow {
-            assert_eq!(err, PlanningError::MaxDepthReached);
+            assert!(matches!(err, PlanningError::MaxDepthReached));
         }
     }
 
