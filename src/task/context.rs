@@ -11,15 +11,15 @@ pub struct Context {
 }
 
 impl Context {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn with_target(self, target: Value) -> Self {
+    pub fn with_target(self, target: Value) -> Self {
         Self { target, ..self }
     }
 
-    pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
+    pub fn with_path(self, path: impl AsRef<str>) -> Self {
         let path = Path::new(
             PointerBuf::parse(&path)
                 // this is a bug if it happens
@@ -29,7 +29,7 @@ impl Context {
         Self { path, ..self }
     }
 
-    pub(crate) fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
+    pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         let Self { mut args, .. } = self;
         args.insert(key, value);
         Self { args, ..self }

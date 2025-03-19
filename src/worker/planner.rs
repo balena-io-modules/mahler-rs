@@ -1,5 +1,4 @@
 use json_patch::Patch;
-use jsonptr::Pointer;
 use log::warn;
 use serde::Serialize;
 use serde_json::Value;
@@ -8,12 +7,12 @@ use std::fmt::{self, Display};
 use crate::error::{Error, IntoError};
 use crate::path::Path;
 use crate::system::System;
-use crate::task::{AtomTask, ConditionFailed, Context, ListTask, Task};
+use crate::task::{AtomTask, ConditionFailed, Context, ListTask, Operation, Task};
 
 use super::distance::Distance;
 use super::domain::Domain;
 use super::workflow::{Action, Workflow};
-use super::{DomainSearchError, Operation};
+use super::DomainSearchError;
 
 pub struct Planner(Domain);
 
@@ -213,7 +212,7 @@ impl Planner {
                     for intent in intents {
                         // If the intent is applicable to the operation
                         if op.matches(&intent.operation) || intent.operation != Operation::Any {
-                            let task = intent.job.into_task(context.clone());
+                            let task = intent.job.build_task(context.clone());
                             let task_id = task.to_string();
 
                             // apply the task to the state, if it progresses the plan, then select
@@ -276,7 +275,7 @@ mod tests {
     use super::*;
     use crate::extract::{Args, System, Target, View};
     use crate::task::*;
-    use crate::worker::{none, update, Domain};
+    use crate::worker::Domain;
     use crate::{seq, Dag};
 
     fn init() {

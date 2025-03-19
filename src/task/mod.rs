@@ -3,12 +3,12 @@ mod context;
 mod effect;
 mod errors;
 mod handler;
+mod intent;
 mod job;
 mod result;
 
 use anyhow::Context as AnyhowCtx;
 use json_patch::Patch;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::{self, Display};
 use std::future::Future;
@@ -18,12 +18,13 @@ use std::sync::Arc;
 use crate::error::Error;
 use crate::system::System;
 
-pub use context::*;
+pub(crate) use context::*;
+pub(crate) use result::*;
+
 pub use effect::*;
 pub use errors::*;
 pub use handler::*;
-pub use job::*;
-pub(crate) use result::*;
+pub use intent::*;
 
 pub trait IntoTask {
     fn into_task(self) -> Task;
@@ -113,14 +114,14 @@ pub enum Task {
 }
 
 impl Task {
-    pub(crate) fn from_atom<H, T, I>(id: &'static str, handler: H, context: Context) -> Self
+    pub(crate) fn from_atom<H, T, I>(handler: H, context: Context) -> Self
     where
         H: Handler<T, Patch, I>,
         I: Send + 'static,
     {
         let handler_clone = handler.clone();
         Self::Atom(AtomTask {
-            id,
+            id: handler.id(),
             scoped: handler.is_scoped(),
             context,
             dry_run: Arc::new(move |system: &System, context: &Context| {
@@ -140,12 +141,12 @@ impl Task {
         })
     }
 
-    pub(crate) fn from_list<H, T>(id: &'static str, handler: H, context: Context) -> Self
+    pub(crate) fn from_list<H, T>(handler: H, context: Context) -> Self
     where
         H: Handler<T, Vec<Task>>,
     {
         Self::List(ListTask {
-            id,
+            id: handler.id(),
             scoped: handler.is_scoped(),
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
@@ -223,7 +224,7 @@ impl Task {
     /// TODO: this actually doesn't support composite tasks in a hierarchy
     /// the path is only used for the parent, but there is no way to know
     /// the path of the children. This function needs to move to Domain
-    pub async fn test<S: Serialize + DeserializeOwned>(
+    pub async fn test<S: Serialize + serde::de::DeserializeOwned>(
         &self,
         path: &'static str,
         state: S,
@@ -311,9 +312,7 @@ mod tests {
 
     #[test]
     fn it_gets_metadata_from_function() {
-        let job = plus_one.into_job();
-
-        assert_eq!(job.id(), "gustav::task::tests::plus_one");
+        assert_eq!(plus_one.id(), "gustav::task::tests::plus_one");
     }
 
     #[test]

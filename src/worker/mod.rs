@@ -1,6 +1,5 @@
 mod distance;
 mod domain;
-mod intent;
 mod planner;
 mod workflow;
 
@@ -17,11 +16,10 @@ use std::{
 use tokio::task::JoinHandle;
 
 pub use domain::*;
-pub use intent::*;
 pub use planner::*;
 pub use workflow::*;
 
-use crate::{error::Error, system::System};
+use crate::{error::Error, system::System, task::Intent};
 
 pub struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.

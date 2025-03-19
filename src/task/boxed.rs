@@ -12,7 +12,7 @@ impl BoxedIntoTask {
     {
         Self(Box::new(MakeIntoTask {
             handler: action,
-            into_task: |id, handler, context| Task::from_atom(id, handler, context),
+            into_task: |handler, context| Task::from_atom(handler, context),
         }))
     }
 
@@ -22,12 +22,12 @@ impl BoxedIntoTask {
     {
         Self(Box::new(MakeIntoTask {
             handler: method,
-            into_task: |id, method, context| Task::from_list(id, method, context),
+            into_task: |handler, context| Task::from_list(handler, context),
         }))
     }
 
-    pub fn into_task(self, id: &'static str, context: Context) -> Task {
-        self.0.into_task(id, context)
+    pub fn into_task(self, context: Context) -> Task {
+        self.0.into_task(context)
     }
 }
 
@@ -40,12 +40,12 @@ impl Clone for BoxedIntoTask {
 trait ErasedIntoTask: Send + Sync {
     fn clone_box(&self) -> Box<dyn ErasedIntoTask>;
 
-    fn into_task(self: Box<Self>, id: &'static str, context: Context) -> Task;
+    fn into_task(self: Box<Self>, context: Context) -> Task;
 }
 
 struct MakeIntoTask<H> {
     pub(crate) handler: H,
-    pub(crate) into_task: fn(&'static str, H, Context) -> Task,
+    pub(crate) into_task: fn(H, Context) -> Task,
 }
 
 impl<H> ErasedIntoTask for MakeIntoTask<H>
@@ -59,7 +59,7 @@ where
         })
     }
 
-    fn into_task(self: Box<Self>, id: &'static str, context: Context) -> Task {
-        (self.into_task)(id, self.handler, context)
+    fn into_task(self: Box<Self>, context: Context) -> Task {
+        (self.into_task)(self.handler, context)
     }
 }

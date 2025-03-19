@@ -1,38 +1,56 @@
 use json_patch::Patch;
 use serde::Serialize;
 
-use super::{Context, Effect, IntoEffect, IntoResult, Job, Task};
+use super::job::Job;
+use super::{Context, Effect, IntoEffect, IntoResult, Task};
 use crate::error::{Error, IntoError};
 use crate::system::{FromSystem, System};
 
 pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     fn call(&self, system: &System, context: &Context) -> Effect<O, Error, I>;
 
+    /// Get the unique identifier of the job handler
+    fn id(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
+    /// Convert the handler into a job
     fn into_job(self) -> Job;
 
-    // Indicates that the handler can be parallelized because
-    // it uses only scoped extractors
+    /// Return true if the handler can be parallelized
+    ///
+    /// This means the handler only scoped extractors and
+    /// no global extractors, allowing it to be used in parallel
+    /// with other handler with non-conflicting scope.
     fn is_scoped(&self) -> bool;
 
-    // Convenience functions to create a task from a handler
+    /// Create a task from the handler
+    ///
+    /// This is a convenience function that is equivalent to
+    /// calling `into_job().to_task(context)`
     fn into_task(self) -> Task {
-        self.into_job().into_task(Context::new())
+        self.into_job().build_task(Context::new())
     }
 
+    /// Create a task from the handler with a specific target
+    ///
+    /// This function may fail if serialization of the target into JSON fails
     fn try_target<S: Serialize>(self, target: S) -> Result<Task, Error> {
-        self.into_job().into_task(Context::new()).try_target(target)
+        self.into_task().try_target(target)
     }
 
+    /// Create a task from the handler with a specific target
+    ///
+    /// Important: This function will panic if serialization of the target into JSON fails
+    /// Use `try_target` if you want to handle the error. This is done for convenience as
+    /// serialization errors should be rare and this makes the code more concise.
     fn with_target<S: Serialize>(self, target: S) -> Task {
-        self.into_job()
-            .into_task(Context::new())
-            .with_target(target)
+        self.into_task().with_target(target)
     }
 
+    /// Create a task from the handler with a specific path argument
     fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Task {
-        self.into_job()
-            .into_task(Context::new())
-            .with_arg(key, value)
+        self.into_task().with_arg(key, value)
     }
 }
 

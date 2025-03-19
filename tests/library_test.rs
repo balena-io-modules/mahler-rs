@@ -5,7 +5,7 @@ use tokio::time::sleep;
 
 use gustav::extract::{Target, View};
 use gustav::task::*;
-use gustav::worker::{update, Worker};
+use gustav::worker::Worker;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct Counters(HashMap<String, i32>);

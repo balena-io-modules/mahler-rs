@@ -1,4 +1,5 @@
-use crate::task::{Handler, Job};
+use super::handler::Handler;
+use super::job::Job;
 use std::cmp::Ordering;
 
 #[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Clone)]

@@ -1,8 +1,8 @@
 use matchit::Router;
 use std::collections::{BTreeSet, HashMap};
 
-use super::intent::{Intent, Operation};
 use crate::path::PathArgs;
+use crate::task::{Intent, Operation};
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum DomainSearchError {
@@ -201,7 +201,6 @@ mod tests {
     use crate::extract::{Target, View};
     use crate::path::PathArgs;
     use crate::task::*;
-    use crate::worker::*;
 
     fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
@@ -234,10 +233,7 @@ mod tests {
             .unwrap();
 
         // It should return compound jobs first
-        assert_eq!(
-            jobs,
-            vec![plus_two.into_job().id(), plus_one.into_job().id()]
-        );
+        assert_eq!(jobs, vec![plus_two.id(), plus_one.id()]);
     }
 
     #[test]
@@ -252,7 +248,7 @@ mod tests {
             .unwrap();
 
         // It should not return jobs for None operations
-        assert_eq!(jobs, vec![plus_two.into_job().id()]);
+        assert_eq!(jobs, vec![plus_two.id()]);
     }
 
     #[test]
@@ -278,9 +274,7 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let args = PathArgs(vec![(Arc::from("counter"), String::from("one"))]);
-        let path = domain
-            .find_path_for_job(plus_one.into_job().id(), &args)
-            .unwrap();
+        let path = domain.find_path_for_job(plus_one.id(), &args).unwrap();
         assert_eq!(path, String::from("/counters/one"))
     }
 
@@ -293,7 +287,7 @@ mod tests {
             Arc::from("path"),
             "documents/report.pdf".to_string(),
         )]);
-        let result = domain.find_path_for_job(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args);
 
         assert_eq!(result, Ok("/files/documents/report.pdf".to_string()));
     }
@@ -304,7 +298,7 @@ mod tests {
         let domain = Domain::new().job("/data/{{counter}}/edit", update(func));
 
         let args = PathArgs(vec![(Arc::from("counter"), "456".to_string())]);
-        let result = domain.find_path_for_job(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args);
 
         assert_eq!(result, Ok("/data/{counter}/edit".to_string())); // Escaped `{counter}` remains unchanged
     }
@@ -318,7 +312,7 @@ mod tests {
             (Arc::from("id"), "42".to_string()),
             (Arc::from("path"), "reports/january.csv".to_string()),
         ]);
-        let result = domain.find_path_for_job(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args);
 
         assert_eq!(
             result,
@@ -333,7 +327,7 @@ mod tests {
 
         let args = PathArgs(vec![(Arc::from("counter"), "999".to_string())]);
 
-        let result = domain.find_path_for_job(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args);
         assert_eq!(result, Err(DomainSearchError::JobNotFound));
     }
 
@@ -343,7 +337,7 @@ mod tests {
         let domain = Domain::new().job("/tasks/{task_id}/check", update(func));
 
         let args = PathArgs(vec![]); // No arguments provided
-        let result = domain.find_path_for_job(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args);
 
         assert_eq!(
             result,
