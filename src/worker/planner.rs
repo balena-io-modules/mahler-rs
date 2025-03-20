@@ -11,7 +11,7 @@ use crate::task::{AtomTask, Context, ListTask, Operation, Task};
 
 use super::distance::Distance;
 use super::domain::Domain;
-use super::workflow::{Action, Workflow};
+use super::workflow::{WorkUnit, Workflow};
 use super::PathSearchError;
 
 pub struct Planner(Domain);
@@ -57,7 +57,7 @@ impl Planner {
             Task::Atom(AtomTask {
                 context, dry_run, ..
             }) => {
-                let action_id = Action::new_id(&task, cur_state.root()).with_context(|| {
+                let work_id = WorkUnit::new_id(&task, cur_state.root()).with_context(|| {
                     format!(
                         "failed to resolve path {} for task {}",
                         context.path,
@@ -66,7 +66,7 @@ impl Planner {
                 })?;
 
                 // Detect loops in the plan
-                if cur_plan.as_dag().some(|a| a.id == action_id) {
+                if cur_plan.as_dag().some(|a| a.id == work_id) {
                     return Err(PlanningError::TaskNotApplicable)?;
                 }
 
@@ -81,7 +81,7 @@ impl Planner {
 
                 // Otherwise add the task to the plan
                 let Workflow { dag, pending } = cur_plan;
-                let dag = dag.with_head(Action::new(action_id, task));
+                let dag = dag.with_head(WorkUnit::new(work_id, task));
                 let pending = [pending, changes].concat();
 
                 Ok(Workflow { dag, pending })

@@ -11,7 +11,7 @@ use crate::system::System;
 use crate::task::Task;
 
 #[derive(Hash)]
-struct ActionId<'s> {
+struct WorkUnitId<'s> {
     /// The task id
     task: String,
     /// The task path
@@ -21,7 +21,7 @@ struct ActionId<'s> {
 }
 
 #[derive(Clone)]
-pub(crate) struct Action {
+pub(crate) struct WorkUnit {
     /**
      * Unique id for the action. This is calculated by
      * hashing the .
@@ -36,7 +36,7 @@ pub(crate) struct Action {
     pub task: Task,
 }
 
-impl Action {
+impl WorkUnit {
     pub fn new(id: u64, task: Task) -> Self {
         Self { id, task }
     }
@@ -48,7 +48,7 @@ impl Action {
         // the task
         let state = pointer.resolve(state)?;
 
-        let action_id = ActionId {
+        let action_id = WorkUnitId {
             task: String::from(task.id()),
             path: task.context().path.to_string(),
             state,
@@ -65,13 +65,13 @@ impl Action {
     }
 }
 
-impl From<Action> for Task {
-    fn from(action: Action) -> Task {
+impl From<WorkUnit> for Task {
+    fn from(action: WorkUnit) -> Task {
         action.task
     }
 }
 
-impl Display for Action {
+impl Display for WorkUnit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.task.fmt(f)
     }
@@ -110,12 +110,12 @@ impl<T: Into<Task> + Clone> Dag<T> {
 
 #[derive(Default, Clone)]
 pub struct Workflow {
-    pub(crate) dag: Dag<Action>,
+    pub(crate) dag: Dag<WorkUnit>,
     pub(crate) pending: Vec<PatchOperation>,
 }
 
 impl Workflow {
-    pub(crate) fn as_dag(&self) -> &Dag<Action> {
+    pub(crate) fn as_dag(&self) -> &Dag<WorkUnit> {
         &self.dag
     }
 
