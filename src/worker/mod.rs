@@ -152,7 +152,7 @@ pub(crate) enum RuntimeError {
     Interrupted,
 
     #[error(transparent)]
-    PlanningFailed(#[from] PlanningError),
+    PlanNotFound(#[from] PlanningError),
 }
 
 impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
@@ -213,11 +213,11 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                         info!("workflow interrupted due to user request");
                         return (planner, system);
                     }
-                    Err(RuntimeError::PlanningFailed(PlanningError::NotFound)) => {
+                    Err(RuntimeError::PlanNotFound(PlanningError::NotFound)) => {
                         warn!("no plan found");
                         false
                     }
-                    Err(RuntimeError::PlanningFailed(e)) => {
+                    Err(RuntimeError::PlanNotFound(e)) => {
                         if cfg!(debug_assertions) {
                             // Return the error in debug mode
                             error!("plan search failed: {}", e);

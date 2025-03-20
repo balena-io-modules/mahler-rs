@@ -46,10 +46,8 @@ pub struct AtomTask {
 }
 
 impl AtomTask {
-    fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
-        let target = serde_json::to_value(target)
-            .with_context(|| "Failed to serialize target state")
-            .map_err(InvalidTarget)?;
+    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InvalidTarget> {
+        let target = serde_json::to_value(target).context("Serialization failed")?;
         Ok(Self {
             context: self.context.with_target(target),
             ..self
@@ -80,10 +78,8 @@ pub struct ListTask {
 }
 
 impl ListTask {
-    fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
-        let target = serde_json::to_value(target)
-            .with_context(|| "Failed to serialize target state")
-            .map_err(InvalidTarget)?;
+    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InvalidTarget> {
+        let target = serde_json::to_value(target).context("Serialization failed")?;
         Ok(Self {
             context: self.context.with_target(target),
             ..self
@@ -179,7 +175,7 @@ impl Task {
         }
     }
 
-    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
+    pub fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InvalidTarget> {
         match self {
             Self::Atom(task) => task.try_target(target).map(Self::Atom),
             Self::List(task) => task.try_target(target).map(Self::List),

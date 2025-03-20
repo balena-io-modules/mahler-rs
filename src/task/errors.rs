@@ -1,7 +1,7 @@
 use std::fmt::{self, Display};
+use thiserror::Error;
 
 use super::result::*;
-use crate::error::{Error, IntoError};
 use crate::system::System;
 
 #[derive(Debug)]
@@ -27,12 +27,6 @@ impl Display for ConditionFailed {
     }
 }
 
-impl IntoError for ConditionFailed {
-    fn into_error(self) -> Error {
-        Error::TaskConditionFailed(self)
-    }
-}
-
 impl<T, O> IntoResult<O> for Option<T>
 where
     O: Default,
@@ -46,25 +40,6 @@ where
     }
 }
 
-#[derive(Debug)]
-pub struct InvalidTarget(pub(super) anyhow::Error);
-
-impl std::error::Error for InvalidTarget {}
-
-impl Display for InvalidTarget {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl IntoError for InvalidTarget {
-    fn into_error(self) -> Error {
-        Error::TargetError(self)
-    }
-}
-
-impl From<anyhow::Error> for InvalidTarget {
-    fn from(value: anyhow::Error) -> Self {
-        InvalidTarget(value)
-    }
-}
+#[derive(Debug, Error)]
+#[error("failed to configure target for task: {0}")]
+pub struct InvalidTarget(#[from] anyhow::Error);

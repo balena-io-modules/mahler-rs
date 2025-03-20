@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use super::job::Job;
 use super::{Context, Effect, IntoEffect, IntoResult, Task};
-use crate::error::{Error, IntoError};
+use crate::error::Error;
 use crate::system::{FromSystem, System};
 
 pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
@@ -34,15 +34,8 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
 
     /// Create a task from the handler with a specific target
     ///
-    /// This function may fail if serialization of the target into JSON fails
-    fn try_target<S: Serialize>(self, target: S) -> Result<Task, Error> {
-        self.into_task().try_target(target)
-    }
-
-    /// Create a task from the handler with a specific target
-    ///
     /// Important: This function will panic if serialization of the target into JSON fails
-    /// Use `try_target` if you want to handle the error. This is done for convenience as
+    /// Use `into_task().try_target()` if you want to handle the error. This is done for convenience as
     /// serialization errors should be rare and this makes the code more concise.
     fn with_target<S: Serialize>(self, target: S) -> Task {
         self.into_task().with_target(target)
@@ -116,7 +109,7 @@ macro_rules! impl_action_handler {
                     let $ty = match $ty::from_system(system, context) {
                         Ok(value) => value,
                         // TODO: communicate the function name as part of the error
-                        Err(failure) => return Effect::from_error(failure.into_error())
+                        Err(failure) => return Effect::from_error(failure.into())
                     };
                 )*
 
@@ -171,7 +164,7 @@ macro_rules! impl_method_handler {
                 $(
                     let $ty = match $ty::from_system(system, context) {
                         Ok(value) => value,
-                        Err(failure) => return Effect::from_error(failure.into_error())
+                        Err(failure) => return Effect::from_error(failure.into())
                     };
                 )*
 

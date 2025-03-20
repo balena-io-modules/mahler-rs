@@ -6,8 +6,6 @@ use std::{
     ops::Deref,
 };
 
-use crate::error::{Error, IntoError};
-
 mod from_system;
 pub(crate) use from_system::*;
 
@@ -22,12 +20,6 @@ impl Display for SystemReadError {
     }
 }
 
-impl IntoError for SystemReadError {
-    fn into_error(self) -> Error {
-        Error::SystemReadError(self)
-    }
-}
-
 #[derive(Debug)]
 pub struct SystemWriteError(json_patch::PatchError);
 
@@ -36,12 +28,6 @@ impl std::error::Error for SystemWriteError {}
 impl Display for SystemWriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
-    }
-}
-
-impl IntoError for SystemWriteError {
-    fn into_error(self) -> Error {
-        Error::SystemWriteError(self)
     }
 }
 
