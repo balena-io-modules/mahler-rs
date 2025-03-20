@@ -25,10 +25,6 @@ pub use errors::*;
 pub use handler::*;
 pub use intent::*;
 
-pub trait IntoTask {
-    fn into_task(self) -> Task;
-}
-
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
 type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
 type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;

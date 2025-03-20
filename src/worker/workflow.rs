@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use super::RuntimeError;
 use crate::dag::{Dag, Node};
 use crate::system::System;
-use crate::task::{IntoTask, Task};
+use crate::task::Task;
 
 #[derive(Hash)]
 struct ActionId<'s> {
@@ -65,9 +65,9 @@ impl Action {
     }
 }
 
-impl IntoTask for Action {
-    fn into_task(self) -> Task {
-        self.task
+impl From<Action> for Task {
+    fn from(action: Action) -> Task {
+        action.task
     }
 }
 
@@ -77,7 +77,7 @@ impl Display for Action {
     }
 }
 
-impl<T: IntoTask + Clone> Dag<T> {
+impl<T: Into<Task> + Clone> Dag<T> {
     pub(crate) async fn execute(
         self,
         system: &mut System,
@@ -96,7 +96,7 @@ impl<T: IntoTask + Clone> Dag<T> {
                 }
             };
 
-            let task = value.into_task();
+            let task = value.into();
             task.run(system).await?;
 
             // Check if the task was interrupted before continuing
