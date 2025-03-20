@@ -1,35 +1,19 @@
 use json_patch::{patch, Patch};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use std::{
-    fmt::{self, Display},
-    ops::Deref,
-};
+use std::ops::Deref;
+use thiserror::Error;
 
 mod from_system;
 pub(crate) use from_system::*;
 
-#[derive(Debug)]
-pub struct SystemReadError(serde_json::error::Error);
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct SystemReadError(#[from] serde_json::error::Error);
 
-impl std::error::Error for SystemReadError {}
-
-impl Display for SystemReadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-#[derive(Debug)]
-pub struct SystemWriteError(json_patch::PatchError);
-
-impl std::error::Error for SystemWriteError {}
-
-impl Display for SystemWriteError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct SystemWriteError(#[from] json_patch::PatchError);
 
 #[derive(Clone)]
 pub struct System {
@@ -61,12 +45,12 @@ impl System {
     }
 
     pub(crate) fn patch(&mut self, changes: Patch) -> Result<(), SystemWriteError> {
-        patch(&mut self.state, &changes).map_err(SystemWriteError)?;
+        patch(&mut self.state, &changes)?;
         Ok(())
     }
 
     pub fn state<S: DeserializeOwned>(&self) -> Result<S, SystemReadError> {
-        let s = serde_json::from_value(self.state.clone()).map_err(SystemReadError)?;
+        let s = serde_json::from_value(self.state.clone())?;
         Ok(s)
     }
 }

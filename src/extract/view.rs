@@ -5,10 +5,11 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::ops::{Deref, DerefMut};
 
-use super::errors::{InputError, OutputError};
 use crate::path::Path;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, Effect, IntoEffect, IntoResult, Result, TaskError};
+use crate::task::{
+    Context, Effect, IntoEffect, IntoResult, Result, TaskError, TaskInputError, TaskOutputError,
+};
 
 /// Extracts a pointer to a sub-element of the global state indicated
 /// by the path.
@@ -58,7 +59,7 @@ impl<T> Pointer<T> {
 }
 
 impl<T: DeserializeOwned> FromSystem for Pointer<T> {
-    type Error = InputError;
+    type Error = TaskInputError;
 
     fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
         let json_ptr = context.path.as_ref();
@@ -122,13 +123,13 @@ impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
         if let Some(state) = self.state {
             let value = serde_json::to_value(state)
                 .with_context(|| "Failed to serialize pointer value")
-                .map_err(OutputError)?;
+                .map_err(TaskOutputError::from)?;
 
             // Assign the state to the copy
             json_ptr
                 .assign(root, value)
                 .with_context(|| format!("Failed to assign path {}", self.path))
-                .map_err(OutputError)?;
+                .map_err(TaskOutputError::from)?;
         } else {
             // Otherwise delete the path at the pointer
             json_ptr.delete(root);
@@ -137,6 +138,8 @@ impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
     }
 }
 
+// Allow tasks to return a pointer
+// This converts the pointer into a pure effect
 impl<T: Serialize> IntoEffect<Patch, TaskError> for Pointer<T> {
     fn into_effect(self, system: &System) -> Effect<Patch, TaskError> {
         Effect::from(self.into_result(system))
@@ -158,7 +161,7 @@ impl<T> View<T> {
 }
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
-    type Error = InputError;
+    type Error = TaskInputError;
 
     fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
         let pointer = Pointer::<T>::from_system(system, context)?;
@@ -193,6 +196,8 @@ impl<T: Serialize> IntoResult<Patch> for View<T> {
     }
 }
 
+// Allow tasks to return a view
+// This converts the view into a pure effect
 impl<T: Serialize> IntoEffect<Patch, TaskError> for View<T> {
     fn into_effect(self, system: &System) -> Effect<Patch, TaskError> {
         Effect::from(self.into_result(system))

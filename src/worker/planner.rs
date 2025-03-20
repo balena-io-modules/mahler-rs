@@ -221,9 +221,7 @@ impl Planner {
                                     stack.push((new_sys, new_plan, depth + 1));
                                 }
                                 // Ignore harmless errors
-                                Err(PlanningError::TaskError(TaskError::TaskConditionFailed(
-                                    _,
-                                ))) => {}
+                                Err(PlanningError::TaskError(TaskError::ConditionFailed(_))) => {}
                                 Err(PlanningError::TaskNotApplicable) => {}
                                 Err(PlanningError::NotFound) => {}
                                 Err(err) => {

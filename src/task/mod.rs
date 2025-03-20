@@ -28,8 +28,7 @@ pub use intent::*;
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
 type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
 type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
-type Expand =
-    Arc<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, TaskError> + Send + Sync>;
+type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AtomTask {
@@ -210,38 +209,6 @@ impl Task {
     }
 }
 
-#[cfg(debug_assertions)]
-impl Task {
-    /// TODO: this actually doesn't support composite tasks in a hierarchy
-    /// the path is only used for the parent, but there is no way to know
-    /// the path of the children. This function needs to move to Domain
-    pub async fn test<S: Serialize + serde::de::DeserializeOwned>(
-        &self,
-        path: &'static str,
-        state: S,
-    ) -> Result<S> {
-        let mut system = System::from(state);
-        let task = self.clone().with_path(path);
-
-        match &task {
-            Self::Atom(AtomTask { context, run, .. }) => {
-                let changes = (run)(&system, context).await?;
-                system.patch(changes)?;
-            }
-            Self::List(ListTask {
-                context, expand, ..
-            }) => {
-                let jobs = (expand)(&system, context)?;
-                for job in jobs {
-                    Box::pin(job.run(&mut system)).await?;
-                }
-            }
-        }
-
-        Ok(system.state::<S>().unwrap())
-    }
-}
-
 impl Display for Task {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let id = self
@@ -333,17 +300,6 @@ mod tests {
         // it is not scoped
         let task = plus_one_sys.with_target(1);
         assert!(!task.is_scoped());
-    }
-
-    #[tokio::test]
-    async fn it_allows_to_test_composite_tasks() {
-        let task = plus_two.with_target(2);
-
-        // Test the action
-        let state = task.test("", 0).await.unwrap();
-
-        // The referenced value was modified
-        assert_eq!(state, 2);
     }
 
     #[tokio::test]

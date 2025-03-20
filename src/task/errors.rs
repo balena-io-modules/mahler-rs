@@ -1,16 +1,23 @@
-use std::fmt::{self, Display};
 use thiserror::Error;
 
 use super::result::*;
 use crate::system::System;
 
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct TaskInputError(#[from] anyhow::Error);
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct TaskOutputError(#[from] anyhow::Error);
+
 #[derive(Error, Debug)]
 pub enum TaskError {
     #[error("failed to extract task input: ${0}")]
-    InputError(#[from] crate::extract::InputError),
+    WrongInput(#[from] TaskInputError),
 
     #[error("failed to calculate task result: ${0}")]
-    OutputError(#[from] crate::extract::OutputError),
+    OutputError(#[from] TaskOutputError),
 
     #[error("failed to read system state: ${0}")]
     SystemReadError(#[from] crate::system::SystemReadError),
@@ -19,13 +26,14 @@ pub enum TaskError {
     SystemWriteError(#[from] crate::system::SystemWriteError),
 
     #[error("condition failed: ${0}")]
-    TaskConditionFailed(#[from] crate::task::ConditionFailed),
+    ConditionFailed(#[from] crate::task::ConditionFailed),
 
     #[error(transparent)]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("condition failed: {0}")]
 pub struct ConditionFailed(String);
 
 impl Default for ConditionFailed {
@@ -35,16 +43,8 @@ impl Default for ConditionFailed {
 }
 
 impl ConditionFailed {
-    fn new(msg: impl Into<String>) -> Self {
+    pub fn new(msg: impl Into<String>) -> Self {
         Self(msg.into())
-    }
-}
-
-impl std::error::Error for ConditionFailed {}
-
-impl Display for ConditionFailed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
     }
 }
 
@@ -54,10 +54,8 @@ where
     T: IntoResult<O>,
 {
     fn into_result(self, system: &System) -> Result<O> {
-        match self {
-            None => Err(ConditionFailed::default())?,
-            Some(value) => value.into_result(system),
-        }
+        self.map(|value| value.into_result(system))
+            .ok_or_else(ConditionFailed::default)?
     }
 }
 
