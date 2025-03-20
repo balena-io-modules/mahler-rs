@@ -1,8 +1,8 @@
-use crate::{error::Error, system::System};
+use crate::{system::System, task::TaskError};
 
 /// The task outcome is a type alias
 /// of Result
-pub type Result<O> = core::result::Result<O, Error>;
+pub type Result<O> = core::result::Result<O, TaskError>;
 
 pub trait IntoResult<O> {
     fn into_result(self, system: &System) -> Result<O>;
@@ -16,7 +16,7 @@ where
     fn into_result(self, system: &System) -> Result<O> {
         match self {
             Ok(value) => value.into_result(system),
-            Err(e) => Err(Error::Other(Box::new(e))),
+            Err(e) => Err(TaskError::Other(Box::new(e))),
         }
     }
 }

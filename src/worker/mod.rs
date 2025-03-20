@@ -17,7 +17,8 @@ pub use domain::*;
 pub use planner::*;
 pub use workflow::*;
 
-use crate::{error::Error as TaskError, system::System, task::Intent};
+use crate::system::System;
+use crate::task::{Intent, TaskError};
 
 pub struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.

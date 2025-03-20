@@ -6,10 +6,9 @@ use serde::Serialize;
 use std::ops::{Deref, DerefMut};
 
 use super::errors::{InputError, OutputError};
-use crate::error::Error;
 use crate::path::Path;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, Effect, IntoEffect, IntoResult, Result};
+use crate::task::{Context, Effect, IntoEffect, IntoResult, Result, TaskError};
 
 /// Extracts a pointer to a sub-element of the global state indicated
 /// by the path.
@@ -138,8 +137,8 @@ impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
     }
 }
 
-impl<T: Serialize> IntoEffect<Patch, Error> for Pointer<T> {
-    fn into_effect(self, system: &System) -> Effect<Patch, Error> {
+impl<T: Serialize> IntoEffect<Patch, TaskError> for Pointer<T> {
+    fn into_effect(self, system: &System) -> Effect<Patch, TaskError> {
         Effect::from(self.into_result(system))
     }
 }
@@ -194,8 +193,8 @@ impl<T: Serialize> IntoResult<Patch> for View<T> {
     }
 }
 
-impl<T: Serialize> IntoEffect<Patch, Error> for View<T> {
-    fn into_effect(self, system: &System) -> Effect<Patch, Error> {
+impl<T: Serialize> IntoEffect<Patch, TaskError> for View<T> {
+    fn into_effect(self, system: &System) -> Effect<Patch, TaskError> {
         Effect::from(self.into_result(system))
     }
 }

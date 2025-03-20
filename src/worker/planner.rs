@@ -4,9 +4,9 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::error::Error as TaskError;
 use crate::path::Path;
 use crate::system::System;
+use crate::task::TaskError;
 use crate::task::{AtomTask, Context, ListTask, Operation, Task};
 
 use super::distance::Distance;

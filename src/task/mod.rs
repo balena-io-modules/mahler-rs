@@ -15,7 +15,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::error::Error;
 use crate::system::System;
 
 pub(crate) use context::*;
@@ -34,7 +33,7 @@ type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
 type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
 type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
 type Expand =
-    Arc<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, Error> + Send + Sync>;
+    Arc<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, TaskError> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AtomTask {
@@ -130,7 +129,7 @@ impl Task {
                 Box::pin(async {
                     match effect.run().await {
                         Ok(changes) => Ok(changes),
-                        Err(err) => Err(Error::Other(Box::new(err))),
+                        Err(err) => Err(TaskError::Other(Box::new(err))),
                     }
                 })
             }),

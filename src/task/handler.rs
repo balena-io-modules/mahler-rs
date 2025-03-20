@@ -3,11 +3,11 @@ use serde::Serialize;
 
 use super::job::Job;
 use super::{Context, Effect, IntoEffect, IntoResult, Task};
-use crate::error::Error;
 use crate::system::{FromSystem, System};
+use crate::task::TaskError;
 
 pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
-    fn call(&self, system: &System, context: &Context) -> Effect<O, Error, I>;
+    fn call(&self, system: &System, context: &Context) -> Effect<O, TaskError, I>;
 
     /// Get the unique identifier of the job handler
     fn id(&self) -> &'static str {
@@ -51,41 +51,41 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
 /// instance, Effect<View<T>> implements into effect, so effects can use extractors to interact
 /// with the state
 impl<I: IntoResult<Patch> + Send + 'static, E: std::error::Error + Send + Sync + 'static>
-    IntoEffect<Patch, Error, I> for Effect<I, E>
+    IntoEffect<Patch, TaskError, I> for Effect<I, E>
 {
-    fn into_effect(self, system: &System) -> Effect<Patch, Error, I> {
+    fn into_effect(self, system: &System) -> Effect<Patch, TaskError, I> {
         let system = system.clone();
-        self.map_err(|e| Error::Other(Box::new(e)))
+        self.map_err(|e| TaskError::Other(Box::new(e)))
             .and_then(move |o| o.into_result(&system))
     }
 }
 
-impl IntoEffect<Vec<Task>, Error> for Vec<Task> {
-    fn into_effect(self, _: &System) -> Effect<Vec<Task>, Error> {
+impl IntoEffect<Vec<Task>, TaskError> for Vec<Task> {
+    fn into_effect(self, _: &System) -> Effect<Vec<Task>, TaskError> {
         Effect::of(self)
     }
 }
 
-impl<E: std::error::Error + Send + Sync + 'static> IntoEffect<Vec<Task>, Error>
+impl<E: std::error::Error + Send + Sync + 'static> IntoEffect<Vec<Task>, TaskError>
     for Result<Vec<Task>, E>
 {
-    fn into_effect(self, _: &System) -> Effect<Vec<Task>, Error> {
-        Effect::from(self.map_err(|e| Error::Other(Box::new(e))))
+    fn into_effect(self, _: &System) -> Effect<Vec<Task>, TaskError> {
+        Effect::from(self.map_err(|e| TaskError::Other(Box::new(e))))
     }
 }
 
-impl<const N: usize> IntoEffect<Vec<Task>, Error> for [Task; N] {
-    fn into_effect(self, _: &System) -> Effect<Vec<Task>, Error> {
+impl<const N: usize> IntoEffect<Vec<Task>, TaskError> for [Task; N] {
+    fn into_effect(self, _: &System) -> Effect<Vec<Task>, TaskError> {
         Effect::of(self.into())
     }
 }
 
-impl<E: std::error::Error + Send + Sync + 'static, const N: usize> IntoEffect<Vec<Task>, Error>
+impl<E: std::error::Error + Send + Sync + 'static, const N: usize> IntoEffect<Vec<Task>, TaskError>
     for Result<[Task; N], E>
 {
-    fn into_effect(self, _: &System) -> Effect<Vec<Task>, Error> {
+    fn into_effect(self, _: &System) -> Effect<Vec<Task>, TaskError> {
         Effect::from(
-            self.map_err(|e| Error::Other(Box::new(e)))
+            self.map_err(|e| TaskError::Other(Box::new(e)))
                 .map(|a| a.into()),
         )
     }
@@ -99,12 +99,12 @@ macro_rules! impl_action_handler {
         impl<F, $($ty,)* Res, I> Handler<($($ty,)*), Patch, I> for F
         where
             F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
-            Res: IntoEffect<Patch, Error, I> + Send,
+            Res: IntoEffect<Patch, TaskError, I> + Send,
             $($ty: FromSystem,)*
             I: Send + 'static
         {
 
-            fn call(&self, system: &System, context: &Context) -> Effect<Patch, Error, I>{
+            fn call(&self, system: &System, context: &Context) -> Effect<Patch, TaskError, I>{
                 $(
                     let $ty = match $ty::from_system(system, context) {
                         Ok(value) => value,
@@ -156,11 +156,11 @@ macro_rules! impl_method_handler {
         impl<F, $($ty,)* Res> Handler<($($ty,)*), Vec<Task>> for F
         where
             F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
-            Res: IntoEffect<Vec<Task>, Error>,
+            Res: IntoEffect<Vec<Task>, TaskError>,
             $($ty: FromSystem,)*
         {
 
-            fn call(&self, system: &System, context: &Context) -> Effect<Vec<Task>, Error> {
+            fn call(&self, system: &System, context: &Context) -> Effect<Vec<Task>, TaskError> {
                 $(
                     let $ty = match $ty::from_system(system, context) {
                         Ok(value) => value,

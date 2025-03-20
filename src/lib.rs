@@ -1,8 +1,6 @@
 mod dag;
-mod error;
 mod path;
 
-pub use error::*;
 pub mod extract;
 pub mod system;
 pub mod task;
