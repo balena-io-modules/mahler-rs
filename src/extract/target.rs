@@ -3,12 +3,12 @@ use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
 use crate::system::{FromSystem, System};
-use crate::task::{Context, TaskInputError};
+use crate::task::{Context, InputError};
 
 pub struct Target<T>(pub T);
 
 impl<T: DeserializeOwned> FromSystem for Target<T> {
-    type Error = TaskInputError;
+    type Error = InputError;
 
     fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
         let value = &context.target;

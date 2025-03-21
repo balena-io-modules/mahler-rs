@@ -9,11 +9,11 @@ pub(crate) use from_system::*;
 
 #[derive(Debug, Error)]
 #[error(transparent)]
-pub struct SystemReadError(#[from] serde_json::error::Error);
+pub struct DeserializationError(#[from] serde_json::error::Error);
 
 #[derive(Debug, Error)]
 #[error(transparent)]
-pub struct SystemWriteError(#[from] json_patch::PatchError);
+pub struct PatchError(#[from] json_patch::PatchError);
 
 #[derive(Clone)]
 pub struct System {
@@ -44,12 +44,12 @@ impl System {
         &mut self.state
     }
 
-    pub(crate) fn patch(&mut self, changes: Patch) -> Result<(), SystemWriteError> {
+    pub(crate) fn patch(&mut self, changes: Patch) -> Result<(), PatchError> {
         patch(&mut self.state, &changes)?;
         Ok(())
     }
 
-    pub fn state<S: DeserializeOwned>(&self) -> Result<S, SystemReadError> {
+    pub fn state<S: DeserializeOwned>(&self) -> Result<S, DeserializationError> {
         let s = serde_json::from_value(self.state.clone())?;
         Ok(s)
     }

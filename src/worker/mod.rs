@@ -18,7 +18,7 @@ pub use planner::*;
 pub use workflow::*;
 
 use crate::system::System;
-use crate::task::{Intent, TaskError};
+use crate::task::{self, Intent};
 
 pub struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.
@@ -147,13 +147,13 @@ impl<T> Worker<T, Uninitialized> {
 #[derive(Debug, Error)]
 pub(crate) enum RuntimeError {
     #[error(transparent)]
-    TaskFailed(#[from] TaskError),
+    TaskFailed(#[from] task::Error),
 
     #[error("workflow interrupted")]
     Interrupted,
 
     #[error(transparent)]
-    PlanNotFound(#[from] PlanningError),
+    PlanNotFound(#[from] planner::Error),
 }
 
 impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
@@ -214,7 +214,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                         info!("workflow interrupted due to user request");
                         return (planner, system);
                     }
-                    Err(RuntimeError::PlanNotFound(PlanningError::NotFound)) => {
+                    Err(RuntimeError::PlanNotFound(Error::NotFound)) => {
                         warn!("no plan found");
                         false
                     }

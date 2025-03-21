@@ -156,7 +156,7 @@ impl Domain {
             // If there are missing placeholders, return an error
             if !missing_args.is_empty() {
                 return Err(anyhow!(
-                    "Missing arguments for task {job_id}: {:?}",
+                    "missing arguments for task {job_id}: {:?}",
                     missing_args
                 ))?;
             }
@@ -171,7 +171,7 @@ impl Domain {
             Ok(final_route)
         } else {
             Err(anyhow!(
-                "Could not find a job with id {job_id} in the search domain"
+                "could not find a job with id {job_id} in the search domain"
             ))?
         }
     }

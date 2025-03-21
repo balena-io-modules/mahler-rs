@@ -4,10 +4,10 @@ use serde::Serialize;
 use super::job::Job;
 use super::{Context, Effect, IntoEffect, Task};
 use crate::system::{FromSystem, System};
-use crate::task::TaskError;
+use crate::task::Error;
 
 pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
-    fn call(&self, system: &System, context: &Context) -> Effect<O, TaskError, I>;
+    fn call(&self, system: &System, context: &Context) -> Effect<O, Error, I>;
 
     /// Get the unique identifier of the job handler
     fn id(&self) -> &'static str {
@@ -55,12 +55,12 @@ macro_rules! impl_action_handler {
         impl<F, $($ty,)* Res, I> Handler<($($ty,)*), Patch, I> for F
         where
             F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
-            Res: IntoEffect<Patch, TaskError, I> + Send,
+            Res: IntoEffect<Patch, Error, I> + Send,
             $($ty: FromSystem,)*
             I: Send + 'static
         {
 
-            fn call(&self, system: &System, context: &Context) -> Effect<Patch, TaskError, I>{
+            fn call(&self, system: &System, context: &Context) -> Effect<Patch, Error, I>{
                 $(
                     let $ty = match $ty::from_system(system, context) {
                         Ok(value) => value,
@@ -113,11 +113,11 @@ macro_rules! impl_method_handler {
         impl<F, $($ty,)* Res> Handler<($($ty,)*), Vec<Task>> for F
         where
             F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
-            Res: IntoEffect<Vec<Task>, TaskError>,
+            Res: IntoEffect<Vec<Task>, Error>,
             $($ty: FromSystem,)*
         {
 
-            fn call(&self, system: &System, context: &Context) -> Effect<Vec<Task>, TaskError> {
+            fn call(&self, system: &System, context: &Context) -> Effect<Vec<Task>, Error> {
                 $(
                     let $ty = match $ty::from_system(system, context) {
                         Ok(value) => value,

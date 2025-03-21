@@ -1,5 +1,4 @@
 mod boxed;
-mod condition_failed;
 mod context;
 mod effect;
 mod errors;
@@ -8,6 +7,7 @@ mod intent;
 mod into_result;
 mod job;
 
+use anyhow::anyhow;
 use anyhow::Context as AnyhowCtx;
 use json_patch::Patch;
 use serde::Serialize;
@@ -22,8 +22,8 @@ pub(crate) use context::*;
 pub(crate) use errors::*;
 pub(crate) use into_result::*;
 
-pub use condition_failed::*;
 pub use effect::*;
+pub use errors::InputError;
 pub use handler::*;
 pub use intent::*;
 
@@ -42,7 +42,7 @@ pub struct AtomTask {
 }
 
 impl AtomTask {
-    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InvalidTarget> {
+    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
         let target = serde_json::to_value(target).context("Serialization failed")?;
         Ok(Self {
             context: self.context.with_target(target),
@@ -74,7 +74,7 @@ pub struct ListTask {
 }
 
 impl ListTask {
-    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InvalidTarget> {
+    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
         let target = serde_json::to_value(target).context("Serialization failed")?;
         Ok(Self {
             context: self.context.with_target(target),
@@ -123,12 +123,7 @@ impl Task {
             run: Arc::new(move |system: &System, context: &Context| {
                 let effect = handler.call(system, context);
 
-                Box::pin(async {
-                    match effect.run().await {
-                        Ok(changes) => Ok(changes),
-                        Err(err) => Err(TaskError::Other(Box::new(err))),
-                    }
-                })
+                Box::pin(async { effect.run().await })
             }),
         })
     }
@@ -171,7 +166,7 @@ impl Task {
         }
     }
 
-    pub fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InvalidTarget> {
+    pub fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
         match self {
             Self::Atom(task) => task.try_target(target).map(Self::Atom),
             Self::List(task) => task.try_target(target).map(Self::List),
@@ -201,7 +196,9 @@ impl Task {
         match self {
             Self::Atom(AtomTask { context, run, .. }) => {
                 let changes = (run)(system, context).await?;
-                system.patch(changes)?;
+                system
+                    .patch(changes)
+                    .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
                 Ok(())
             }
             Self::List(..) => {
@@ -235,10 +232,8 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     #[derive(Error, Debug)]
-    enum MyError {
-        #[error("counter already reached")]
-        CounterReached,
-    }
+    #[error("and error happened")]
+    struct SomeError;
 
     fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
         if *counter < tgt {
@@ -249,33 +244,28 @@ mod tests {
         counter
     }
 
-    fn plus_one_with_error(
-        mut counter: View<i32>,
-        Target(tgt): Target<i32>,
-    ) -> core::result::Result<View<i32>, ConditionFailed> {
-        if *counter >= tgt {
-            return Err(ConditionFailed::new("counter already reached"));
+    fn plus_one_async(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
+        if *counter < tgt {
+            *counter += 1;
         }
-
-        *counter += 1;
-        println!("Counter: {}", *counter);
-
-        // Update implements IntoResult
-        Ok(counter)
-    }
-
-    fn plus_one_async(
-        mut counter: View<i32>,
-        Target(tgt): Target<i32>,
-    ) -> Effect<View<i32>, MyError> {
-        if *counter >= tgt {
-            return MyError::CounterReached.into();
-        }
-        *counter += 1;
 
         Effect::of(counter).with_io(|counter| async {
             sleep(Duration::from_millis(10)).await;
             Ok(counter)
+        })
+    }
+
+    fn plus_one_async_with_error(
+        mut counter: View<i32>,
+        Target(tgt): Target<i32>,
+    ) -> Effect<View<i32>, SomeError> {
+        if *counter < tgt {
+            *counter += 1;
+        }
+
+        Effect::of(counter).with_io(|_| async {
+            sleep(Duration::from_millis(10)).await;
+            Err(SomeError)
         })
     }
 
@@ -341,38 +331,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn it_allows_actions_returning_errors() {
-        let mut system = System::from(1);
-        let task = plus_one_async.with_target(1);
-
-        let res = task.run(&mut system).await;
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err().to_string(), "counter already reached");
-    }
-
-    #[tokio::test]
-    async fn it_allows_pure_actions_returning_condition_failed() {
-        let mut system = System::from(1);
-        let task = plus_one_with_error.with_target(1);
+    async fn it_allows_actions_returning_runtime_errors() {
+        let mut system = System::from(0);
+        let task = plus_one_async_with_error.with_target(1);
 
         let res = task.run(&mut system).await;
         assert!(res.is_err());
         assert_eq!(
             res.unwrap_err().to_string(),
-            "condition failed: counter already reached"
+            "task runtime error: and error happened"
         );
     }
 
     #[test]
     fn it_allows_to_dry_run_actions_returning_error() {
         let system = System::from(1);
-        let task = plus_one_async.into_task();
+        let task = plus_one_async_with_error.into_task();
 
         if let Task::Atom(AtomTask { dry_run, .. }) = task {
-            let context = Context::default().with_target(serde_json::to_value(1).unwrap());
-            let res = (dry_run)(&system, &context);
-            assert!(res.is_err());
-            assert_eq!(res.unwrap_err().to_string(), "counter already reached");
+            let context = Context::default().with_target(serde_json::to_value(2).unwrap());
+            let changes = (dry_run)(&system, &context).unwrap();
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 2 },
+                ]))
+                .unwrap()
+            );
         } else {
             panic!("Expected an AtomTask");
         }
@@ -381,7 +366,7 @@ mod tests {
     #[test]
     fn it_allows_to_dry_run_pure_actions() {
         let system = System::from(1);
-        let task = plus_one_with_error.into_task();
+        let task = plus_one.into_task();
 
         if let Task::Atom(AtomTask { dry_run, .. }) = task {
             let context = Context::default().with_target(serde_json::to_value(2).unwrap());

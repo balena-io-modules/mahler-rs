@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
 use crate::system::{FromSystem, System};
-use crate::task::{Context, TaskInputError};
+use crate::task::{Context, InputError};
 
 mod de;
 mod error;
@@ -12,7 +12,7 @@ mod error;
 pub struct Args<T>(pub T);
 
 impl<T: DeserializeOwned + Send> FromSystem for Args<T> {
-    type Error = TaskInputError;
+    type Error = InputError;
 
     fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
         let args = &context.args;

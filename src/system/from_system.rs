@@ -1,10 +1,10 @@
-use crate::task::TaskError;
+use crate::task::Error;
 
 use super::System;
 use crate::task::Context;
 
 pub trait FromSystem: Sized {
-    type Error: Into<TaskError> + 'static;
+    type Error: Into<Error> + 'static;
 
     fn from_system(state: &System, context: &Context) -> Result<Self, Self::Error>;
 
