@@ -1,342 +1,263 @@
 mod boxed;
 mod context;
 mod effect;
+mod errors;
 mod handler;
+mod intent;
+mod into_result;
 mod job;
-mod result;
 
-use json_patch::{Patch, PatchOperation};
+use anyhow::anyhow;
+use anyhow::Context as AnyhowCtx;
+use json_patch::Patch;
 use serde::Serialize;
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::error::{Error, IntoError};
 use crate::system::System;
 
-pub use context::*;
+pub(crate) use context::*;
+pub(crate) use errors::*;
+pub(crate) use into_result::*;
+
 pub use effect::*;
+pub use errors::InputError;
 pub use handler::*;
-pub use job::*;
-pub(crate) use result::*;
-
-#[derive(Debug)]
-pub struct ConditionFailed(String);
-
-impl Default for ConditionFailed {
-    fn default() -> Self {
-        ConditionFailed::new("unknown")
-    }
-}
-
-impl ConditionFailed {
-    fn new(msg: impl Into<String>) -> Self {
-        Self(msg.into())
-    }
-}
-
-impl std::error::Error for ConditionFailed {}
-
-impl Display for ConditionFailed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl IntoError for ConditionFailed {
-    fn into_error(self) -> Error {
-        Error::TaskConditionFailed(self)
-    }
-}
-
-impl<T, O> IntoResult<O> for Option<T>
-where
-    O: Default,
-    T: IntoResult<O>,
-{
-    fn into_result(self, system: &System) -> Result<O> {
-        match self {
-            None => Err(ConditionFailed::default())?,
-            Some(value) => value.into_result(system),
-        }
-    }
-}
-
-pub trait IntoTask {
-    fn into_task(self) -> Task;
-}
+pub use intent::*;
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
 type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
 type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
-type Expand =
-    Arc<dyn Fn(&System, &Context) -> core::result::Result<Vec<Task>, Error> + Send + Sync>;
+type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>> + Send + Sync>;
 
-/// A task is either a concrete unit (atom) of work or a list of tasks
-/// that can be run in sequence or in parallel
+#[derive(Clone)]
+pub struct Action {
+    id: &'static str,
+    scoped: bool,
+    context: Context,
+    dry_run: DryRun,
+    run: Run,
+}
+
+impl Action {
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
+    }
+
+    pub fn id(&self) -> &str {
+        self.id
+    }
+
+    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
+        let target = serde_json::to_value(target).context("Serialization failed")?;
+        Ok(Self {
+            context: self.context.with_target(target),
+            ..self
+        })
+    }
+
+    fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
+        Self {
+            context: self.context.with_arg(key, value),
+            ..self
+        }
+    }
+
+    fn with_path(self, path: impl AsRef<str>) -> Self {
+        Self {
+            context: self.context.with_path(path),
+            ..self
+        }
+    }
+
+    /// Run the task sequentially
+    pub(crate) async fn run(&self, system: &mut System) -> Result<()> {
+        let Action { context, run, .. } = self;
+        let changes = (run)(system, context).await?;
+        system
+            .patch(changes)
+            .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
+        Ok(())
+    }
+
+    pub(crate) fn dry_run(&self, system: &System) -> Result<Patch> {
+        let Action {
+            context, dry_run, ..
+        } = self;
+        (dry_run)(system, context)
+    }
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self
+            .id
+            .split("::")
+            .skip(1)
+            .collect::<Vec<&str>>()
+            .join("::");
+        write!(f, "{}({})", id, self.context.path)
+    }
+}
+
+#[derive(Clone)]
+pub struct Method {
+    id: &'static str,
+    scoped: bool,
+    context: Context,
+    expand: Expand,
+}
+
+impl Method {
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
+    }
+
+    pub fn id(&self) -> &str {
+        self.id
+    }
+
+    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
+        let target = serde_json::to_value(target).context("Serialization failed")?;
+        Ok(Self {
+            context: self.context.with_target(target),
+            ..self
+        })
+    }
+
+    fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
+        Self {
+            context: self.context.with_arg(key, value),
+            ..self
+        }
+    }
+
+    fn with_path(self, path: impl AsRef<str>) -> Self {
+        Self {
+            context: self.context.with_path(path),
+            ..self
+        }
+    }
+
+    pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>> {
+        let Method {
+            context, expand, ..
+        } = self;
+        (expand)(system, context)
+    }
+}
+
+/// A task is either a concrete unit of work (action) or rule to
+/// derive a list of tasks (method)
 #[derive(Clone)]
 pub enum Task {
-    Atom {
-        id: &'static str,
-        scoped: bool,
-        context: Context,
-        dry_run: DryRun,
-        run: Run,
-    },
-    List {
-        id: &'static str,
-        scoped: bool,
-        context: Context,
-        expand: Expand,
-    },
+    Action(Action),
+    Method(Method),
 }
 
 impl Task {
-    pub(crate) fn atom<H, T, I>(id: &'static str, handler: H, context: Context) -> Self
+    pub(crate) fn from_action<H, T, I>(action: H, context: Context) -> Self
     where
         H: Handler<T, Patch, I>,
         I: Send + 'static,
     {
-        let handler_clone = handler.clone();
-        Self::Atom {
-            id,
-            scoped: handler.is_scoped(),
+        let handler_clone = action.clone();
+        Self::Action(Action {
+            id: action.id(),
+            scoped: action.is_scoped(),
             context,
             dry_run: Arc::new(move |system: &System, context: &Context| {
                 let effect = handler_clone.call(system, context);
                 effect.pure()
             }),
             run: Arc::new(move |system: &System, context: &Context| {
-                let effect = handler.call(system, context);
+                let effect = action.call(system, context);
 
-                Box::pin(async {
-                    match effect.run().await {
-                        Ok(changes) => Ok(changes),
-                        Err(err) => Err(Error::Other(Box::new(err))),
-                    }
-                })
+                Box::pin(async { effect.run().await })
             }),
-        }
+        })
     }
 
-    pub(crate) fn list<H, T>(id: &'static str, handler: H, context: Context) -> Self
+    pub(crate) fn from_method<H, T>(method: H, context: Context) -> Self
     where
         H: Handler<T, Vec<Task>>,
     {
-        Self::List {
-            id,
-            scoped: handler.is_scoped(),
+        Self::Method(Method {
+            id: method.id(),
+            scoped: method.is_scoped(),
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
                 // List tasks cannot perform changes to the system
                 // so the Effect returned by this handler is assumed to
                 // be pure
-                handler.call(system, context).pure()
+                method.call(system, context).pure()
             }),
-        }
+        })
     }
 
+    /// Get the unique identifier for the task
     pub fn id(&self) -> &str {
         match self {
-            Self::Atom { id, .. } => id,
-            Self::List { id, .. } => id,
+            Self::Action(Action { id, .. }) => id,
+            Self::Method(Method { id, .. }) => id,
         }
     }
 
-    pub fn context(&self) -> &Context {
+    pub(crate) fn context(&self) -> &Context {
         match self {
-            Self::Atom { context, .. } => context,
-            Self::List { context, .. } => context,
+            Self::Action(Action { context, .. }) => context,
+            Self::Method(Method { context, .. }) => context,
         }
     }
 
+    /// Return true if the task can be parallelized
     pub fn is_scoped(&self) -> bool {
         match self {
-            Self::Atom { scoped, .. } => *scoped,
-            Self::List { scoped, .. } => *scoped,
+            Self::Action(Action { scoped, .. }) => *scoped,
+            Self::Method(Method { scoped, .. }) => *scoped,
         }
     }
 
-    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
-        let target = serde_json::to_value(target)?;
-        let res = match self {
-            Self::Atom {
-                id,
-                scoped,
-                context,
-                dry_run,
-                run,
-            } => Self::Atom {
-                id,
-                scoped,
-                context: context.with_target(target),
-                dry_run,
-                run,
-            },
-            Self::List {
-                id,
-                scoped,
-                context,
-                expand,
-                ..
-            } => {
-                let Context { args, path, .. } = context;
-                Self::List {
-                    id,
-                    scoped,
-                    context: Context { target, args, path },
-                    expand,
-                }
-            }
-        };
-
-        Ok(res)
+    /// Set a target for the task
+    ///
+    /// This returns a result with an error if the serialization of the target fails
+    pub fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
+        match self {
+            Self::Action(task) => task.try_target(target).map(Self::Action),
+            Self::Method(task) => task.try_target(target).map(Self::Method),
+        }
     }
 
+    /// Set a target for the task
+    ///
+    /// This function will panic if the serialization of the target fails
     pub fn with_target<S: Serialize>(self, target: S) -> Self {
         self.try_target(target).unwrap()
     }
 
+    /// Set an argument for the task
     pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         match self {
-            Self::Atom {
-                id,
-                scoped,
-                context,
-                dry_run,
-                run,
-            } => Self::Atom {
-                id,
-                scoped,
-                context: context.with_arg(key, value),
-                dry_run,
-                run,
-            },
-            Self::List {
-                id,
-                scoped,
-                context,
-                expand,
-                ..
-            } => Self::List {
-                id,
-                scoped,
-                context: context.with_arg(key, value),
-                expand,
-            },
+            Self::Action(task) => Self::Action(task.with_arg(key, value)),
+            Self::Method(task) => Self::Method(task.with_arg(key, value)),
         }
     }
 
     pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
         match self {
-            Self::Atom {
-                id,
-                scoped,
-                context,
-                dry_run,
-                run,
-            } => Self::Atom {
-                id,
-                scoped,
-                context: context.with_path(path),
-                dry_run,
-                run,
-            },
-            Self::List {
-                id,
-                scoped: linear,
-                context,
-                expand,
-                ..
-            } => Self::List {
-                id,
-                scoped: linear,
-                context: context.with_path(path),
-                expand,
-            },
+            Self::Action(task) => Self::Action(task.with_path(path)),
+            Self::Method(task) => Self::Method(task.with_path(path)),
         }
-    }
-
-    /// Run every action in the task sequentially and return the
-    /// aggregate changes.
-    /// TODO: this should probably only have crate visibility
-    pub fn dry_run(&self, system: &System) -> Result<Patch> {
-        match self {
-            Self::Atom {
-                context, dry_run, ..
-            } => (dry_run)(system, context),
-            Self::List {
-                context, expand, ..
-            } => {
-                let mut changes: Vec<PatchOperation> = vec![];
-                let jobs = (expand)(system, context)?;
-                let mut system = system.clone();
-                for job in jobs {
-                    let Patch(patch) = job.dry_run(&system)?;
-
-                    // Append a copy of the patch to the total changes
-                    changes.append(&mut patch.clone());
-
-                    // And apply the changes to the system copy
-                    system.patch(Patch(patch))?;
-                }
-                Ok(Patch(changes))
-            }
-        }
-    }
-
-    /// Run the task sequentially
-    pub async fn run(&self, system: &mut System) -> Result<()> {
-        match self {
-            Self::Atom { context, run, .. } => {
-                let changes = (run)(system, context).await?;
-                system.patch(changes)?;
-                Ok(())
-            }
-            Self::List {
-                context, expand, ..
-            } => {
-                let jobs = (expand)(system, context)?;
-                for job in jobs {
-                    Box::pin(job.run(system)).await?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    /// Expand the task into its composing sub-jobs.
-    ///
-    /// If the task is an atom the expansion will fail
-    pub fn expand(&self, system: &System) -> Result<Vec<Task>> {
-        match self {
-            Self::Atom { .. } => Ok(vec![]),
-            Self::List {
-                context, expand, ..
-            } => (expand)(system, context),
-        }
-    }
-}
-
-impl Display for Task {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let id = self
-            .id()
-            .split("::")
-            .skip(1)
-            .collect::<Vec<&str>>()
-            .join("::");
-        write!(f, "{}({})", id, self.context().path)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract::{System as Sys, Target, Update};
+    use crate::extract::{System as Sys, Target, View};
     use crate::system::System;
-    use json_patch::Patch;
     use serde::{Deserialize, Serialize};
     use serde_json::{from_value, json};
     use std::collections::HashMap;
@@ -344,12 +265,10 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     #[derive(Error, Debug)]
-    enum MyError {
-        #[error("counter already reached")]
-        CounterReached,
-    }
+    #[error("and error happened")]
+    struct SomeError;
 
-    fn plus_one(mut counter: Update<i32>, Target(tgt): Target<i32>) -> Update<i32> {
+    fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
         if *counter < tgt {
             *counter += 1;
         }
@@ -358,36 +277,34 @@ mod tests {
         counter
     }
 
-    fn plus_two(counter: Update<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
-        if tgt - *counter < 2 {
-            // Returning an empty result tells the planner
-            // the task is not applicable to reach the target
-            return vec![];
+    fn plus_one_async(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
+        if *counter < tgt {
+            *counter += 1;
         }
 
-        vec![plus_one.with_target(tgt), plus_one.with_target(tgt)]
+        Effect::of(counter).with_io(|counter| async {
+            sleep(Duration::from_millis(10)).await;
+            Ok(counter)
+        })
     }
 
-    fn plus_one_async(
-        counter: Update<i32>,
+    fn plus_one_async_with_error(
+        mut counter: View<i32>,
         Target(tgt): Target<i32>,
-    ) -> Effect<Update<i32>, MyError> {
-        if *counter >= tgt {
-            return Effect::from_error(MyError::CounterReached);
+    ) -> Effect<View<i32>, SomeError> {
+        if *counter < tgt {
+            *counter += 1;
         }
 
-        Effect::of(counter).with_io(|mut counter| async {
+        Effect::of(counter).with_io(|_| async {
             sleep(Duration::from_millis(10)).await;
-            *counter += 1;
-            Ok(counter)
+            Err(SomeError)
         })
     }
 
     #[test]
     fn it_gets_metadata_from_function() {
-        let job = plus_one.into_job();
-
-        assert_eq!(job.id(), "gustav::task::tests::plus_one");
+        assert_eq!(plus_one.id(), "gustav::task::tests::plus_one");
     }
 
     #[test]
@@ -401,10 +318,10 @@ mod tests {
         }
 
         fn plus_one_sys(
-            mut counter: Update<i32>,
+            mut counter: View<i32>,
             Target(tgt): Target<i32>,
             Sys(_): Sys<State>,
-        ) -> Update<i32> {
+        ) -> View<i32> {
             if *counter < tgt {
                 *counter += 1;
             }
@@ -419,88 +336,113 @@ mod tests {
         assert!(!task.is_scoped());
     }
 
-    #[test]
-    fn it_allows_to_dry_run_tasks() {
-        let system = System::from(0);
-        let task = plus_one.with_target(1);
-
-        // Get the list of changes that the action performs
-        let changes = task.dry_run(&system).unwrap();
-        assert_eq!(
-            changes,
-            from_value::<Patch>(json!([
-              { "op": "replace", "path": "", "value": 1 },
-            ]))
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn it_allows_to_dry_run_composite_tasks() {
-        let system = System::from(0);
-        let task = plus_two.with_target(2);
-
-        // Get the list of changes that the method performs
-        let changes = task.dry_run(&system).unwrap();
-        assert_eq!(
-            changes,
-            from_value::<Patch>(json!([
-              { "op": "replace", "path": "", "value": 1 },
-              { "op": "replace", "path": "", "value": 2 },
-            ]))
-            .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn it_allows_to_run_composite_tasks() {
-        let mut system = System::from(0);
-        let task = plus_two.with_target(2);
-
-        // Run the action
-        task.run(&mut system).await.unwrap();
-
-        let state = system.state::<i32>().unwrap();
-
-        // The referenced value was modified
-        assert_eq!(state, 2);
-    }
-
     #[tokio::test]
     async fn it_runs_async_actions() {
-        let mut system = System::from(0);
+        let mut system = System::try_from(0).unwrap();
         let task = plus_one.with_target(1);
 
-        // Run the action
-        task.run(&mut system).await.unwrap();
+        if let Task::Action(action) = task {
+            // Run the action
+            action.run(&mut system).await.unwrap();
 
-        let state = system.state::<i32>().unwrap();
+            let state = system.state::<i32>().unwrap();
 
-        // The referenced value was modified
-        assert_eq!(state, 1);
+            // The referenced value was modified
+            assert_eq!(state, 1);
+        } else {
+            panic!("Expected an Action task");
+        }
     }
 
     #[tokio::test]
     async fn it_allows_extending_actions_with_effect() {
-        let mut system = System::from(0);
+        let mut system = System::try_from(0).unwrap();
         let task = plus_one_async.with_target(1);
 
-        // Run the action
-        task.run(&mut system).await.unwrap();
+        if let Task::Action(action) = task {
+            // Run the action
+            action.run(&mut system).await.unwrap();
 
-        // Check that the system state was modified
-        let state = system.state::<i32>().unwrap();
-        assert_eq!(state, 1);
+            // Check that the system state was modified
+            let state = system.state::<i32>().unwrap();
+            assert_eq!(state, 1);
+        } else {
+            panic!("Expected an Action task");
+        }
     }
 
     #[tokio::test]
-    async fn it_allows_actions_returning_errors() {
-        let mut system = System::from(1);
-        let task = plus_one_async.with_target(1);
+    async fn it_allows_actions_returning_runtime_errors() {
+        let mut system = System::try_from(0).unwrap();
+        let task = plus_one_async_with_error.with_target(1);
 
-        let res = task.run(&mut system).await;
-        assert!(res.is_err());
-        assert_eq!(res.unwrap_err().to_string(), "counter already reached");
+        if let Task::Action(action) = task {
+            let res = action.run(&mut system).await;
+            assert!(res.is_err());
+            assert_eq!(
+                res.unwrap_err().to_string(),
+                "task runtime error: and error happened"
+            );
+        } else {
+            panic!("Expected an Action task");
+        }
+    }
+
+    #[test]
+    fn it_allows_to_dry_run_actions_returning_error() {
+        let system = System::try_from(1).unwrap();
+        let task = plus_one_async_with_error.with_target(2);
+
+        if let Task::Action(action) = task {
+            let changes = action.dry_run(&system).unwrap();
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 2 },
+                ]))
+                .unwrap()
+            );
+        } else {
+            panic!("Expected an Action task");
+        }
+    }
+
+    #[test]
+    fn it_allows_to_dry_run_pure_actions() {
+        let system = System::try_from(1).unwrap();
+        let task = plus_one.with_target(2);
+
+        if let Task::Action(action) = task {
+            let changes = action.dry_run(&system).unwrap();
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 2 },
+                ]))
+                .unwrap()
+            );
+        } else {
+            panic!("Expected an Action task");
+        }
+    }
+
+    #[test]
+    fn it_allows_to_dry_run_async_actions() {
+        let system = System::try_from(1).unwrap();
+        let task = plus_one_async.with_target(2);
+
+        if let Task::Action(action) = task {
+            let changes = action.dry_run(&system).unwrap();
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 2 },
+                ]))
+                .unwrap()
+            );
+        } else {
+            panic!("Expected an Action task");
+        }
     }
 
     // State needs to be clone in order for Target to implement IntoSystem
@@ -509,7 +451,7 @@ mod tests {
         counters: HashMap<String, i32>,
     }
 
-    fn update_counter(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
+    fn update_counter(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
             *counter += 1;
         }
@@ -524,20 +466,24 @@ mod tests {
             counters: [("a".to_string(), 0), ("b".to_string(), 0)].into(),
         };
 
-        let mut system = System::from(state);
+        let mut system = System::try_from(state).unwrap();
         let task = update_counter.with_target(2).with_path("/counters/a");
 
-        // Run the action
-        task.run(&mut system).await.unwrap();
+        if let Task::Action(action) = task {
+            // Run the action
+            action.run(&mut system).await.unwrap();
 
-        let state = system.state::<State>().unwrap();
+            let state = system.state::<State>().unwrap();
 
-        // Only the referenced value was modified
-        assert_eq!(
-            state,
-            State {
-                counters: [("a".to_string(), 1), ("b".to_string(), 0)].into()
-            }
-        );
+            // Only the referenced value was modified
+            assert_eq!(
+                state,
+                State {
+                    counters: [("a".to_string(), 1), ("b".to_string(), 0)].into()
+                }
+            );
+        } else {
+            panic!("Expected an Action Task");
+        }
     }
 }

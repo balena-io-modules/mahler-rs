@@ -1,33 +1,53 @@
-use gustav::extract::{Target, Update};
-use gustav::system::System;
-use gustav::task::*;
-use json_patch::Patch;
-use serde_json::{from_value, json};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::time::sleep;
 
-fn my_task_effect(mut counter: Update<i32>, tgt: Target<i32>) -> Effect<Update<i32>> {
-    if *counter < *tgt {
+use gustav::extract::{Target, View};
+use gustav::task::*;
+use gustav::worker::Worker;
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct Counters(HashMap<String, i32>);
+
+fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
+    if *counter < tgt {
+        // Modify the counter if we are below target
         *counter += 1;
     }
 
-    // This is not necessary, just returning the view
-    // works
-    Effect::of(counter)
+    // Return the updated counter. The I/O part of the
+    // effect will only be called if the job is chosen
+    // in the workflow which will only happens if there are
+    // changes
+    Effect::of(counter).with_io(|counter| async {
+        sleep(Duration::from_millis(10)).await;
+        Ok(counter)
+    })
 }
 
-// This test replicates a test inside the task module, it is here just as a
-// placeholder to ensure the library is exporting everything needed to use the API
-#[test]
-fn it_allows_to_dry_run_tasks() {
-    let system = System::from(0);
-    let action = my_task_effect.with_target(1);
+#[tokio::test]
+// this is just a placeholder test to check that library modules
+// are accessible
+async fn test_worker() {
+    let worker = Worker::new()
+        .job("/{counter}", update(plus_one))
+        .initial_state(Counters(HashMap::from([
+            ("one".to_string(), 0),
+            ("two".to_string(), 0),
+        ])))
+        .seek_target(Counters(HashMap::from([
+            ("one".to_string(), 2),
+            ("two".to_string(), 0),
+        ])));
 
-    // Get the list of changes that the action performs
-    let changes = action.dry_run(&system).unwrap();
+    let worker = worker.wait(None).await.unwrap();
+    let state = worker.state();
     assert_eq!(
-        changes,
-        from_value::<Patch>(json!([
-          { "op": "replace", "path": "", "value": 1 },
+        state,
+        Counters(HashMap::from([
+            ("one".to_string(), 2),
+            ("two".to_string(), 0),
         ]))
-        .unwrap()
     );
 }

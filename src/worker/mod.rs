@@ -1,27 +1,24 @@
 mod distance;
 mod domain;
-mod intent;
 mod planner;
 mod workflow;
 
 use log::{debug, error, info, warn};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use std::{
-    fmt::{self, Display},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
+use thiserror::Error;
 use tokio::task::JoinHandle;
 
 pub use domain::*;
-pub use intent::*;
 pub use planner::*;
 pub use workflow::*;
 
-use crate::{error::Error, system::System};
+use crate::system::System;
+use crate::task::{self, Intent};
 
 pub struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.
@@ -137,14 +134,27 @@ impl<T> Worker<T, Uninitialized> {
         T: Serialize + DeserializeOwned,
     {
         let Uninitialized { domain, opts, .. } = self.inner;
-        // this can panic
-        let system = System::from(state);
+
+        // we want to panic early while setting up the worker
+        let system = System::try_from(state).expect("failed to serialize the initial state");
         Worker::from_inner(Ready {
             planner: Planner::new(domain),
             system,
             opts,
         })
     }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum RuntimeError {
+    #[error(transparent)]
+    TaskFailed(#[from] task::Error),
+
+    #[error("workflow interrupted")]
+    Interrupted,
+
+    #[error(transparent)]
+    PlanNotFound(#[from] planner::Error),
 }
 
 impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
@@ -168,7 +178,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
             system: &mut System,
             tgt: &Value,
             interrupted: &AtomicBool,
-        ) -> Result<bool, Error> {
+        ) -> Result<bool, RuntimeError> {
             // TODO: maybe use a timeout to finding the plan
             let workflow = planner.find_workflow(system, tgt.clone())?;
             if workflow.is_empty() {
@@ -199,20 +209,21 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                 {
                     Ok(true) => break,
                     Ok(false) => true,
-                    Err(Error::WorkflowInterrupted(_)) => {
+                    Err(RuntimeError::Interrupted) => {
                         // TODO: implement some way to report the worker status
                         // rather than just logging
                         info!("workflow interrupted due to user request");
                         return (planner, system);
                     }
-                    Err(Error::PlanSearchFailed(PlanningError::WorkflowNotFound)) => {
+                    Err(RuntimeError::PlanNotFound(Error::NotFound)) => {
                         warn!("no plan found");
                         false
                     }
-                    Err(Error::PlanSearchFailed(e)) => {
+                    Err(RuntimeError::PlanNotFound(e)) => {
                         if cfg!(debug_assertions) {
                             // Return the error in debug mode
                             error!("plan search failed: {}", e);
+                            // TODO: do we want to return an error here too?
                             return (planner, system);
                         } else {
                             warn!("plan search failed: {}", e);
@@ -248,14 +259,9 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("timeout reached while waiting for the worker to finish")]
 pub struct Timeout;
-impl std::error::Error for Timeout {}
-impl Display for Timeout {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "timeout reached while waiting for the worker to finish")
-    }
-}
 
 impl<T: DeserializeOwned> Worker<T, Running> {
     pub async fn cancel(self) -> Worker<T, Ready> {
@@ -318,7 +324,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::extract::{Target, Update};
+    use crate::extract::{Target, View};
     use crate::task::*;
     use serde::Deserialize;
     use tokio::time::sleep;
@@ -326,7 +332,7 @@ mod tests {
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct Counters(HashMap<String, i32>);
 
-    fn plus_one(mut counter: Update<i32>, Target(tgt): Target<i32>) -> Effect<Update<i32>> {
+    fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
         if *counter < tgt {
             // Modify the counter if we are below target
             *counter += 1;

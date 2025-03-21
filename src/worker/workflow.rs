@@ -5,29 +5,15 @@ use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicBool;
 
+use super::RuntimeError;
 use crate::dag::{Dag, Node};
 use crate::system::System;
-use crate::task::{IntoTask, Task};
-use crate::{Error, IntoError};
-
-#[derive(Debug)]
-pub struct Interrupted {}
-impl std::error::Error for Interrupted {}
-impl Display for Interrupted {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "execution of the workflow was interrupted")
-    }
-}
-impl IntoError for Interrupted {
-    fn into_error(self) -> Error {
-        Error::WorkflowInterrupted(self)
-    }
-}
+use crate::task::Action;
 
 #[derive(Hash)]
-struct ActionId<'s> {
+struct WorkUnitId<'s> {
     /// The task id
-    task: String,
+    task_id: String,
     /// The task path
     path: String,
     /// The state that is used to test the action
@@ -35,7 +21,7 @@ struct ActionId<'s> {
 }
 
 #[derive(Clone)]
-pub(crate) struct Action {
+pub(crate) struct WorkUnit {
     /**
      * Unique id for the action. This is calculated by
      * hashing the .
@@ -47,23 +33,23 @@ pub(crate) struct Action {
      *
      * Only atomic tasks should be added to a worflow item
      */
-    pub task: Task,
+    pub task: Action,
 }
 
-impl Action {
-    pub fn new(id: u64, task: Task) -> Self {
+impl WorkUnit {
+    pub fn new(id: u64, task: Action) -> Self {
         Self { id, task }
     }
 
-    pub fn new_id(task: &Task, state: &Value) -> Result<u64, jsonptr::resolve::ResolveError> {
+    pub fn new_id(task: &Action, state: &Value) -> Result<u64, jsonptr::resolve::ResolveError> {
         let pointer = task.context().path.as_ref();
 
         // Resolve the value that will be modified by
         // the task
         let state = pointer.resolve(state)?;
 
-        let action_id = ActionId {
-            task: String::from(task.id()),
+        let action_id = WorkUnitId {
+            task_id: String::from(task.id()),
             path: task.context().path.to_string(),
             state,
         };
@@ -79,20 +65,24 @@ impl Action {
     }
 }
 
-impl IntoTask for Action {
-    fn into_task(self) -> Task {
-        self.task
+impl From<WorkUnit> for Action {
+    fn from(action: WorkUnit) -> Action {
+        action.task
     }
 }
 
-impl Display for Action {
+impl Display for WorkUnit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.task.fmt(f)
     }
 }
 
-impl<T: IntoTask + Clone> Dag<T> {
-    pub async fn execute(self, system: &mut System, interrupted: &AtomicBool) -> Result<(), Error> {
+impl<T: Into<Action> + Clone> Dag<T> {
+    pub(crate) async fn execute(
+        self,
+        system: &mut System,
+        interrupted: &AtomicBool,
+    ) -> Result<(), RuntimeError> {
         // TODO: implement parallel execution of the DAG
         for node in self.iter() {
             let value = {
@@ -106,12 +96,12 @@ impl<T: IntoTask + Clone> Dag<T> {
                 }
             };
 
-            let task = value.into_task();
+            let task = value.into();
             task.run(system).await?;
 
             // Check if the task was interrupted before continuing
             if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(Interrupted {})?;
+                return Err(RuntimeError::Interrupted)?;
             }
         }
         Ok(())
@@ -120,12 +110,12 @@ impl<T: IntoTask + Clone> Dag<T> {
 
 #[derive(Default, Clone)]
 pub struct Workflow {
-    pub(crate) dag: Dag<Action>,
+    pub(crate) dag: Dag<WorkUnit>,
     pub(crate) pending: Vec<PatchOperation>,
 }
 
 impl Workflow {
-    pub(crate) fn as_dag(&self) -> &Dag<Action> {
+    pub(crate) fn as_dag(&self) -> &Dag<WorkUnit> {
         &self.dag
     }
 
@@ -145,7 +135,7 @@ impl Workflow {
         self,
         system: &mut System,
         interrupted: &AtomicBool,
-    ) -> Result<(), Error> {
+    ) -> Result<(), RuntimeError> {
         self.dag.execute(system, interrupted).await
     }
 }

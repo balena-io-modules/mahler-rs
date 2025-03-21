@@ -1,30 +1,29 @@
+use anyhow::Context as AnyhowCtx;
 use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
-use crate::error::{Error, IntoError};
 use crate::system::{FromSystem, System};
-use crate::task::Context;
+use crate::task::{Context, InputError};
 
 mod de;
 mod error;
-
-pub use error::ArgsDeserializationError;
-
-impl IntoError for ArgsDeserializationError {
-    fn into_error(self) -> Error {
-        Error::ArgsExtractFailed(self)
-    }
-}
 
 #[derive(Debug)]
 pub struct Args<T>(pub T);
 
 impl<T: DeserializeOwned + Send> FromSystem for Args<T> {
-    type Error = ArgsDeserializationError;
+    type Error = InputError;
 
     fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
         let args = &context.args;
-        T::deserialize(de::PathDeserializer::new(args)).map(Args)
+        let value = T::deserialize(de::PathDeserializer::new(args)).with_context(|| {
+            format!(
+                "Failed to deserialize {args} into {}",
+                std::any::type_name::<T>()
+            )
+        })?;
+
+        Ok(Args(value))
     }
 }
 
@@ -57,7 +56,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let Args(name): Args<String> =
             Args::from_system(&system, &Context::new().with_arg("name", "one")).unwrap();
@@ -73,7 +72,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let Args((first, second)): Args<(String, String)> = Args::from_system(
             &system,
@@ -95,7 +94,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let Args(map): Args<HashMap<String, String>> = Args::from_system(
             &system,

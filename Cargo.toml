@@ -5,6 +5,7 @@ edition = "2021"
 description = "An automated job orchestration library to build and execute dynamic workflows"
 
 [dependencies]
+anyhow = "1.0.97"
 json-patch = "3"
 jsonptr = "0.6.0"
 log = "0.4.25"
@@ -12,7 +13,7 @@ matchit = "0.8.4"
 serde = { version = "1.0.197" }
 serde_json = "1.0.120"
 thiserror = "2"
-tokio = { version = "1.43.0", features = ["rt"] }
+tokio = { version = "1.43.0", features = ["rt", "time"] }
 
 [dev-dependencies]
 dedent = "0.1.1"

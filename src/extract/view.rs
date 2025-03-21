@@ -1,161 +1,104 @@
+use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::{diff, Patch};
 use jsonptr::resolve::ResolveError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::fmt::{self, Display};
 use std::ops::{Deref, DerefMut};
 
-use crate::error::{Error, IntoError};
 use crate::path::Path;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, Effect, IntoEffect, IntoResult, Result};
+use crate::task::{
+    Context, Effect, Error, InputError, IntoEffect, IntoResult, Result, UnexpectedError,
+};
 
-/// Extracts a sub-element of a state S as indicated by
-/// a path.
+/// Extracts a pointer to a sub-element of the global state indicated
+/// by the path.
 ///
-/// The state is None if the path does not exist under the parent
-/// path and it can be created using the `create` function
-#[derive(Debug, Clone)]
-pub struct View<T> {
+/// The type of the sub-element is given by the type parameter T.
+///
+/// The pointer can be null, meaning the parent of the element exists,
+/// but the specific location pointed by the path does not exist.
+#[derive(Debug)]
+pub struct Pointer<T> {
     state: Option<T>,
     path: Path,
 }
 
-#[derive(Debug)]
-pub enum ViewExtractError {
-    CannotResolvePath {
-        path: String,
-        reason: jsonptr::resolve::ResolveError,
-    },
-    DeserializationFailed(serde_json::error::Error),
-}
-
-impl std::error::Error for ViewExtractError {}
-
-impl Display for ViewExtractError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ViewExtractError::CannotResolvePath { path, reason } => {
-                write!(
-                    f,
-                    "cannot resolve path `{}` on system state: {}",
-                    path, reason
-                )?;
-            }
-            ViewExtractError::DeserializationFailed(err) => err.fmt(f)?,
-        }
-
-        Ok(())
-    }
-}
-
-impl IntoError for ViewExtractError {
-    fn into_error(self) -> Error {
-        Error::ViewExtractFailed(self)
-    }
-}
-
-#[derive(Debug)]
-pub enum ViewResultError {
-    PathAssignFailed {
-        path: String,
-        reason: jsonptr::assign::AssignError,
-    },
-    DeserializationFailed(serde_json::error::Error),
-}
-
-impl std::error::Error for ViewResultError {}
-
-impl Display for ViewResultError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ViewResultError::PathAssignFailed { path, reason } => {
-                write!(
-                    f,
-                    "cannot assign path `{}` on system state: {}",
-                    path, reason
-                )
-            }
-            ViewResultError::DeserializationFailed(err) => err.fmt(f),
-        }
-    }
-}
-
-impl IntoError for ViewResultError {
-    fn into_error(self) -> Error {
-        Error::ViewResultFailed(self)
-    }
-}
-
-impl<T> View<T> {
-    pub(super) fn new(state: Option<T>, path: Path) -> Self {
-        View { state, path }
+impl<T> Pointer<T> {
+    // The only way to create a pointer is via the
+    // from_system method
+    fn new(state: Option<T>, path: Path) -> Self {
+        Pointer { state, path }
     }
 
-    /// Modify the internal view value to the value
-    /// passed as input
-    pub fn replace(&mut self, value: impl Into<T>) -> &mut T {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Assign a value to location indicated by
+    /// the path.
+    pub fn assign(&mut self, value: impl Into<T>) -> &mut T {
         self.state = Some(value.into());
         self.state.as_mut().unwrap()
     }
 
-    /// Clear the internal view value
-    pub fn remove(&mut self) {
+    /// Clear the value at the location indicated by
+    /// the path
+    pub fn unassign(&mut self) {
         self.state = None;
     }
-}
 
-impl<T: Default> View<T> {
-    /// Assign the default value for the type
-    /// to the view
-    pub fn zero(&mut self) -> &mut T {
-        self.replace(T::default())
+    /// Initialize the location pointed by the path
+    /// with the defaut value of the type T.
+    pub fn zero(&mut self) -> &mut T
+    where
+        T: Default,
+    {
+        self.assign(T::default())
     }
 }
 
-impl<T: DeserializeOwned> FromSystem for View<T> {
-    type Error = ViewExtractError;
+impl<T: DeserializeOwned> FromSystem for Pointer<T> {
+    type Error = InputError;
 
     fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
-        let pointer = context.path.as_ref();
+        let json_ptr = context.path.as_ref();
         let root = system.root();
 
         // Use the parent of the pointer unless we are at the root
-        let parent = pointer.parent().unwrap_or(pointer);
+        let parent = json_ptr.parent().unwrap_or(json_ptr);
 
         // Try to resolve the parent or fail
         parent
             .resolve(root)
-            .map_err(|e| ViewExtractError::CannotResolvePath {
-                path: context.path.to_string(),
-                reason: e,
-            })?;
+            .with_context(|| format!("Failed to resolve path {}", context.path))?;
 
         // At this point we assume that if the pointer cannot be
         // resolved is because the value does not exist yet unless
         // the parent is a scalar
-        let state: Option<T> = match pointer.resolve(root) {
-            Ok(value) => Some(
-                serde_json::from_value::<T>(value.clone())
-                    .map_err(ViewExtractError::DeserializationFailed)?,
-            ),
+        let state: Option<T> = match json_ptr.resolve(root) {
+            Ok(value) => Some(serde_json::from_value::<T>(value.clone()).with_context(|| {
+                format!(
+                    "Failed to deserialize {value} into {}",
+                    std::any::type_name::<T>()
+                )
+            })?),
             Err(e) => match e {
                 ResolveError::NotFound { .. } => None,
                 ResolveError::OutOfBounds { .. } => None,
                 _ => {
-                    return Err(ViewExtractError::CannotResolvePath {
-                        path: context.path.to_string(),
-                        reason: e,
-                    })
+                    return Err(
+                        anyhow!(e).context(format!("Failed to resolve path {}", context.path))
+                    )?;
                 }
             },
         };
 
-        Ok(View::new(state, context.path.clone()))
+        Ok(Pointer::new(state, context.path.clone()))
     }
 }
 
-impl<T> Deref for View<T> {
+impl<T> Deref for Pointer<T> {
     type Target = Option<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -163,40 +106,41 @@ impl<T> Deref for View<T> {
     }
 }
 
-impl<T> DerefMut for View<T> {
+impl<T> DerefMut for Pointer<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.state
     }
 }
 
-impl<T: Serialize> IntoResult<Patch> for View<T> {
+impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
     fn into_result(self, system: &System) -> Result<Patch> {
         // Get the root value
         let mut after = system.clone();
         let root = after.root_mut();
 
-        let pointer = self.path.as_ref();
+        let json_ptr = self.path.as_ref();
 
         if let Some(state) = self.state {
-            let value =
-                serde_json::to_value(state).map_err(ViewResultError::DeserializationFailed)?;
+            let value = serde_json::to_value(state)
+                .with_context(|| "Failed to serialize pointer value")
+                .map_err(UnexpectedError::from)?;
 
             // Assign the state to the copy
-            pointer
+            json_ptr
                 .assign(root, value)
-                .map_err(|e| ViewResultError::PathAssignFailed {
-                    path: self.path.to_string(),
-                    reason: e,
-                })?;
+                .with_context(|| format!("Failed to assign path {}", self.path))
+                .map_err(UnexpectedError::from)?;
         } else {
             // Otherwise delete the path at the pointer
-            pointer.delete(root);
+            json_ptr.delete(root);
         }
         Ok(diff(system.root(), root))
     }
 }
 
-impl<T: Serialize> IntoEffect<Patch, Error> for View<T> {
+// Allow tasks to return a pointer
+// This converts the pointer into a pure effect
+impl<T: Serialize> IntoEffect<Patch, Error> for Pointer<T> {
     fn into_effect(self, system: &System) -> Effect<Patch, Error> {
         Effect::from(self.into_result(system))
     }
@@ -205,139 +149,56 @@ impl<T: Serialize> IntoEffect<Patch, Error> for View<T> {
 /// Extracts a sub-element of a state S as indicated by
 /// a path.
 ///
-/// The state is always initialized to the type default,
-/// no matter if it already exists.
-#[derive(Debug, Clone)]
-pub struct Create<T> {
-    state: T,
-    path: Path,
+/// Differently from Pointer, the View presumes the location
+/// pointed by the value exists and extraction will fail otherwise
+#[derive(Debug)]
+pub struct View<T>(Pointer<T>);
+
+impl<T> View<T> {
+    pub fn path(&self) -> &Path {
+        self.0.path()
+    }
 }
 
-impl<T: DeserializeOwned + Default> FromSystem for Create<T> {
-    type Error = ViewExtractError;
+impl<T: DeserializeOwned> FromSystem for View<T> {
+    type Error = InputError;
 
     fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
-        // We unwrap the call to parse because the path should
-        // be validated at this point
-        let pointer = context.path.as_ref();
-        let root = system.root();
+        let pointer = Pointer::<T>::from_system(system, context)?;
 
-        // Use the parent of the pointer unless we are at the root
-        let parent = pointer.parent().unwrap_or(pointer);
-
-        // Try to resolve the parent or fail
-        parent
-            .resolve(root)
-            .map_err(|e| ViewExtractError::CannotResolvePath {
-                path: context.path.to_string(),
-                reason: e,
-            })?;
-
-        // At this point we assume that if the pointer cannot be
-        // resolved is because the value does not exist yet unless
-        // the parent is a scalar
-        if let Err(e) = pointer.resolve(root) {
-            match e {
-                ResolveError::NotFound { .. } => (),
-                ResolveError::OutOfBounds { .. } => (),
-                _ => {
-                    return Err(ViewExtractError::CannotResolvePath {
-                        path: context.path.to_string(),
-                        reason: e,
-                    })
-                }
-            };
+        if pointer.state.is_none() {
+            return Err(anyhow!("Path {} does not exist", context.path).into());
         }
 
-        Ok(Create {
-            state: T::default(),
-            path: context.path.clone(),
-        })
+        Ok(View(pointer))
     }
 }
 
-impl<T: Serialize> IntoResult<Patch> for Create<T> {
-    fn into_result(self, system: &System) -> Result<Patch> {
-        View::<T>::new(Some(self.state), self.path).into_result(system)
-    }
-}
-
-impl<T: Serialize> IntoEffect<Patch, Error> for Create<T> {
-    fn into_effect(self, system: &System) -> Effect<Patch, Error> {
-        Effect::from(self.into_result(system))
-    }
-}
-
-impl<T> Deref for Create<T> {
+impl<T> Deref for View<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.state
+        // we can unwrap here because we know the state is not None
+        self.0.state.as_ref().unwrap()
     }
 }
 
-impl<T> DerefMut for Create<T> {
+impl<T> DerefMut for View<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
+        // we can unwrap here because we know the state is not None
+        self.0.state.as_mut().unwrap()
     }
 }
 
-/// Extracts a sub-element of a state S as indicated by
-/// a path.
-///
-/// Initializing the extractor will fail if there is no value at the
-/// given path
-#[derive(Debug, Clone)]
-pub struct Update<T> {
-    state: T,
-    path: Path,
-}
-
-impl<T: DeserializeOwned> FromSystem for Update<T> {
-    type Error = ViewExtractError;
-
-    fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
-        let pointer = context.path.as_ref();
-        let root = system.root();
-
-        // If the pointer cannot be resolved for any
-        // reason, return an error
-        let value = pointer
-            .resolve(root)
-            .map_err(|e| ViewExtractError::CannotResolvePath {
-                path: context.path.to_string(),
-                reason: e,
-            })?;
-        let state = serde_json::from_value::<T>(value.clone())
-            .map_err(ViewExtractError::DeserializationFailed)?;
-
-        Ok(Update {
-            state,
-            path: context.path.clone(),
-        })
-    }
-}
-
-impl<T> Deref for Update<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
-}
-
-impl<T> DerefMut for Update<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
-    }
-}
-
-impl<T: Serialize> IntoResult<Patch> for Update<T> {
+impl<T: Serialize> IntoResult<Patch> for View<T> {
     fn into_result(self, system: &System) -> Result<Patch> {
-        View::<T>::new(Some(self.state), self.path).into_result(system)
+        self.0.into_result(system)
     }
 }
-impl<T: Serialize> IntoEffect<Patch, Error> for Update<T> {
+
+// Allow tasks to return a view
+// This converts the view into a pure effect
+impl<T: Serialize> IntoEffect<Patch, Error> for View<T> {
     fn into_effect(self, system: &System) -> Effect<Patch, Error> {
         Effect::from(self.into_result(system))
     }
@@ -363,26 +224,26 @@ mod tests {
     }
 
     #[test]
-    fn it_extracts_an_existing_value() {
+    fn it_extracts_an_existing_value_using_a_pointer() {
         let mut numbers = HashMap::new();
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
-        let mut view: View<i32> =
-            View::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
+        let mut ptr: Pointer<i32> =
+            Pointer::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
 
-        assert_eq!(view.as_ref(), Some(&1));
+        assert_eq!(ptr.as_ref(), Some(&1));
 
-        let value = view.as_mut().unwrap();
+        let value = ptr.as_mut().unwrap();
         *value = 2;
 
         // Get the list changes to the view
 
-        let changes = view.into_result(&system).unwrap();
+        let changes = ptr.into_result(&system).unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -393,104 +254,65 @@ mod tests {
     }
 
     #[test]
-    fn it_fails_if_path_is_invalid() {
+    fn it_fails_if_pointed_path_is_invalid() {
         let mut numbers = HashMap::new();
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
+        assert!(Pointer::<i32>::from_system(
+            &system,
+            &Context::new().with_path("/numbers/one/two"),
+        )
+        .is_err());
         assert!(
-            View::<i32>::from_system(&system, &Context::new().with_path("/numbers/one/two"),)
-                .is_err()
-        );
-        assert!(
-            View::<i32>::from_system(&system, &Context::new().with_path("/none/two"),).is_err()
+            Pointer::<i32>::from_system(&system, &Context::new().with_path("/none/two"),).is_err()
         );
     }
 
     #[test]
-    fn it_creates_a_value() {
+    fn it_assigns_a_value_to_pointed_path() {
         let mut numbers = HashMap::new();
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
+
+        let mut ptr: Pointer<i32> =
+            Pointer::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
+
+        assert_eq!(ptr.as_ref(), None);
+
+        ptr.assign(3);
+
+        // Get the list changes to the view
+        let changes = ptr.into_result(&system).unwrap();
+        assert_eq!(
+            changes,
+            serde_json::from_value::<Patch>(json!([
+              { "op": "add", "path": "/numbers/three", "value": 3 },
+            ]))
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn it_allows_changing_a_value_with_a_view() {
+        let mut numbers = HashMap::new();
+        numbers.insert("one".to_string(), 1);
+        numbers.insert("two".to_string(), 2);
+
+        let state = State { numbers };
+
+        let system = System::try_from(state).unwrap();
 
         let mut view: View<i32> =
-            View::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
-
-        assert_eq!(view.as_ref(), None);
-
-        view.replace(3);
-
-        // Get the list changes to the view
-        let changes = view.into_result(&system).unwrap();
-        assert_eq!(
-            changes,
-            serde_json::from_value::<Patch>(json!([
-              { "op": "add", "path": "/numbers/three", "value": 3 },
-            ]))
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn it_creates_a_value_with_a_create_view() {
-        let mut numbers = HashMap::new();
-        numbers.insert("one".to_string(), 1);
-        numbers.insert("two".to_string(), 2);
-
-        let state = State { numbers };
-
-        let system = System::from(state);
-
-        let mut view: Create<i32> =
-            Create::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
-        *view = 3;
-
-        // Get the list changes to the view
-        let changes = view.into_result(&system).unwrap();
-        assert_eq!(
-            changes,
-            serde_json::from_value::<Patch>(json!([
-              { "op": "add", "path": "/numbers/three", "value": 3 },
-            ]))
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn it_fails_to_initialize_create_view_if_path_is_invalid() {
-        let mut numbers = HashMap::new();
-        numbers.insert("one".to_string(), 1);
-        numbers.insert("two".to_string(), 2);
-
-        let state = State { numbers };
-
-        let system = System::from(state);
-
-        assert!(
-            Create::<i32>::from_system(&system, &Context::new().with_path("/none/three")).is_err()
-        );
-    }
-
-    #[test]
-    fn it_allows_changing_a_value_with_an_update_view() {
-        let mut numbers = HashMap::new();
-        numbers.insert("one".to_string(), 1);
-        numbers.insert("two".to_string(), 2);
-
-        let state = State { numbers };
-
-        let system = System::from(state);
-
-        let mut view: Update<i32> =
-            Update::from_system(&system, &Context::new().with_path("/numbers/two")).unwrap();
+            View::from_system(&system, &Context::new().with_path("/numbers/two")).unwrap();
         *view = 3;
 
         // Get the list changes to the view
@@ -505,44 +327,43 @@ mod tests {
     }
 
     #[test]
-    fn it_fails_to_initialize_update_view_if_path_does_not_exit() {
+    fn it_fails_to_initialize_view_if_path_does_not_exist() {
         let mut numbers = HashMap::new();
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         assert!(
-            Update::<i32>::from_system(&system, &Context::new().with_path("/numbers/three"))
-                .is_err()
+            View::<i32>::from_system(&system, &Context::new().with_path("/numbers/three")).is_err()
         );
         assert!(
-            Update::<i32>::from_system(&system, &Context::new().with_path("/none/three")).is_err()
+            View::<i32>::from_system(&system, &Context::new().with_path("/none/three")).is_err()
         );
     }
 
     #[test]
-    fn it_inits_a_value_with_default() {
+    fn it_initializes_a_value_with_default() {
         let mut numbers = HashMap::new();
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
-        let mut view: View<i32> =
-            View::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
+        let mut ptr: Pointer<i32> =
+            Pointer::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
 
-        assert_eq!(view.as_ref(), None);
+        assert_eq!(ptr.as_ref(), None);
 
-        let value = view.zero();
+        let value = ptr.zero();
         *value = 3;
 
         // Get the list changes to the view
-        let changes = view.into_result(&system).unwrap();
+        let changes = ptr.into_result(&system).unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -560,16 +381,16 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
-        let mut view: View<i32> =
-            View::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
+        let mut ptr: Pointer<i32> =
+            Pointer::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
 
         // Delete the value
-        view.remove();
+        ptr.unassign();
 
         // Get the list changes to the view
-        let changes = view.into_result(&system).unwrap();
+        let changes = ptr.into_result(&system).unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -585,18 +406,18 @@ mod tests {
             numbers: vec!["one".to_string(), "two".to_string(), "three".to_string()],
         };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
-        let mut view: View<String> =
-            View::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
+        let mut ptr: Pointer<String> =
+            Pointer::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
 
-        assert_eq!(view.as_ref(), Some(&"two".to_string()));
+        assert_eq!(ptr.as_ref(), Some(&"two".to_string()));
 
-        let value = view.as_mut().unwrap();
+        let value = ptr.as_mut().unwrap();
         *value = "TWO".to_string();
 
         // Get the list changes to the view
-        let changes = view.into_result(&system).unwrap();
+        let changes = ptr.into_result(&system).unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -612,16 +433,16 @@ mod tests {
             numbers: vec!["one".to_string(), "two".to_string()],
         };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
-        let mut view: View<String> =
-            View::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
+        let mut ptr: Pointer<String> =
+            Pointer::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
 
-        assert_eq!(view.as_ref(), None);
-        view.replace("three");
+        assert_eq!(ptr.as_ref(), None);
+        ptr.assign("three");
 
         // Get the list changes to the view
-        let changes = view.into_result(&system).unwrap();
+        let changes = ptr.into_result(&system).unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -637,16 +458,16 @@ mod tests {
             numbers: vec!["one".to_string(), "two".to_string(), "three".to_string()],
         };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
-        let mut view: View<String> =
-            View::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
+        let mut ptr: Pointer<String> =
+            Pointer::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
 
         // Remove the second element
-        view.remove();
+        ptr.unassign();
 
         // Get the list changes to the view
-        let changes = view.into_result(&system).unwrap();
+        let changes = ptr.into_result(&system).unwrap();
         assert_eq!(
             changes,
             // Removing a value from the middle of the array requires shifting the indexes
@@ -664,16 +485,16 @@ mod tests {
             numbers: vec!["one".to_string(), "two".to_string(), "three".to_string()],
         };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
-        let mut view: View<String> =
-            View::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
+        let mut ptr: Pointer<String> =
+            Pointer::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
 
         // Remove the third element
-        view.remove();
+        ptr.unassign();
 
         // Get the list changes to the view
-        let changes = view.into_result(&system).unwrap();
+        let changes = ptr.into_result(&system).unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([

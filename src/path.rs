@@ -66,6 +66,19 @@ impl PathArgs {
     }
 }
 
+impl Display for PathArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let entries = self
+            .0
+            .iter()
+            .map(|(key, value)| format!("\"{}\": \"{}\"", key, value))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        write!(f, "{{{}}}", entries)
+    }
+}
+
 impl Deref for PathArgs {
     type Target = Vec<(Arc<str>, String)>;
 

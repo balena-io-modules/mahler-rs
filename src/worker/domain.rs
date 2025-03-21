@@ -1,14 +1,14 @@
+use anyhow::anyhow;
 use matchit::Router;
 use std::collections::{BTreeSet, HashMap};
+use thiserror::Error;
 
-use super::intent::{Intent, Operation};
 use crate::path::PathArgs;
+use crate::task::{Intent, Operation};
 
-#[derive(Debug, PartialEq)]
-pub(crate) enum DomainSearchError {
-    JobNotFound,
-    MissingArgs(Vec<String>),
-}
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct PathSearchError(#[from] anyhow::Error);
 
 #[derive(Default, Debug)]
 pub struct Domain {
@@ -79,14 +79,20 @@ impl Domain {
         Self { router, index }
     }
 
+    pub fn jobs<const N: usize>(self, route: &'static str, intents: [Intent; N]) -> Self {
+        intents
+            .into_iter()
+            .fold(self, |domain, intent| domain.job(route, intent))
+    }
+
     // This allows to find the path that a task relates to from the
     // job it belongs to and the arguments given by the user as part
     // of the context.
-    pub(crate) fn get_path(
+    pub(crate) fn find_path_for_job(
         &self,
         job_id: &str,
         args: &PathArgs,
-    ) -> Result<String, DomainSearchError> {
+    ) -> Result<String, PathSearchError> {
         if let Some(route) = self.index.get(job_id) {
             let mut route = route.clone();
             let mut replacements = Vec::new();
@@ -149,7 +155,10 @@ impl Domain {
 
             // If there are missing placeholders, return an error
             if !missing_args.is_empty() {
-                return Err(DomainSearchError::MissingArgs(missing_args));
+                return Err(anyhow!(
+                    "missing arguments for task {job_id}: {:?}",
+                    missing_args
+                ))?;
             }
 
             // Restore escaped parameters `{{param}}` → `{param}`
@@ -161,14 +170,19 @@ impl Domain {
 
             Ok(final_route)
         } else {
-            Err(DomainSearchError::JobNotFound)
+            Err(anyhow!(
+                "could not find a job with id {job_id} in the search domain"
+            ))?
         }
     }
 
     /// Find matches for the given path in the domain
     /// the matches are sorted in order that they should be
     /// tested
-    pub(crate) fn at(&self, path: &str) -> Option<(PathArgs, impl Iterator<Item = &Intent>)> {
+    pub(crate) fn find_jobs_at(
+        &self,
+        path: &str,
+    ) -> Option<(PathArgs, impl Iterator<Item = &Intent>)> {
         self.router
             .at(path)
             .map(|matched| {
@@ -184,17 +198,84 @@ impl Domain {
     }
 }
 
+#[cfg(debug_assertions)]
+mod test_utils {
+    use anyhow::Context as AnyhowCtx;
+    use serde::de::DeserializeOwned;
+    use serde::Serialize;
+
+    use super::*;
+    use crate::system::System;
+    use crate::task::{Error as TaskError, InputError, Task, UnexpectedError};
+
+    impl Domain {
+        async fn run(&self, task: Task, system: &mut System) -> Result<(), TaskError> {
+            let path = self
+                .find_path_for_job(task.id(), &task.context().args)
+                .context("could not find path for task")
+                .map_err(InputError::from)?;
+
+            let task = task.with_path(path);
+            match &task {
+                Task::Action(action) => {
+                    action.run(system).await?;
+                }
+                Task::Method(method) => {
+                    let tasks = method.expand(system)?;
+                    for mut task in tasks {
+                        // Propagate the parent args to the child task
+                        for (k, v) in method.context().args.iter() {
+                            task = task.with_arg(k, v)
+                        }
+                        Box::pin(self.run(task, system)).await?;
+                    }
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Test a task within the context of the domain
+        ///
+        /// This function is only available in debug builds for testing purposes
+        /// and is not meant to be used in production
+        pub async fn test_task<S: Serialize + DeserializeOwned>(
+            &self,
+            task: Task,
+            state: S,
+        ) -> Result<S, TaskError> {
+            let mut system = System::try_from(state)
+                .context("failed to serialize input state")
+                .map_err(InputError::from)?;
+            let path = self
+                .find_path_for_job(task.id(), &task.context().args)
+                .context("could not find path for task")
+                .map_err(InputError::from)?;
+
+            let task = task.with_path(path);
+            self.run(task, &mut system).await?;
+
+            let new_state = system
+                .state()
+                .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
+
+            Ok(new_state)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use serde::{Deserialize, Serialize};
+
     use super::*;
     use std::sync::Arc;
 
-    use crate::extract::{Target, Update};
+    use crate::extract::{Target, View};
     use crate::path::PathArgs;
     use crate::task::*;
-    use crate::worker::*;
 
-    fn plus_one(mut counter: Update<i32>, tgt: Target<i32>) -> Update<i32> {
+    fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
             *counter += 1;
         }
@@ -203,7 +284,7 @@ mod tests {
         counter
     }
 
-    fn plus_two(counter: Update<i32>, tgt: Target<i32>) -> Vec<Task> {
+    fn plus_two(counter: View<i32>, tgt: Target<i32>) -> Vec<Task> {
         if *tgt - *counter < 2 {
             // Returning an empty result tells the planner
             // the task is not applicable to reach the target
@@ -220,15 +301,12 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let jobs: Vec<&str> = domain
-            .at("/counters/{counter}")
+            .find_jobs_at("/counters/{counter}")
             .map(|(_, iter)| iter.map(|i| i.job.id()).collect())
             .unwrap();
 
         // It should return compound jobs first
-        assert_eq!(
-            jobs,
-            vec![plus_two.into_job().id(), plus_one.into_job().id()]
-        );
+        assert_eq!(jobs, vec![plus_two.id(), plus_one.id()]);
     }
 
     #[test]
@@ -238,12 +316,12 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let jobs: Vec<&str> = domain
-            .at("/counters/{counter}")
+            .find_jobs_at("/counters/{counter}")
             .map(|(_, iter)| iter.map(|i| i.job.id()).collect())
             .unwrap();
 
         // It should not return jobs for None operations
-        assert_eq!(jobs, vec![plus_two.into_job().id()]);
+        assert_eq!(jobs, vec![plus_two.id()]);
     }
 
     #[test]
@@ -269,76 +347,132 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let args = PathArgs(vec![(Arc::from("counter"), String::from("one"))]);
-        let path = domain.get_path(plus_one.into_job().id(), &args).unwrap();
+        let path = domain.find_path_for_job(plus_one.id(), &args).unwrap();
         assert_eq!(path, String::from("/counters/one"))
     }
 
     #[test]
     fn test_wildcard_parameter_replacement() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new().job("/files/{*path}", update(func));
 
         let args = PathArgs(vec![(
             Arc::from("path"),
             "documents/report.pdf".to_string(),
         )]);
-        let result = domain.get_path(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args).unwrap();
 
-        assert_eq!(result, Ok("/files/documents/report.pdf".to_string()));
+        assert_eq!(result, "/files/documents/report.pdf".to_string());
     }
 
     #[test]
     fn test_escaped_parameters_remain() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new().job("/data/{{counter}}/edit", update(func));
 
         let args = PathArgs(vec![(Arc::from("counter"), "456".to_string())]);
-        let result = domain.get_path(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args).unwrap();
 
-        assert_eq!(result, Ok("/data/{counter}/edit".to_string())); // Escaped `{counter}` remains unchanged
+        assert_eq!(result, "/data/{counter}/edit".to_string()); // Escaped `{counter}` remains unchanged
     }
 
     #[test]
     fn test_mixed_placeholders() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new().job("/users/{id}/files/{{file}}/{*path}", update(func));
 
         let args = PathArgs(vec![
             (Arc::from("id"), "42".to_string()),
             (Arc::from("path"), "reports/january.csv".to_string()),
         ]);
-        let result = domain.get_path(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args).unwrap();
 
         assert_eq!(
             result,
-            Ok("/users/42/files/{file}/reports/january.csv".to_string())
+            "/users/42/files/{file}/reports/january.csv".to_string()
         );
     }
 
     #[test]
     fn test_no_replacement_if_job_not_found() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new();
 
         let args = PathArgs(vec![(Arc::from("counter"), "999".to_string())]);
 
-        let result = domain.get_path(func.into_job().id(), &args);
-        assert_eq!(result, Err(DomainSearchError::JobNotFound));
+        let result = domain.find_path_for_job(func.id(), &args);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_error_if_unmatched_placeholders_remain() {
-        let func = |file: Update<()>| file;
+        let func = |file: View<()>| file;
         let domain = Domain::new().job("/tasks/{task_id}/check", update(func));
 
         let args = PathArgs(vec![]); // No arguments provided
-        let result = domain.get_path(func.into_job().id(), &args);
+        let result = domain.find_path_for_job(func.id(), &args);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn it_allows_testing_atomic_tasks() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Counters(HashMap<String, i32>);
+
+        let domain = Domain::new()
+            .job("/{counter}", update(plus_one))
+            .job("/{counter}", update(plus_two));
+
+        let task = plus_one.with_target(3).with_arg("counter", "one");
+
+        let res = domain
+            .test_task(
+                task,
+                Counters(HashMap::from([
+                    ("one".to_string(), 1),
+                    ("two".to_string(), 0),
+                ])),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
-            result,
-            Err(DomainSearchError::MissingArgs(
-                vec!["{task_id}".to_string()]
-            ))
-        ); // Unmatched placeholders remain
+            res,
+            Counters(HashMap::from([
+                ("one".to_string(), 2),
+                ("two".to_string(), 0),
+            ]))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_allows_testing_compound_tasks() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Counters(HashMap<String, i32>);
+
+        let domain = Domain::new()
+            .job("/{counter}", update(plus_one))
+            .job("/{counter}", update(plus_two));
+
+        let task = plus_two.with_target(3).with_arg("counter", "one");
+
+        let res = domain
+            .test_task(
+                task,
+                Counters(HashMap::from([
+                    ("one".to_string(), 0),
+                    ("two".to_string(), 0),
+                ])),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            res,
+            Counters(HashMap::from([
+                ("one".to_string(), 2),
+                ("two".to_string(), 0),
+            ]))
+        );
     }
 }

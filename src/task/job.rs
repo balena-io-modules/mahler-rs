@@ -18,7 +18,7 @@ pub(crate) enum Degree {
 }
 
 /// Jobs are generic work definitions. They can be converted to tasks
-/// by calling into_task with a specific context.
+/// by calling `build_task` with a specific context.
 ///
 /// Jobs are re-usable
 pub struct Job {
@@ -55,10 +55,8 @@ impl Job {
         A: Handler<T, Patch, I>,
         I: Send + 'static,
     {
-        let id = std::any::type_name::<A>();
-
         Self {
-            id,
+            id: action.id(),
             builder: BoxedIntoTask::from_action(action),
             degree: Degree::Atom,
         }
@@ -68,9 +66,8 @@ impl Job {
     where
         M: Handler<T, Vec<Task>>,
     {
-        let id = std::any::type_name::<M>();
         Self {
-            id,
+            id: method.id(),
             degree: Degree::List,
             builder: BoxedIntoTask::from_method(method),
         }
@@ -80,7 +77,7 @@ impl Job {
         self.id
     }
 
-    pub fn into_task(&self, context: Context) -> Task {
-        self.builder.clone().into_task(self.id, context)
+    pub fn build_task(&self, context: Context) -> Task {
+        self.builder.clone().into_task(context)
     }
 }
