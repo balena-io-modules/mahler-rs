@@ -231,7 +231,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let mut ptr: Pointer<i32> =
             Pointer::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
@@ -261,7 +261,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         assert!(Pointer::<i32>::from_system(
             &system,
@@ -281,7 +281,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let mut ptr: Pointer<i32> =
             Pointer::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
@@ -309,7 +309,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let mut view: View<i32> =
             View::from_system(&system, &Context::new().with_path("/numbers/two")).unwrap();
@@ -334,7 +334,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         assert!(
             View::<i32>::from_system(&system, &Context::new().with_path("/numbers/three")).is_err()
@@ -352,7 +352,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let mut ptr: Pointer<i32> =
             Pointer::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
@@ -381,7 +381,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let mut ptr: Pointer<i32> =
             Pointer::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
@@ -406,7 +406,7 @@ mod tests {
             numbers: vec!["one".to_string(), "two".to_string(), "three".to_string()],
         };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let mut ptr: Pointer<String> =
             Pointer::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
@@ -433,7 +433,7 @@ mod tests {
             numbers: vec!["one".to_string(), "two".to_string()],
         };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let mut ptr: Pointer<String> =
             Pointer::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
@@ -458,7 +458,7 @@ mod tests {
             numbers: vec!["one".to_string(), "two".to_string(), "three".to_string()],
         };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let mut ptr: Pointer<String> =
             Pointer::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
@@ -485,7 +485,7 @@ mod tests {
             numbers: vec!["one".to_string(), "two".to_string(), "three".to_string()],
         };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let mut ptr: Pointer<String> =
             Pointer::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();

@@ -244,7 +244,9 @@ mod test_utils {
             task: Task,
             state: S,
         ) -> Result<S, TaskError> {
-            let mut system = crate::system::System::from(state);
+            let mut system = System::try_from(state)
+                .context("failed to serialize input state")
+                .map_err(InputError::from)?;
             let path = self
                 .find_path_for_job(task.id(), &task.context().args)
                 .context("could not find path for task")

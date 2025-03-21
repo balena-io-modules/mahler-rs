@@ -9,7 +9,7 @@ pub(crate) use from_system::*;
 
 #[derive(Debug, Error)]
 #[error(transparent)]
-pub struct DeserializationError(#[from] serde_json::error::Error);
+pub struct SerializationError(#[from] serde_json::error::Error);
 
 #[derive(Debug, Error)]
 #[error(transparent)]
@@ -20,18 +20,12 @@ pub struct System {
     state: Value,
 }
 
-impl<S> From<S> for System
-where
-    S: Serialize,
-{
-    fn from(state: S) -> Self {
-        serde_json::to_value(state)
-            .map(|state| Self { state })
-            .expect("Input value to be serializable")
-    }
-}
-
 impl System {
+    pub fn try_from<S: Serialize>(state: S) -> Result<Self, SerializationError> {
+        let state = serde_json::to_value(state)?;
+        Ok(Self { state })
+    }
+
     pub(crate) fn new(state: Value) -> Self {
         Self { state }
     }
@@ -49,7 +43,7 @@ impl System {
         Ok(())
     }
 
-    pub fn state<S: DeserializeOwned>(&self) -> Result<S, DeserializationError> {
+    pub fn state<S: DeserializeOwned>(&self) -> Result<S, SerializationError> {
         let s = serde_json::from_value(self.state.clone())?;
         Ok(s)
     }

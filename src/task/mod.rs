@@ -338,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_runs_async_actions() {
-        let mut system = System::from(0);
+        let mut system = System::try_from(0).unwrap();
         let task = plus_one.with_target(1);
 
         if let Task::Action(action) = task {
@@ -356,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_allows_extending_actions_with_effect() {
-        let mut system = System::from(0);
+        let mut system = System::try_from(0).unwrap();
         let task = plus_one_async.with_target(1);
 
         if let Task::Action(action) = task {
@@ -373,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_allows_actions_returning_runtime_errors() {
-        let mut system = System::from(0);
+        let mut system = System::try_from(0).unwrap();
         let task = plus_one_async_with_error.with_target(1);
 
         if let Task::Action(action) = task {
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn it_allows_to_dry_run_actions_returning_error() {
-        let system = System::from(1);
+        let system = System::try_from(1).unwrap();
         let task = plus_one_async_with_error.with_target(2);
 
         if let Task::Action(action) = task {
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn it_allows_to_dry_run_pure_actions() {
-        let system = System::from(1);
+        let system = System::try_from(1).unwrap();
         let task = plus_one.with_target(2);
 
         if let Task::Action(action) = task {
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn it_allows_to_dry_run_async_actions() {
-        let system = System::from(1);
+        let system = System::try_from(1).unwrap();
         let task = plus_one_async.with_target(2);
 
         if let Task::Action(action) = task {
@@ -466,7 +466,7 @@ mod tests {
             counters: [("a".to_string(), 0), ("b".to_string(), 0)].into(),
         };
 
-        let mut system = System::from(state);
+        let mut system = System::try_from(state).unwrap();
         let task = update_counter.with_target(2).with_path("/counters/a");
 
         if let Task::Action(action) = task {

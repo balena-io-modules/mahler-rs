@@ -56,7 +56,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let Args(name): Args<String> =
             Args::from_system(&system, &Context::new().with_arg("name", "one")).unwrap();
@@ -72,7 +72,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let Args((first, second)): Args<(String, String)> = Args::from_system(
             &system,
@@ -94,7 +94,7 @@ mod tests {
 
         let state = State { numbers };
 
-        let system = System::from(state);
+        let system = System::try_from(state).unwrap();
 
         let Args(map): Args<HashMap<String, String>> = Args::from_system(
             &system,

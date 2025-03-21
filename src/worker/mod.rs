@@ -134,8 +134,9 @@ impl<T> Worker<T, Uninitialized> {
         T: Serialize + DeserializeOwned,
     {
         let Uninitialized { domain, opts, .. } = self.inner;
-        // this can panic
-        let system = System::from(state);
+
+        // we want to panic early while setting up the worker
+        let system = System::try_from(state).expect("failed to serialize the initial state");
         Worker::from_inner(Ready {
             planner: Planner::new(domain),
             system,
