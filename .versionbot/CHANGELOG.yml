@@ -1,4 +1,44 @@
 - commits:
+    - subject: Replace System::from with a try_from function
+      hash: 96c6b39bf955eec9d15ed6755a2aa22302e23b7d
+      body: |
+        This avoids panicking on an input that cannot be serialized.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Add Domain test_task method
+      hash: 95d48b8da0297f61fd7e37c5a818d6c76532631b
+      body: |
+        This allows to run a task within the context of a domain for testing
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Add `jobs` helper function to Domain
+      hash: eca57df1594c51688b3845355eb0960f1ddf6b73
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Simplify error handling for extractors
+      hash: a23b6940372656b1b43b9b7348ca6a27a7ed7147
+      body: |
+        This introduces use of the `anyhow` module for simpler error handling
+        and groups all extraction errors under `InputError`
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.7.0
+  title: ""
+  date: 2025-03-21T19:41:51.550Z
+- commits:
     - subject: Make implementation multi-threading compatible
       hash: 95d21b85ba4b12ea6c8de5f1ff1e395008e47c19
       body: |
