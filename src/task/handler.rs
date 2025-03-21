@@ -2,7 +2,7 @@ use json_patch::Patch;
 use serde::Serialize;
 
 use super::job::Job;
-use super::{Context, Effect, IntoEffect, IntoResult, Task};
+use super::{Context, Effect, IntoEffect, Task};
 use crate::system::{FromSystem, System};
 use crate::task::TaskError;
 
@@ -44,62 +44,6 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     /// Create a task from the handler with a specific path argument
     fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Task {
         self.into_task().with_arg(key, value)
-    }
-}
-
-/// Implement IntoEffect for any effect that has an IntoResult as the output. This means that, for
-/// instance, Effect<View<T>> implements IntoEffect, so effects can use extractors to interact
-/// with the state
-impl<I, E> IntoEffect<Patch, TaskError, I> for Effect<I, E>
-where
-    I: IntoResult<Patch> + Send + 'static,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn into_effect(self, system: &System) -> Effect<Patch, TaskError, I> {
-        let system = system.clone();
-        self.map_err(|e| TaskError::Other(Box::new(e)))
-            .and_then(move |o| o.into_result(&system))
-    }
-}
-
-// Allow tasks to return a pure Vec<Task>
-// and this will convert them into an effect
-impl IntoEffect<Vec<Task>, TaskError> for Vec<Task> {
-    fn into_effect(self, _: &System) -> Effect<Vec<Task>, TaskError> {
-        Effect::of(self)
-    }
-}
-
-// Allow tasks to return a  Result<Vec<Task>, E>
-// and this will convert them into an effect
-impl<E> IntoEffect<Vec<Task>, TaskError> for Result<Vec<Task>, E>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn into_effect(self, _: &System) -> Effect<Vec<Task>, TaskError> {
-        Effect::from(self.map_err(|e| TaskError::Other(Box::new(e))))
-    }
-}
-
-// Allow tasks to return a task slice
-// and this will convert them into an effect
-impl<const N: usize> IntoEffect<Vec<Task>, TaskError> for [Task; N] {
-    fn into_effect(self, _: &System) -> Effect<Vec<Task>, TaskError> {
-        Effect::of(self.into())
-    }
-}
-
-// Allow tasks to return a Result<[Task; N], E>
-// and this will convert them into an effect
-impl<E, const N: usize> IntoEffect<Vec<Task>, TaskError> for Result<[Task; N], E>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn into_effect(self, _: &System) -> Effect<Vec<Task>, TaskError> {
-        Effect::from(
-            self.map_err(|e| TaskError::Other(Box::new(e)))
-                .map(|a| a.into()),
-        )
     }
 }
 

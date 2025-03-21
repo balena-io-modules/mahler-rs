@@ -1,11 +1,12 @@
 mod boxed;
+mod condition_failed;
 mod context;
 mod effect;
 mod errors;
 mod handler;
 mod intent;
+mod into_result;
 mod job;
-mod result;
 
 use anyhow::Context as AnyhowCtx;
 use json_patch::Patch;
@@ -18,10 +19,11 @@ use std::sync::Arc;
 use crate::system::System;
 
 pub(crate) use context::*;
-pub(crate) use result::*;
+pub(crate) use errors::*;
+pub(crate) use into_result::*;
 
+pub use condition_failed::*;
 pub use effect::*;
-pub use errors::*;
 pub use handler::*;
 pub use intent::*;
 
@@ -227,6 +229,7 @@ mod tests {
     use crate::extract::{System as Sys, Target, View};
     use crate::system::System;
     use serde::{Deserialize, Serialize};
+    use serde_json::{from_value, json};
     use std::collections::HashMap;
     use thiserror::Error;
     use tokio::time::{sleep, Duration};
@@ -246,24 +249,32 @@ mod tests {
         counter
     }
 
-    fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
-        if tgt - *counter < 2 {
-            // Returning an empty result tells the planner
-            // the task is not applicable to reach the target
-            return vec![];
+    fn plus_one_with_error(
+        mut counter: View<i32>,
+        Target(tgt): Target<i32>,
+    ) -> core::result::Result<View<i32>, ConditionFailed> {
+        if *counter >= tgt {
+            return Err(ConditionFailed::new("counter already reached"));
         }
 
-        vec![plus_one.with_target(tgt), plus_one.with_target(tgt)]
+        *counter += 1;
+        println!("Counter: {}", *counter);
+
+        // Update implements IntoResult
+        Ok(counter)
     }
 
-    fn plus_one_async(counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>, MyError> {
+    fn plus_one_async(
+        mut counter: View<i32>,
+        Target(tgt): Target<i32>,
+    ) -> Effect<View<i32>, MyError> {
         if *counter >= tgt {
-            return Effect::from_error(MyError::CounterReached);
+            return MyError::CounterReached.into();
         }
+        *counter += 1;
 
-        Effect::of(counter).with_io(|mut counter| async {
+        Effect::of(counter).with_io(|counter| async {
             sleep(Duration::from_millis(10)).await;
-            *counter += 1;
             Ok(counter)
         })
     }
@@ -337,6 +348,74 @@ mod tests {
         let res = task.run(&mut system).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().to_string(), "counter already reached");
+    }
+
+    #[tokio::test]
+    async fn it_allows_pure_actions_returning_condition_failed() {
+        let mut system = System::from(1);
+        let task = plus_one_with_error.with_target(1);
+
+        let res = task.run(&mut system).await;
+        assert!(res.is_err());
+        assert_eq!(
+            res.unwrap_err().to_string(),
+            "condition failed: counter already reached"
+        );
+    }
+
+    #[test]
+    fn it_allows_to_dry_run_actions_returning_error() {
+        let system = System::from(1);
+        let task = plus_one_async.into_task();
+
+        if let Task::Atom(AtomTask { dry_run, .. }) = task {
+            let context = Context::default().with_target(serde_json::to_value(1).unwrap());
+            let res = (dry_run)(&system, &context);
+            assert!(res.is_err());
+            assert_eq!(res.unwrap_err().to_string(), "counter already reached");
+        } else {
+            panic!("Expected an AtomTask");
+        }
+    }
+
+    #[test]
+    fn it_allows_to_dry_run_pure_actions() {
+        let system = System::from(1);
+        let task = plus_one_with_error.into_task();
+
+        if let Task::Atom(AtomTask { dry_run, .. }) = task {
+            let context = Context::default().with_target(serde_json::to_value(2).unwrap());
+            let changes = (dry_run)(&system, &context).unwrap();
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 2 },
+                ]))
+                .unwrap()
+            );
+        } else {
+            panic!("Expected an AtomTask");
+        }
+    }
+
+    #[test]
+    fn it_allows_to_dry_run_async_actions() {
+        let system = System::from(1);
+        let task = plus_one_async.into_task();
+
+        if let Task::Atom(AtomTask { dry_run, .. }) = task {
+            let context = Context::default().with_target(serde_json::to_value(2).unwrap());
+            let changes = (dry_run)(&system, &context).unwrap();
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 2 },
+                ]))
+                .unwrap()
+            );
+        } else {
+            panic!("Expected an AtomTask");
+        }
     }
 
     // State needs to be clone in order for Target to implement IntoSystem

@@ -159,6 +159,12 @@ impl<T: 'static, E: 'static> From<Result<T, E>> for Effect<T, E> {
     }
 }
 
+impl<T: Send + 'static, E: std::error::Error + 'static> From<E> for Effect<T, E> {
+    fn from(err: E) -> Effect<T, E> {
+        Effect::Pure(Err(err))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
