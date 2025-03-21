@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::path::Path;
 use crate::system::System;
-use crate::task::{self, AtomTask, Context, ListTask, Operation, Task};
+use crate::task::{self, Context, Operation, Task};
 
 use super::distance::Distance;
 use super::domain::Domain;
@@ -56,15 +56,13 @@ impl Planner {
         stack_len: u32,
     ) -> Result<Workflow, Error> {
         let task_id = task.id().to_string();
-        match &task {
-            Task::Atom(AtomTask {
-                context, dry_run, ..
-            }) => {
-                let work_id = WorkUnit::new_id(&task, cur_state.root()).with_context(|| {
+        match task {
+            Task::Action(action) => {
+                let work_id = WorkUnit::new_id(&action, cur_state.root()).with_context(|| {
                     format!(
                         "failed to resolve path {} for task {}",
-                        context.path,
-                        task.id()
+                        action.context().path,
+                        task_id
                     )
                 })?;
 
@@ -74,11 +72,10 @@ impl Planner {
                 }
 
                 // Test the task
-                let Patch(changes) =
-                    dry_run(cur_state, context).map_err(|e| Error::TaskFailure {
-                        id: task_id,
-                        source: e,
-                    })?;
+                let Patch(changes) = action.dry_run(cur_state).map_err(|e| Error::TaskFailure {
+                    id: task_id,
+                    source: e,
+                })?;
 
                 // if we are at the top of the stack and no changes are introduced
                 // then assume the condition has failed
@@ -88,15 +85,13 @@ impl Planner {
 
                 // Otherwise add the task to the plan
                 let Workflow { dag, pending } = cur_plan;
-                let dag = dag.with_head(WorkUnit::new(work_id, task));
+                let dag = dag.with_head(WorkUnit::new(work_id, action));
                 let pending = [pending, changes].concat();
 
                 Ok(Workflow { dag, pending })
             }
-            Task::List(ListTask {
-                context, expand, ..
-            }) => {
-                let tasks = expand(cur_state, context).map_err(|e| Error::TaskFailure {
+            Task::Method(method) => {
+                let tasks = method.expand(cur_state).map_err(|e| Error::TaskFailure {
                     id: task_id,
                     source: e,
                 })?;
@@ -109,7 +104,7 @@ impl Planner {
                     // have a sub-task for `/a/c`, it can however have a task
                     // for `/a/b` or `/a/b/c`. This is to ensure we can parallelize
                     // tasks
-                    for (k, v) in context.args.iter() {
+                    for (k, v) in method.context().args.iter() {
                         t = t.with_arg(k, v)
                     }
                     let path = self

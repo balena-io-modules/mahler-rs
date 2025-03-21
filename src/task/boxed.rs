@@ -12,7 +12,7 @@ impl BoxedIntoTask {
     {
         Self(Box::new(MakeIntoTask {
             handler: action,
-            into_task: |handler, context| Task::from_atom(handler, context),
+            into_task: |handler, context| Task::from_action(handler, context),
         }))
     }
 
@@ -22,7 +22,7 @@ impl BoxedIntoTask {
     {
         Self(Box::new(MakeIntoTask {
             handler: method,
-            into_task: |handler, context| Task::from_list(handler, context),
+            into_task: |handler, context| Task::from_method(handler, context),
         }))
     }
 

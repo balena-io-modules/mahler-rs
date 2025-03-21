@@ -33,15 +33,23 @@ type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
 type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>> + Send + Sync>;
 
 #[derive(Clone)]
-pub struct AtomTask {
+pub struct Action {
     id: &'static str,
     scoped: bool,
-    pub(crate) context: Context,
-    pub(crate) dry_run: DryRun,
+    context: Context,
+    dry_run: DryRun,
     run: Run,
 }
 
-impl AtomTask {
+impl Action {
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
+    }
+
+    pub fn id(&self) -> &str {
+        self.id
+    }
+
     fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
         let target = serde_json::to_value(target).context("Serialization failed")?;
         Ok(Self {
@@ -63,17 +71,54 @@ impl AtomTask {
             ..self
         }
     }
+
+    /// Run the task sequentially
+    pub(crate) async fn run(&self, system: &mut System) -> Result<()> {
+        let Action { context, run, .. } = self;
+        let changes = (run)(system, context).await?;
+        system
+            .patch(changes)
+            .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
+        Ok(())
+    }
+
+    pub(crate) fn dry_run(&self, system: &System) -> Result<Patch> {
+        let Action {
+            context, dry_run, ..
+        } = self;
+        (dry_run)(system, context)
+    }
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self
+            .id
+            .split("::")
+            .skip(1)
+            .collect::<Vec<&str>>()
+            .join("::");
+        write!(f, "{}({})", id, self.context.path)
+    }
 }
 
 #[derive(Clone)]
-pub struct ListTask {
+pub struct Method {
     id: &'static str,
     scoped: bool,
-    pub(crate) context: Context,
-    pub(crate) expand: Expand,
+    context: Context,
+    expand: Expand,
 }
 
-impl ListTask {
+impl Method {
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
+    }
+
+    pub fn id(&self) -> &str {
+        self.id
+    }
+
     fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
         let target = serde_json::to_value(target).context("Serialization failed")?;
         Ok(Self {
@@ -95,128 +140,116 @@ impl ListTask {
             ..self
         }
     }
+
+    pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>> {
+        let Method {
+            context, expand, ..
+        } = self;
+        (expand)(system, context)
+    }
 }
 
-/// A task is either a concrete unit (atom) of work or a list of tasks
-/// that can be run in sequence or in parallel
+/// A task is either a concrete unit of work (action) or rule to
+/// derive a list of tasks (method)
 #[derive(Clone)]
 pub enum Task {
-    Atom(AtomTask),
-    List(ListTask),
+    Action(Action),
+    Method(Method),
 }
 
 impl Task {
-    pub(crate) fn from_atom<H, T, I>(handler: H, context: Context) -> Self
+    pub(crate) fn from_action<H, T, I>(action: H, context: Context) -> Self
     where
         H: Handler<T, Patch, I>,
         I: Send + 'static,
     {
-        let handler_clone = handler.clone();
-        Self::Atom(AtomTask {
-            id: handler.id(),
-            scoped: handler.is_scoped(),
+        let handler_clone = action.clone();
+        Self::Action(Action {
+            id: action.id(),
+            scoped: action.is_scoped(),
             context,
             dry_run: Arc::new(move |system: &System, context: &Context| {
                 let effect = handler_clone.call(system, context);
                 effect.pure()
             }),
             run: Arc::new(move |system: &System, context: &Context| {
-                let effect = handler.call(system, context);
+                let effect = action.call(system, context);
 
                 Box::pin(async { effect.run().await })
             }),
         })
     }
 
-    pub(crate) fn from_list<H, T>(handler: H, context: Context) -> Self
+    pub(crate) fn from_method<H, T>(method: H, context: Context) -> Self
     where
         H: Handler<T, Vec<Task>>,
     {
-        Self::List(ListTask {
-            id: handler.id(),
-            scoped: handler.is_scoped(),
+        Self::Method(Method {
+            id: method.id(),
+            scoped: method.is_scoped(),
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
                 // List tasks cannot perform changes to the system
                 // so the Effect returned by this handler is assumed to
                 // be pure
-                handler.call(system, context).pure()
+                method.call(system, context).pure()
             }),
         })
     }
 
+    /// Get the unique identifier for the task
     pub fn id(&self) -> &str {
         match self {
-            Self::Atom(AtomTask { id, .. }) => id,
-            Self::List(ListTask { id, .. }) => id,
+            Self::Action(Action { id, .. }) => id,
+            Self::Method(Method { id, .. }) => id,
         }
     }
 
     pub(crate) fn context(&self) -> &Context {
         match self {
-            Self::Atom(AtomTask { context, .. }) => context,
-            Self::List(ListTask { context, .. }) => context,
+            Self::Action(Action { context, .. }) => context,
+            Self::Method(Method { context, .. }) => context,
         }
     }
 
+    /// Return true if the task can be parallelized
     pub fn is_scoped(&self) -> bool {
         match self {
-            Self::Atom(AtomTask { scoped, .. }) => *scoped,
-            Self::List(ListTask { scoped, .. }) => *scoped,
+            Self::Action(Action { scoped, .. }) => *scoped,
+            Self::Method(Method { scoped, .. }) => *scoped,
         }
     }
 
+    /// Set a target for the task
+    ///
+    /// This returns a result with an error if the serialization of the target fails
     pub fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
         match self {
-            Self::Atom(task) => task.try_target(target).map(Self::Atom),
-            Self::List(task) => task.try_target(target).map(Self::List),
+            Self::Action(task) => task.try_target(target).map(Self::Action),
+            Self::Method(task) => task.try_target(target).map(Self::Method),
         }
     }
 
+    /// Set a target for the task
+    ///
+    /// This function will panic if the serialization of the target fails
     pub fn with_target<S: Serialize>(self, target: S) -> Self {
         self.try_target(target).unwrap()
     }
 
+    /// Set an argument for the task
     pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         match self {
-            Self::Atom(task) => Self::Atom(task.with_arg(key, value)),
-            Self::List(task) => Self::List(task.with_arg(key, value)),
+            Self::Action(task) => Self::Action(task.with_arg(key, value)),
+            Self::Method(task) => Self::Method(task.with_arg(key, value)),
         }
     }
 
     pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
         match self {
-            Self::Atom(task) => Self::Atom(task.with_path(path)),
-            Self::List(task) => Self::List(task.with_path(path)),
+            Self::Action(task) => Self::Action(task.with_path(path)),
+            Self::Method(task) => Self::Method(task.with_path(path)),
         }
-    }
-
-    /// Run the task sequentially
-    pub(crate) async fn run(&self, system: &mut System) -> Result<()> {
-        match self {
-            Self::Atom(AtomTask { context, run, .. }) => {
-                let changes = (run)(system, context).await?;
-                system
-                    .patch(changes)
-                    .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
-                Ok(())
-            }
-            Self::List(..) => {
-                panic!("Cannot run a list task directly");
-            }
-        }
-    }
-}
-
-impl Display for Task {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let id = self
-            .id()
-            .split("::")
-            .skip(1)
-            .collect::<Vec<&str>>()
-            .join("::");
-        write!(f, "{}({})", id, self.context().path)
     }
 }
 
@@ -308,13 +341,17 @@ mod tests {
         let mut system = System::from(0);
         let task = plus_one.with_target(1);
 
-        // Run the action
-        task.run(&mut system).await.unwrap();
+        if let Task::Action(action) = task {
+            // Run the action
+            action.run(&mut system).await.unwrap();
 
-        let state = system.state::<i32>().unwrap();
+            let state = system.state::<i32>().unwrap();
 
-        // The referenced value was modified
-        assert_eq!(state, 1);
+            // The referenced value was modified
+            assert_eq!(state, 1);
+        } else {
+            panic!("Expected an Action task");
+        }
     }
 
     #[tokio::test]
@@ -322,12 +359,16 @@ mod tests {
         let mut system = System::from(0);
         let task = plus_one_async.with_target(1);
 
-        // Run the action
-        task.run(&mut system).await.unwrap();
+        if let Task::Action(action) = task {
+            // Run the action
+            action.run(&mut system).await.unwrap();
 
-        // Check that the system state was modified
-        let state = system.state::<i32>().unwrap();
-        assert_eq!(state, 1);
+            // Check that the system state was modified
+            let state = system.state::<i32>().unwrap();
+            assert_eq!(state, 1);
+        } else {
+            panic!("Expected an Action task");
+        }
     }
 
     #[tokio::test]
@@ -335,22 +376,25 @@ mod tests {
         let mut system = System::from(0);
         let task = plus_one_async_with_error.with_target(1);
 
-        let res = task.run(&mut system).await;
-        assert!(res.is_err());
-        assert_eq!(
-            res.unwrap_err().to_string(),
-            "task runtime error: and error happened"
-        );
+        if let Task::Action(action) = task {
+            let res = action.run(&mut system).await;
+            assert!(res.is_err());
+            assert_eq!(
+                res.unwrap_err().to_string(),
+                "task runtime error: and error happened"
+            );
+        } else {
+            panic!("Expected an Action task");
+        }
     }
 
     #[test]
     fn it_allows_to_dry_run_actions_returning_error() {
         let system = System::from(1);
-        let task = plus_one_async_with_error.into_task();
+        let task = plus_one_async_with_error.with_target(2);
 
-        if let Task::Atom(AtomTask { dry_run, .. }) = task {
-            let context = Context::default().with_target(serde_json::to_value(2).unwrap());
-            let changes = (dry_run)(&system, &context).unwrap();
+        if let Task::Action(action) = task {
+            let changes = action.dry_run(&system).unwrap();
             assert_eq!(
                 changes,
                 from_value::<Patch>(json!([
@@ -359,18 +403,17 @@ mod tests {
                 .unwrap()
             );
         } else {
-            panic!("Expected an AtomTask");
+            panic!("Expected an Action task");
         }
     }
 
     #[test]
     fn it_allows_to_dry_run_pure_actions() {
         let system = System::from(1);
-        let task = plus_one.into_task();
+        let task = plus_one.with_target(2);
 
-        if let Task::Atom(AtomTask { dry_run, .. }) = task {
-            let context = Context::default().with_target(serde_json::to_value(2).unwrap());
-            let changes = (dry_run)(&system, &context).unwrap();
+        if let Task::Action(action) = task {
+            let changes = action.dry_run(&system).unwrap();
             assert_eq!(
                 changes,
                 from_value::<Patch>(json!([
@@ -379,18 +422,17 @@ mod tests {
                 .unwrap()
             );
         } else {
-            panic!("Expected an AtomTask");
+            panic!("Expected an Action task");
         }
     }
 
     #[test]
     fn it_allows_to_dry_run_async_actions() {
         let system = System::from(1);
-        let task = plus_one_async.into_task();
+        let task = plus_one_async.with_target(2);
 
-        if let Task::Atom(AtomTask { dry_run, .. }) = task {
-            let context = Context::default().with_target(serde_json::to_value(2).unwrap());
-            let changes = (dry_run)(&system, &context).unwrap();
+        if let Task::Action(action) = task {
+            let changes = action.dry_run(&system).unwrap();
             assert_eq!(
                 changes,
                 from_value::<Patch>(json!([
@@ -399,7 +441,7 @@ mod tests {
                 .unwrap()
             );
         } else {
-            panic!("Expected an AtomTask");
+            panic!("Expected an Action task");
         }
     }
 
@@ -427,17 +469,21 @@ mod tests {
         let mut system = System::from(state);
         let task = update_counter.with_target(2).with_path("/counters/a");
 
-        // Run the action
-        task.run(&mut system).await.unwrap();
+        if let Task::Action(action) = task {
+            // Run the action
+            action.run(&mut system).await.unwrap();
 
-        let state = system.state::<State>().unwrap();
+            let state = system.state::<State>().unwrap();
 
-        // Only the referenced value was modified
-        assert_eq!(
-            state,
-            State {
-                counters: [("a".to_string(), 1), ("b".to_string(), 0)].into()
-            }
-        );
+            // Only the referenced value was modified
+            assert_eq!(
+                state,
+                State {
+                    counters: [("a".to_string(), 1), ("b".to_string(), 0)].into()
+                }
+            );
+        } else {
+            panic!("Expected an Action Task");
+        }
     }
 }

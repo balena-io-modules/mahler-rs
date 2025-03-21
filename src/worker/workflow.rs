@@ -8,12 +8,12 @@ use std::sync::atomic::AtomicBool;
 use super::RuntimeError;
 use crate::dag::{Dag, Node};
 use crate::system::System;
-use crate::task::Task;
+use crate::task::Action;
 
 #[derive(Hash)]
 struct WorkUnitId<'s> {
     /// The task id
-    task: String,
+    task_id: String,
     /// The task path
     path: String,
     /// The state that is used to test the action
@@ -33,15 +33,15 @@ pub(crate) struct WorkUnit {
      *
      * Only atomic tasks should be added to a worflow item
      */
-    pub task: Task,
+    pub task: Action,
 }
 
 impl WorkUnit {
-    pub fn new(id: u64, task: Task) -> Self {
+    pub fn new(id: u64, task: Action) -> Self {
         Self { id, task }
     }
 
-    pub fn new_id(task: &Task, state: &Value) -> Result<u64, jsonptr::resolve::ResolveError> {
+    pub fn new_id(task: &Action, state: &Value) -> Result<u64, jsonptr::resolve::ResolveError> {
         let pointer = task.context().path.as_ref();
 
         // Resolve the value that will be modified by
@@ -49,7 +49,7 @@ impl WorkUnit {
         let state = pointer.resolve(state)?;
 
         let action_id = WorkUnitId {
-            task: String::from(task.id()),
+            task_id: String::from(task.id()),
             path: task.context().path.to_string(),
             state,
         };
@@ -65,8 +65,8 @@ impl WorkUnit {
     }
 }
 
-impl From<WorkUnit> for Task {
-    fn from(action: WorkUnit) -> Task {
+impl From<WorkUnit> for Action {
+    fn from(action: WorkUnit) -> Action {
         action.task
     }
 }
@@ -77,7 +77,7 @@ impl Display for WorkUnit {
     }
 }
 
-impl<T: Into<Task> + Clone> Dag<T> {
+impl<T: Into<Action> + Clone> Dag<T> {
     pub(crate) async fn execute(
         self,
         system: &mut System,
