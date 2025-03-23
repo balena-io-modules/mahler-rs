@@ -6,12 +6,8 @@ use super::effect::{Effect, IntoEffect};
 use super::errors::{Error, RuntimeError};
 use crate::system::System;
 
-/// The task outcome is a type alias
-/// of Result
-pub type Result<O> = core::result::Result<O, Error>;
-
 pub trait IntoResult<O> {
-    fn into_result(self, system: &System) -> Result<O>;
+    fn into_result(self, system: &System) -> Result<O, Error>;
 }
 
 impl<T, O> IntoResult<O> for Option<T>
@@ -19,7 +15,7 @@ where
     O: Default,
     T: IntoResult<O>,
 {
-    fn into_result(self, system: &System) -> Result<O> {
+    fn into_result(self, system: &System) -> Result<O, Error> {
         self.map(|value| value.into_result(system))
             .ok_or_else(|| Error::ConditionFailed)?
     }
