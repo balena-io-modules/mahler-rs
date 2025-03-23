@@ -291,6 +291,20 @@ mod tests {
         })
     }
 
+    async fn plus_one_real_async(
+        mut counter: View<i32>,
+        Target(tgt): Target<i32>,
+    ) -> Result<View<i32>, SomeError> {
+        if *counter < tgt {
+            *counter += 1;
+        } else {
+            return Err(SomeError);
+        }
+
+        sleep(Duration::from_millis(10)).await;
+        Ok(counter)
+    }
+
     fn plus_one_async_with_error(
         mut counter: View<i32>,
         Target(tgt): Target<i32>,
@@ -361,6 +375,23 @@ mod tests {
     async fn it_allows_extending_actions_with_effect() {
         let mut system = System::try_from(0).unwrap();
         let task = plus_one_async_with_effect.with_target(1);
+
+        if let Task::Action(action) = task {
+            // Run the action
+            action.run(&mut system).await.unwrap();
+
+            // Check that the system state was modified
+            let state = system.state::<i32>().unwrap();
+            assert_eq!(state, 1);
+        } else {
+            panic!("Expected an Action task");
+        }
+    }
+
+    #[tokio::test]
+    async fn it_allows_running_true_async_functions() {
+        let mut system = System::try_from(0).unwrap();
+        let task = plus_one_real_async.with_target(1);
 
         if let Task::Action(action) = task {
             // Run the action

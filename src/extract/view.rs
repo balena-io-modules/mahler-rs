@@ -7,7 +7,9 @@ use std::ops::{Deref, DerefMut};
 
 use crate::path::Path;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, Effect, Error, InputError, IntoEffect, IntoResult, UnexpectedError};
+use crate::task::{
+    Context, Effect, Error, Immutable, InputError, IntoEffect, IntoResult, UnexpectedError,
+};
 
 /// Extracts a pointer to a sub-element of the global state indicated
 /// by the path.
@@ -20,13 +22,28 @@ use crate::task::{Context, Effect, Error, InputError, IntoEffect, IntoResult, Un
 pub struct Pointer<T> {
     state: Option<T>,
     path: Path,
+    immutable: bool,
+}
+
+impl<T> Immutable for Pointer<T> {
+    fn immutable() -> Self {
+        Pointer {
+            state: None,
+            path: Path::from_static(""),
+            immutable: true,
+        }
+    }
 }
 
 impl<T> Pointer<T> {
     // The only way to create a pointer is via the
     // from_system method
     fn new(state: Option<T>, path: Path) -> Self {
-        Pointer { state, path }
+        Pointer {
+            state,
+            path,
+            immutable: false,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -112,6 +129,11 @@ impl<T> DerefMut for Pointer<T> {
 
 impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
     fn into_result(self, system: &System) -> Result<Patch, Error> {
+        // Ignore the changes if the pointer is immutable
+        if self.immutable {
+            return Ok(Patch::default());
+        }
+
         // Get the root value
         let mut after = system.clone();
         let root = after.root_mut();
@@ -155,6 +177,12 @@ pub struct View<T>(Pointer<T>);
 impl<T> View<T> {
     pub fn path(&self) -> &Path {
         self.0.path()
+    }
+}
+
+impl<T> Immutable for View<T> {
+    fn immutable() -> Self {
+        View(Pointer::immutable())
     }
 }
 

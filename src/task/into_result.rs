@@ -1,4 +1,5 @@
 use json_patch::Patch;
+use std::future::Future;
 
 use super::Task;
 
@@ -32,6 +33,33 @@ where
     fn into_effect(self, system: &System) -> Effect<Patch, Error, I> {
         let system = system.clone();
         self.map_err(|e| Error::from(RuntimeError(Box::new(e))))
+            .and_then(move |o| o.into_result(&system))
+    }
+}
+
+pub(crate) trait Immutable {
+    fn immutable() -> Self;
+}
+
+/// Implement IntoEffect for any function returning a future that can be resolved
+/// into a result. This means that the function only has an async part and
+/// will never be chosen during planning because it doesn't perform any changes
+/// to the system. However it could be used in a method along other operations
+impl<I, E, Fut> IntoEffect<Patch, Error, I> for Fut
+where
+    Fut: Future<Output = Result<I, E>> + Send + 'static,
+    I: IntoResult<Patch> + Immutable + Send + 'static,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn into_effect(self, system: &System) -> Effect<Patch, Error, I> {
+        let system = system.clone();
+        // The only way to make this work is to introduce this
+        // immutable trait that tells the type I to ignore the
+        // call to into_result and just return an empty patch
+        // this is a really dumb hack, but it works
+        Effect::of(I::immutable())
+            .with_io(move |_| self)
+            .map_err(|e| Error::from(RuntimeError(Box::new(e))))
             .and_then(move |o| o.into_result(&system))
     }
 }
