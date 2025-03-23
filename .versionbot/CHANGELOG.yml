@@ -1,4 +1,18 @@
 - commits:
+    - subject: Remove Result type alias
+      hash: 6c4e6cbf11b53064d8780935446425a266bbf0a4
+      body: |
+        The benefits of the alias do not outweight the drawbacks of having to
+        use core::result::Result for std results
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.7.1
+  title: ""
+  date: 2025-03-23T18:08:13.593Z
+- commits:
     - subject: Replace System::from with a try_from function
       hash: 96c6b39bf955eec9d15ed6755a2aa22302e23b7d
       body: |
