@@ -7,9 +7,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::path::Path;
 use crate::system::{FromSystem, System};
-use crate::task::{
-    Context, Effect, Error, InputError, IntoEffect, IntoResult, Result, UnexpectedError,
-};
+use crate::task::{Context, Effect, Error, InputError, IntoEffect, IntoResult, UnexpectedError};
 
 /// Extracts a pointer to a sub-element of the global state indicated
 /// by the path.
@@ -61,7 +59,7 @@ impl<T> Pointer<T> {
 impl<T: DeserializeOwned> FromSystem for Pointer<T> {
     type Error = InputError;
 
-    fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
+    fn from_system(system: &System, context: &Context) -> Result<Self, Self::Error> {
         let json_ptr = context.path.as_ref();
         let root = system.root();
 
@@ -113,7 +111,7 @@ impl<T> DerefMut for Pointer<T> {
 }
 
 impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
-    fn into_result(self, system: &System) -> Result<Patch> {
+    fn into_result(self, system: &System) -> Result<Patch, Error> {
         // Get the root value
         let mut after = system.clone();
         let root = after.root_mut();
@@ -163,7 +161,7 @@ impl<T> View<T> {
 impl<T: DeserializeOwned> FromSystem for View<T> {
     type Error = InputError;
 
-    fn from_system(system: &System, context: &Context) -> core::result::Result<Self, Self::Error> {
+    fn from_system(system: &System, context: &Context) -> Result<Self, Self::Error> {
         let pointer = Pointer::<T>::from_system(system, context)?;
 
         if pointer.state.is_none() {
@@ -191,7 +189,7 @@ impl<T> DerefMut for View<T> {
 }
 
 impl<T: Serialize> IntoResult<Patch> for View<T> {
-    fn into_result(self, system: &System) -> Result<Patch> {
+    fn into_result(self, system: &System) -> Result<Patch, Error> {
         self.0.into_result(system)
     }
 }

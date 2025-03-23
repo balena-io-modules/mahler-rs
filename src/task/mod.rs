@@ -27,10 +27,10 @@ pub use errors::InputError;
 pub use handler::*;
 pub use intent::*;
 
-type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
-type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
+type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
+type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch, Error> + Send + Sync>;
 type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
-type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>> + Send + Sync>;
+type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>, Error> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Action {
@@ -50,7 +50,7 @@ impl Action {
         self.id
     }
 
-    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
+    fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
         let target = serde_json::to_value(target).context("Serialization failed")?;
         Ok(Self {
             context: self.context.with_target(target),
@@ -73,7 +73,7 @@ impl Action {
     }
 
     /// Run the task sequentially
-    pub(crate) async fn run(&self, system: &mut System) -> Result<()> {
+    pub(crate) async fn run(&self, system: &mut System) -> Result<(), Error> {
         let Action { context, run, .. } = self;
         let changes = (run)(system, context).await?;
         system
@@ -82,7 +82,7 @@ impl Action {
         Ok(())
     }
 
-    pub(crate) fn dry_run(&self, system: &System) -> Result<Patch> {
+    pub(crate) fn dry_run(&self, system: &System) -> Result<Patch, Error> {
         let Action {
             context, dry_run, ..
         } = self;
@@ -119,7 +119,7 @@ impl Method {
         self.id
     }
 
-    fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
+    fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
         let target = serde_json::to_value(target).context("Serialization failed")?;
         Ok(Self {
             context: self.context.with_target(target),
@@ -141,7 +141,7 @@ impl Method {
         }
     }
 
-    pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>> {
+    pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>, Error> {
         let Method {
             context, expand, ..
         } = self;
@@ -223,7 +223,7 @@ impl Task {
     /// Set a target for the task
     ///
     /// This returns a result with an error if the serialization of the target fails
-    pub fn try_target<S: Serialize>(self, target: S) -> core::result::Result<Self, InputError> {
+    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
         match self {
             Self::Action(task) => task.try_target(target).map(Self::Action),
             Self::Method(task) => task.try_target(target).map(Self::Method),
@@ -277,7 +277,10 @@ mod tests {
         counter
     }
 
-    fn plus_one_async(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
+    fn plus_one_async_with_effect(
+        mut counter: View<i32>,
+        Target(tgt): Target<i32>,
+    ) -> Effect<View<i32>> {
         if *counter < tgt {
             *counter += 1;
         }
@@ -357,7 +360,7 @@ mod tests {
     #[tokio::test]
     async fn it_allows_extending_actions_with_effect() {
         let mut system = System::try_from(0).unwrap();
-        let task = plus_one_async.with_target(1);
+        let task = plus_one_async_with_effect.with_target(1);
 
         if let Task::Action(action) = task {
             // Run the action
@@ -429,7 +432,7 @@ mod tests {
     #[test]
     fn it_allows_to_dry_run_async_actions() {
         let system = System::try_from(1).unwrap();
-        let task = plus_one_async.with_target(2);
+        let task = plus_one_async_with_effect.with_target(2);
 
         if let Task::Action(action) = task {
             let changes = action.dry_run(&system).unwrap();
