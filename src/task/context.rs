@@ -21,7 +21,7 @@ impl Context {
 
     pub fn with_path(self, path: impl AsRef<str>) -> Self {
         let path = Path::new(
-            PointerBuf::parse(&path)
+            PointerBuf::parse(path.as_ref())
                 // this is a bug if it happens
                 .expect("invalid JSON Pointer path")
                 .as_ptr(),
