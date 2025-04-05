@@ -187,7 +187,7 @@ impl Planner {
                 // Find applicable tasks
                 let path = Path::new(op.path());
                 let matching = self.0.find_jobs_at(path.to_str());
-                if let Some((args, intents)) = matching {
+                if let Some((args, jobs)) = matching {
                     // Calculate the target for the job path
                     let pointer = path.as_ref();
 
@@ -202,10 +202,10 @@ impl Planner {
                         args,
                         target: target.clone(),
                     };
-                    for intent in intents {
-                        // If the intent is applicable to the operation
-                        if op.matches(&intent.operation) || intent.operation != Operation::Any {
-                            let task = intent.job.build_task(context.clone());
+                    for job in jobs {
+                        // If the job is applicable to the operation
+                        if op.matches(job.operation()) || job.operation() != &Operation::Any {
+                            let task = job.clone_task(context.clone());
 
                             // apply the task to the state, if it progresses the plan, then select
                             // it and put the new state with the new plan on the stack

@@ -24,7 +24,7 @@ pub use planner::*;
 pub use workflow::*;
 
 use crate::system::System;
-use crate::task::{self, Intent};
+use crate::task::{self, Job};
 
 pub struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.
@@ -117,9 +117,9 @@ impl<T> Worker<T, Uninitialized> {
         Worker::default()
     }
 
-    pub fn job(self, route: &'static str, intent: Intent) -> Self {
+    pub fn job(self, route: &'static str, job: Job) -> Self {
         let Self { mut inner, .. } = self;
-        inner.domain = inner.domain.job(route, intent);
+        inner.domain = inner.domain.job(route, job);
         Worker::from_inner(inner)
     }
 
