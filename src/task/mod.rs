@@ -2,8 +2,8 @@ mod context;
 mod effect;
 mod errors;
 mod handler;
-mod intent;
 mod into_result;
+mod job;
 
 use anyhow::anyhow;
 use anyhow::Context as AnyhowCtx;
@@ -24,7 +24,7 @@ pub(crate) use into_result::*;
 pub use effect::*;
 pub use errors::InputError;
 pub use handler::*;
-pub use intent::*;
+pub use job::*;
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
 type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch, Error> + Send + Sync>;

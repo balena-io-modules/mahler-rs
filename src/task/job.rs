@@ -1,3 +1,4 @@
+use super::context::Context;
 use super::handler::Handler;
 use super::Task;
 use std::cmp::Ordering;
@@ -12,32 +13,43 @@ pub enum Operation {
 }
 
 #[derive(Debug)]
-pub struct Intent {
-    pub(crate) operation: Operation,
-    pub(crate) task: Task,
+/// Jobs are generic work definitions.
+///
+/// They are assignable to an operation and can be given a priority
+pub struct Job {
+    operation: Operation,
+    task: Task,
     priority: u8,
 }
 
-impl Intent {
+impl Job {
     pub(crate) fn new(task: Task) -> Self {
-        Intent {
+        Job {
             operation: Operation::Update,
             task,
             priority: u8::MAX,
         }
     }
 
-    /// Set intent priority.
+    pub fn id(&self) -> &str {
+        self.task.id()
+    }
+
+    pub fn operation(&self) -> &Operation {
+        &self.operation
+    }
+
+    /// Set job priority.
     ///
     /// This defines search priority when looking for jobs
     /// the lower the value, the higher the priority
     pub fn with_priority(self, priority: u8) -> Self {
-        let Intent {
+        let Job {
             operation,
             task: job,
             ..
         } = self;
-        Intent {
+        Job {
             operation,
             task: job,
             priority,
@@ -45,53 +57,57 @@ impl Intent {
     }
 
     fn with_operation(self, operation: Operation) -> Self {
-        let Intent {
+        let Job {
             priority,
             task: job,
             ..
         } = self;
-        Intent {
+        Job {
             operation,
             task: job,
             priority,
         }
     }
+
+    pub(crate) fn clone_task(&self, context: Context) -> Task {
+        self.task.clone().with_context(context)
+    }
 }
 
-macro_rules! define_intent {
+macro_rules! define_job {
     ($func_name:ident, $operation:expr) => {
-        pub fn $func_name<H, T, O, I>(handler: H) -> Intent
+        pub fn $func_name<H, T, O, I>(handler: H) -> Job
         where
             H: Handler<T, O, I>,
             I: 'static,
         {
-            Intent::new(handler.into_task()).with_operation($operation)
+            Job::new(handler.into_task()).with_operation($operation)
         }
     };
 }
 
-define_intent!(create, Operation::Create);
-define_intent!(update, Operation::Update);
-define_intent!(delete, Operation::Delete);
-define_intent!(any, Operation::Any);
-define_intent!(none, Operation::None);
+define_job!(create, Operation::Create);
+define_job!(update, Operation::Update);
+define_job!(delete, Operation::Delete);
+define_job!(any, Operation::Any);
+define_job!(none, Operation::None);
 
-impl PartialEq for Intent {
+impl PartialEq for Job {
     fn eq(&self, other: &Self) -> bool {
         self.task.id() == other.task.id()
             && self.operation == other.operation
             && self.priority == other.priority
     }
 }
-impl Eq for Intent {}
+impl Eq for Job {}
 
-impl PartialOrd for Intent {
+impl PartialOrd for Job {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for Intent {
+impl Ord for Job {
     fn cmp(&self, other: &Self) -> Ordering {
         self.task
             .degree()

@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use thiserror::Error;
 
 use crate::path::PathArgs;
-use crate::task::{Intent, Operation};
+use crate::task::{Job, Operation};
 
 #[derive(Debug, Error)]
 #[error(transparent)]
@@ -12,8 +12,8 @@ pub struct PathSearchError(#[from] anyhow::Error);
 
 #[derive(Default, Debug)]
 pub struct Domain {
-    // The router stores a list of intents matching a route
-    router: Router<BTreeSet<Intent>>,
+    // The router stores a list of jobs matching a route
+    router: Router<BTreeSet<Job>>,
     // The index stores the reverse relation of job id to a route
     index: HashMap<Box<str>, String>,
 }
@@ -32,7 +32,7 @@ impl Domain {
     ///
     /// This function will panic if the route is not a valid path
     /// or if a job is assigned to multiple routes
-    pub fn job(self, route: &'static str, intent: Intent) -> Self {
+    pub fn job(self, route: &'static str, job: Job) -> Self {
         // TODO: it would be great to figure out a way to validate
         // that the pointer is valid for the parent state at compile time
         let Self {
@@ -40,8 +40,8 @@ impl Domain {
             mut index,
         } = self;
 
-        let job_id = String::from(intent.task.id());
-        let operation = intent.operation.clone();
+        let job_id = String::from(job.id());
+        let operation = job.operation();
 
         // Remove the route from the router if it exists or create
         // a new set if it doesn't
@@ -50,7 +50,7 @@ impl Domain {
         // Do not allow the same job to be assigned to
         // multiple operations. This could cause problems at
         // runtime
-        if queue.iter().any(|i| i.task.id() == job_id) {
+        if queue.iter().any(|j| j.id() == job_id) {
             panic!(
                 "cannot assign job '{}' to operation '{:?}', a previous assignment exists",
                 job_id, operation
@@ -58,7 +58,7 @@ impl Domain {
         }
 
         // Insert the route to the queue
-        let updated = queue.insert(intent);
+        let updated = queue.insert(job);
 
         // (re)insert the queue to the router, we should not have
         // conflicts here
@@ -79,10 +79,9 @@ impl Domain {
         Self { router, index }
     }
 
-    pub fn jobs<const N: usize>(self, route: &'static str, intents: [Intent; N]) -> Self {
-        intents
-            .into_iter()
-            .fold(self, |domain, intent| domain.job(route, intent))
+    pub fn jobs<const N: usize>(self, route: &'static str, list: [Job; N]) -> Self {
+        list.into_iter()
+            .fold(self, |domain, job| domain.job(route, job))
     }
 
     // This allows to find the path that a task relates to from the
@@ -182,7 +181,7 @@ impl Domain {
     pub(crate) fn find_jobs_at(
         &self,
         path: &str,
-    ) -> Option<(PathArgs, impl Iterator<Item = &Intent>)> {
+    ) -> Option<(PathArgs, impl Iterator<Item = &Job>)> {
         self.router
             .at(path)
             .map(|matched| {
@@ -191,7 +190,7 @@ impl Domain {
                     matched
                         .value
                         .iter()
-                        .filter(|i| i.operation != Operation::None),
+                        .filter(|i| i.operation() != &Operation::None),
                 )
             })
             .ok()
@@ -302,7 +301,7 @@ mod tests {
 
         let jobs: Vec<&str> = domain
             .find_jobs_at("/counters/{counter}")
-            .map(|(_, iter)| iter.map(|i| i.task.id()).collect())
+            .map(|(_, iter)| iter.map(|j| j.id()).collect())
             .unwrap();
 
         // It should return compound jobs first
@@ -317,7 +316,7 @@ mod tests {
 
         let jobs: Vec<&str> = domain
             .find_jobs_at("/counters/{counter}")
-            .map(|(_, iter)| iter.map(|i| i.task.id()).collect())
+            .map(|(_, iter)| iter.map(|j| j.id()).collect())
             .unwrap();
 
         // It should not return jobs for None operations

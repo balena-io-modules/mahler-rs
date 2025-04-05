@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeSet, LinkedList},
 };
 
-use crate::task::Operation as IntentOperation;
+use crate::task::Operation as JobOperation;
 
 #[derive(Debug)]
 pub struct Distance(BTreeSet<Operation>);
@@ -153,11 +153,11 @@ impl Operation {
         self.0.path()
     }
 
-    pub fn matches(&self, op: &IntentOperation) -> bool {
+    pub fn matches(&self, op: &JobOperation) -> bool {
         match self.0 {
-            PatchOperation::Add(..) => op == &IntentOperation::Create,
-            PatchOperation::Replace(..) => op == &IntentOperation::Update,
-            PatchOperation::Remove(..) => op == &IntentOperation::Delete,
+            PatchOperation::Add(..) => op == &JobOperation::Create,
+            PatchOperation::Replace(..) => op == &JobOperation::Update,
+            PatchOperation::Remove(..) => op == &JobOperation::Delete,
             _ => false,
         }
     }
