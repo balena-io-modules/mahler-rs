@@ -1,4 +1,30 @@
 - commits:
+    - subject: Rename Intent to Job
+      hash: 3be1b24d85983e2ad29a8a6a7c3065c77a7c3a3a
+      body: |
+        The name makes more sense now that the old Job definitions has been
+        removed
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Remove Job struct
+      hash: 2f28b145a28065704a7399ccf4c1ac23ca866c15
+      body: |
+        The Job struct serves no purpose other than allow to build multiple
+        tasks from a job, but this is not needed as task are cloneable.
+
+        This removes the `boxed` module as well which added a lot of complexity
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.8.1
+  title: ""
+  date: 2025-04-05T22:36:58.573Z
+- commits:
     - subject: Enable tracing in worker and add `logging` feature
       hash: 9c8f41dc20cafec9932b48a01f26f02bac69e29f
       body: |
