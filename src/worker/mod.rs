@@ -3,7 +3,12 @@ mod domain;
 mod planner;
 mod workflow;
 
-use log::{debug, error, info, warn};
+#[cfg(feature = "logging")]
+mod logging;
+
+#[cfg(feature = "logging")]
+pub use logging::init as init_logging;
+
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::sync::{
@@ -12,6 +17,7 @@ use std::sync::{
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
+use tracing::{error, field, info, span, Instrument, Level, Span};
 
 pub use domain::*;
 pub use planner::*;
@@ -173,20 +179,17 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
         // TODO: handle the error
         let tgt = serde_json::to_value(tgt).unwrap();
 
-        async fn plan_and_execute(
+        async fn find_and_run_workflow(
             planner: &Planner,
             system: &mut System,
             tgt: &Value,
             interrupted: &AtomicBool,
         ) -> Result<bool, RuntimeError> {
             // TODO: maybe use a timeout to finding the plan
-            let workflow = planner.find_workflow(system, tgt.clone())?;
+            let workflow = planner.find_workflow(system, tgt)?;
             if workflow.is_empty() {
                 return Ok(true);
             }
-
-            info!("plan found");
-            debug!("will execute the following tasks:\n{}", workflow);
 
             // run the plan and update the system
             workflow.execute(system, interrupted).await?;
@@ -197,59 +200,65 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
         // Create a flag to signal the cancellation of the planning
         let cancelled = Arc::new(AtomicBool::new(false));
         let interrupted = cancelled.clone();
+        let target = tgt.clone();
 
-        let handle = tokio::task::spawn(async move {
-            let mut system = system;
-            let mut tries = 0;
+        let handle = tokio::task::spawn(
+            async move {
+                let mut system = system;
+                let mut tries = 0;
+                let cur_span = Span::current();
 
-            // continue to re-plan and execute while we have not reached the target state
-            // or we have not been interrupted
-            while !interrupted.load(Ordering::Relaxed) {
-                let found = match plan_and_execute(&planner, &mut system, &tgt, &interrupted).await
-                {
-                    Ok(true) => break,
-                    Ok(false) => true,
-                    Err(RuntimeError::Interrupted) => {
-                        // TODO: implement some way to report the worker status
-                        // rather than just logging
-                        info!("workflow interrupted due to user request");
+                // continue to re-plan and execute while we have not reached the target state
+                // or we have not been interrupted
+                while !interrupted.load(Ordering::Relaxed) {
+                    let found = match find_and_run_workflow(
+                        &planner,
+                        &mut system,
+                        &tgt,
+                        &interrupted,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            // TODO: we need some result from the worker
+                            break;
+                        }
+                        Ok(false) => true,
+                        Err(RuntimeError::Interrupted) => {
+                            // TODO: implement some way to report the worker status
+                            // rather than just logging
+                            cur_span.record("return", "interrupted");
+                            return (planner, system);
+                        }
+                        Err(RuntimeError::PlanNotFound(Error::NotFound)) => false,
+                        Err(RuntimeError::PlanNotFound(_)) => {
+                            if cfg!(debug_assertions) {
+                                // TODO: Return the error in debug mode
+                                return (planner, system);
+                            }
+                            false
+                        }
+                        Err(_) => false,
+                    };
+
+                    if !found && tries >= opts.max_retries {
+                        cur_span.record("return", "failure");
                         return (planner, system);
                     }
-                    Err(RuntimeError::PlanNotFound(Error::NotFound)) => {
-                        warn!("no plan found");
-                        false
-                    }
-                    Err(RuntimeError::PlanNotFound(e)) => {
-                        if cfg!(debug_assertions) {
-                            // Return the error in debug mode
-                            error!("plan search failed: {}", e);
-                            // TODO: do we want to return an error here too?
-                            return (planner, system);
-                        } else {
-                            warn!("plan search failed: {}", e);
-                        }
-                        false
-                    }
-                    Err(e) => {
-                        warn!("failed to execute the workflow: {}", e);
-                        false
-                    }
-                };
 
-                if !found && tries >= opts.max_retries {
-                    error!("failed to reach the target state after {} tries", tries);
-                    return (planner, system);
+                    // Exponential backoff
+                    let wait = std::cmp::min(opts.min_wait_ms * 2u64.pow(tries), opts.max_wait_ms);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(wait)).await;
+
+                    // Only backoff if we did not find the target
+                    tries += if found { 0 } else { 1 };
                 }
 
-                // Exponential backoff
-                let wait = std::cmp::min(opts.min_wait_ms * 2u64.pow(tries), opts.max_wait_ms);
-                tokio::time::sleep(tokio::time::Duration::from_millis(wait)).await;
-
-                // Only backoff if we did not find the target
-                tries += if found { 0 } else { 1 };
+                cur_span.record("return", "success");
+                (planner, system)
             }
-            (planner, system)
-        });
+            .instrument(span!(Level::INFO, "seek_target", target = %target, return = field::Empty)),
+        );
 
         Worker::from_inner(Running {
             handle,
@@ -348,13 +357,17 @@ mod tests {
         })
     }
 
-    fn init() {
-        let _ = env_logger::builder().is_test(true).try_init();
+    fn buggy_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
+        if *counter < tgt {
+            // This is the wrong operation
+            *counter -= 1;
+        }
+
+        counter
     }
 
     #[tokio::test]
-    async fn test_worker() {
-        init();
+    async fn test_worker_complex_state() {
         let worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .initial_state(Counters(HashMap::from([
@@ -378,8 +391,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_worker_bug() {
+        let worker = Worker::new()
+            .job("", update(buggy_plus_one))
+            .initial_state(0)
+            .seek_target(2);
+
+        let _ = worker.wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_worker_cancel() {
-        init();
         let worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
@@ -394,7 +416,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_timeout() {
-        init();
         let worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)

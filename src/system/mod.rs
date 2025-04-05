@@ -15,7 +15,7 @@ pub struct SerializationError(#[from] serde_json::error::Error);
 #[error(transparent)]
 pub struct PatchError(#[from] json_patch::PatchError);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct System {
     state: Value,
 }

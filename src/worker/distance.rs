@@ -1,6 +1,7 @@
 use json_patch::{diff, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use jsonptr::Pointer;
 use serde_json::Value;
+use std::fmt::{self, Display};
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, LinkedList},
@@ -11,6 +12,18 @@ use crate::task::Operation as IntentOperation;
 #[derive(Debug)]
 pub struct Distance(BTreeSet<Operation>);
 
+impl Display for Distance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[")?;
+        for (i, op) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", op.0)?;
+        }
+        write!(f, "]")
+    }
+}
 impl Distance {
     /// Calculate the distance between some state and target
     ///
@@ -147,6 +160,12 @@ impl Operation {
             PatchOperation::Remove(..) => op == &IntentOperation::Delete,
             _ => false,
         }
+    }
+}
+
+impl Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

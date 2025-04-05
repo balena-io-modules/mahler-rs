@@ -3,6 +3,7 @@ use json_patch::Patch;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
+use tracing::{error, field, instrument, trace_span, warn, Level, Span};
 
 use crate::path::Path;
 use crate::system::System;
@@ -13,6 +14,7 @@ use super::domain::Domain;
 use super::workflow::{WorkUnit, Workflow};
 use super::PathSearchError;
 
+#[derive(Debug)]
 pub struct Planner(Domain);
 
 #[derive(Debug, Error)]
@@ -23,7 +25,7 @@ pub(crate) enum Error {
     #[error("task {id} failed during planning: {source}")]
     TaskFailure { id: String, source: task::Error },
 
-    #[error("condition failed for task")]
+    #[error("condition failed")]
     ConditionFailed,
 
     #[error("loop detected")]
@@ -48,6 +50,7 @@ impl Planner {
         Self(domain)
     }
 
+    #[instrument(level = "trace", skip_all, fields(task=%task, selected=field::Empty), err(level=Level::TRACE))]
     fn try_task(
         &self,
         task: Task,
@@ -88,6 +91,7 @@ impl Planner {
                 let dag = dag.with_head(WorkUnit::new(work_id, action));
                 let pending = [pending, changes].concat();
 
+                Span::current().record("selected", true);
                 Ok(Workflow { dag, pending })
             }
             Task::Method(method) => {
@@ -131,6 +135,7 @@ impl Planner {
                 if stack_len == 0 && cur_plan.pending.is_empty() {
                     return Err(Error::ConditionFailed)?;
                 }
+                Span::current().record("selected", true);
                 Ok(cur_plan)
             }
         }
@@ -145,14 +150,16 @@ impl Planner {
 
         let system = System::new(cur);
         let res = self
-            .find_workflow(&system, tgt)
+            .find_workflow(&system, &tgt)
             .context("Failed to find a plan")?;
         Ok(res)
     }
 
-    pub(crate) fn find_workflow(&self, system: &System, tgt: Value) -> Result<Workflow, Error> {
+    #[instrument(skip_all, fields(ini=%system.root(), tgt=%tgt), err, ret(Display))]
+    pub(crate) fn find_workflow(&self, system: &System, tgt: &Value) -> Result<Workflow, Error> {
         // Store the initial state and an empty plan on the stack
         let mut stack = vec![(system.clone(), Workflow::default(), 0)];
+        let parent_span = Span::current();
 
         // TODO: we should merge non conflicting workflows
         // for parallelism
@@ -164,7 +171,7 @@ impl Planner {
                 return Err(Error::MaxDepthReached)?;
             }
 
-            let distance = Distance::new(&cur_state, &tgt);
+            let distance = Distance::new(&cur_state, tgt);
 
             // we reached the target
             if distance.is_empty() {
@@ -172,6 +179,10 @@ impl Planner {
                 return Ok(cur_plan.reverse());
             }
 
+            let stack_len = stack.len();
+            let next_span =
+                trace_span!("find_next", cur = %&cur_state.root(), found = field::Empty);
+            let _enter = next_span.enter();
             for op in distance.iter() {
                 // Find applicable tasks
                 let path = Path::new(op.path());
@@ -181,7 +192,7 @@ impl Planner {
                     let pointer = path.as_ref();
 
                     // This should technically never happen
-                    let target = pointer.resolve(&tgt).with_context(|| {
+                    let target = pointer.resolve(tgt).with_context(|| {
                         format!("failed to resolve path {path} on system state")
                     })?;
 
@@ -231,13 +242,17 @@ impl Planner {
                                 Err(Error::ConditionFailed) => {}
                                 Err(Error::NotFound) => {}
                                 Err(err) => {
-                                    return Err(err);
+                                    if cfg!(debug_assertions) {
+                                        return Err(err);
+                                    }
+                                    warn!(parent: &parent_span, "{} ... ignoring", err);
                                 }
                             }
                         }
                     }
                 }
             }
+            next_span.record("found", stack.len() - stack_len);
         }
 
         Err(Error::NotFound)?
@@ -254,10 +269,6 @@ mod tests {
     use crate::task::*;
     use crate::worker::Domain;
     use crate::{seq, Dag};
-
-    fn init() {
-        let _ = env_logger::builder().is_test(true).try_init();
-    }
 
     fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
         if *counter < tgt {
@@ -302,8 +313,6 @@ mod tests {
 
     #[test]
     fn it_calculates_a_linear_workflow() {
-        init();
-
         let domain = Domain::new()
             .job("", update(plus_one))
             .job("", update(minus_one));
@@ -322,8 +331,6 @@ mod tests {
 
     #[test]
     fn it_aborts_search_if_plan_length_grows_too_much() {
-        init();
-
         let domain = Domain::new()
             .job("", update(buggy_plus_one))
             .job("", update(minus_one));
@@ -335,8 +342,6 @@ mod tests {
 
     #[test]
     fn it_calculates_a_linear_workflow_with_compound_tasks() {
-        init();
-
         let domain = Domain::new()
             .job("", update(plus_two))
             .job("", none(plus_one));
@@ -355,8 +360,6 @@ mod tests {
 
     #[test]
     fn it_calculates_a_linear_workflow_on_a_complex_state() {
-        init();
-
         #[derive(Serialize)]
         struct MyState {
             counters: HashMap<String, i32>,
@@ -390,8 +393,6 @@ mod tests {
 
     #[test]
     fn it_calculates_a_linear_workflow_on_a_complex_state_with_compound_tasks() {
-        init();
-
         #[derive(Serialize)]
         struct MyState {
             counters: HashMap<String, i32>,
@@ -423,8 +424,6 @@ mod tests {
 
     #[test]
     fn it_calculates_a_linear_workflow_on_a_complex_state_with_deep_compound_tasks() {
-        init();
-
         #[derive(Serialize)]
         struct MyState {
             counters: HashMap<String, i32>,

@@ -4,6 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicBool;
+use tracing::instrument;
 
 use super::RuntimeError;
 use crate::dag::{Dag, Node};
@@ -78,6 +79,7 @@ impl Display for WorkUnit {
 }
 
 impl<T: Into<Action> + Clone> Dag<T> {
+    #[instrument(name = "run_workflow", skip_all, err)]
     pub(crate) async fn execute(
         self,
         system: &mut System,

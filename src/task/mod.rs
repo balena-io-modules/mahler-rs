@@ -15,6 +15,7 @@ use std::fmt::{self, Display};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tracing::instrument;
 
 use crate::system::System;
 
@@ -39,6 +40,33 @@ pub struct Action {
     context: Context,
     dry_run: DryRun,
     run: Run,
+}
+
+impl fmt::Debug for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct Action<'a> {
+            id: &'a str,
+            scoped: &'a bool,
+            context: &'a Context,
+        }
+
+        let Self {
+            id,
+            scoped,
+            context,
+            ..
+        } = self;
+        fmt::Debug::fmt(
+            &Action {
+                id,
+                scoped,
+                context,
+            },
+            f,
+        )
+    }
 }
 
 impl Action {
@@ -73,6 +101,7 @@ impl Action {
     }
 
     /// Run the task sequentially
+    #[instrument(name="run_task", skip_all, fields(task=%self), err)]
     pub(crate) async fn run(&self, system: &mut System) -> Result<(), Error> {
         let Action { context, run, .. } = self;
         let changes = (run)(system, context).await?;
@@ -108,6 +137,33 @@ pub struct Method {
     scoped: bool,
     context: Context,
     expand: Expand,
+}
+
+impl fmt::Debug for Method {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct Method<'a> {
+            id: &'a str,
+            scoped: &'a bool,
+            context: &'a Context,
+        }
+
+        let Self {
+            id,
+            scoped,
+            context,
+            ..
+        } = self;
+        fmt::Debug::fmt(
+            &Method {
+                id,
+                scoped,
+                context,
+            },
+            f,
+        )
+    }
 }
 
 impl Method {
@@ -149,9 +205,21 @@ impl Method {
     }
 }
 
+impl Display for Method {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self
+            .id
+            .split("::")
+            .skip(1)
+            .collect::<Vec<&str>>()
+            .join("::");
+        write!(f, "{}({})", id, self.context.path)
+    }
+}
+
 /// A task is either a concrete unit of work (action) or rule to
 /// derive a list of tasks (method)
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Task {
     Action(Action),
     Method(Method),
@@ -249,6 +317,15 @@ impl Task {
         match self {
             Self::Action(task) => Self::Action(task.with_path(path)),
             Self::Method(task) => Self::Method(task.with_path(path)),
+        }
+    }
+}
+
+impl Display for Task {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Action(action) => action.fmt(f),
+            Self::Method(method) => method.fmt(f),
         }
     }
 }

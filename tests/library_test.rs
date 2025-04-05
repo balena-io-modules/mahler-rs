@@ -10,6 +10,15 @@ use gustav::worker::Worker;
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct Counters(HashMap<String, i32>);
 
+fn init() {
+    #[cfg(feature = "logging")]
+    gustav::worker::init_logging();
+    env_logger::builder()
+        .format_target(false)
+        .try_init()
+        .unwrap_or(());
+}
+
 fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
     if *counter < tgt {
         // Modify the counter if we are below target
@@ -30,6 +39,7 @@ fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32
 // this is just a placeholder test to check that library modules
 // are accessible
 async fn test_worker() {
+    init();
     let worker = Worker::new()
         .job("/{counter}", update(plus_one))
         .initial_state(Counters(HashMap::from([
