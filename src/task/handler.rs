@@ -1,7 +1,6 @@
 use json_patch::Patch;
 use serde::Serialize;
 
-use super::job::Job;
 use super::{Context, Effect, IntoEffect, Task};
 use crate::system::{FromSystem, System};
 use crate::task::Error;
@@ -14,9 +13,6 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
         std::any::type_name::<Self>()
     }
 
-    /// Convert the handler into a job
-    fn into_job(self) -> Job;
-
     /// Return true if the handler can be parallelized
     ///
     /// This means the handler only scoped extractors and
@@ -25,12 +21,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     fn is_scoped(&self) -> bool;
 
     /// Create a task from the handler
-    ///
-    /// This is a convenience function that is equivalent to
-    /// calling `into_job().to_task(context)`
-    fn into_task(self) -> Task {
-        self.into_job().build_task(Context::new())
-    }
+    fn into_task(self) -> Task;
 
     /// Create a task from the handler with a specific target
     ///
@@ -81,8 +72,8 @@ macro_rules! impl_action_handler {
                 true $(&& $ty::is_scoped())*
             }
 
-            fn into_job(self) -> Job {
-                Job::from_action(self)
+            fn into_task(self) -> Task {
+                Task::from_action(self, Context::default())
             }
         }
     };
@@ -138,8 +129,8 @@ macro_rules! impl_method_handler {
                 true $(&& $ty::is_scoped())*
             }
 
-            fn into_job(self) -> Job {
-                Job::from_method(self)
+            fn into_task(self) -> Task {
+                Task::from_method(self, Context::default())
             }
         }
     };

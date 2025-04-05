@@ -205,7 +205,7 @@ impl Planner {
                     for intent in intents {
                         // If the intent is applicable to the operation
                         if op.matches(&intent.operation) || intent.operation != Operation::Any {
-                            let task = intent.job.build_task(context.clone());
+                            let task = intent.task.clone().with_context(context.clone());
 
                             // apply the task to the state, if it progresses the plan, then select
                             // it and put the new state with the new plan on the stack

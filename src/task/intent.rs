@@ -1,5 +1,5 @@
 use super::handler::Handler;
-use super::job::Job;
+use super::Task;
 use std::cmp::Ordering;
 
 #[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Clone)]
@@ -14,15 +14,15 @@ pub enum Operation {
 #[derive(Debug)]
 pub struct Intent {
     pub(crate) operation: Operation,
-    pub(crate) job: Job,
+    pub(crate) task: Task,
     priority: u8,
 }
 
 impl Intent {
-    pub(crate) fn new(job: Job) -> Self {
+    pub(crate) fn new(task: Task) -> Self {
         Intent {
             operation: Operation::Update,
-            job,
+            task,
             priority: u8::MAX,
         }
     }
@@ -32,19 +32,27 @@ impl Intent {
     /// This defines search priority when looking for jobs
     /// the lower the value, the higher the priority
     pub fn with_priority(self, priority: u8) -> Self {
-        let Intent { operation, job, .. } = self;
+        let Intent {
+            operation,
+            task: job,
+            ..
+        } = self;
         Intent {
             operation,
-            job,
+            task: job,
             priority,
         }
     }
 
     fn with_operation(self, operation: Operation) -> Self {
-        let Intent { priority, job, .. } = self;
+        let Intent {
+            priority,
+            task: job,
+            ..
+        } = self;
         Intent {
             operation,
-            job,
+            task: job,
             priority,
         }
     }
@@ -57,7 +65,7 @@ macro_rules! define_intent {
             H: Handler<T, O, I>,
             I: 'static,
         {
-            Intent::new(handler.into_job()).with_operation($operation)
+            Intent::new(handler.into_task()).with_operation($operation)
         }
     };
 }
@@ -70,7 +78,7 @@ define_intent!(none, Operation::None);
 
 impl PartialEq for Intent {
     fn eq(&self, other: &Self) -> bool {
-        self.job == other.job
+        self.task.id() == other.task.id()
             && self.operation == other.operation
             && self.priority == other.priority
     }
@@ -85,11 +93,11 @@ impl PartialOrd for Intent {
 
 impl Ord for Intent {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.job
-            .degree
-            .cmp(&other.job.degree)
+        self.task
+            .degree()
+            .cmp(&other.task.degree())
             .then(self.operation.cmp(&other.operation))
             .then(self.priority.cmp(&other.priority))
-            .then(self.job.id.cmp(other.job.id))
+            .then(self.task.id().cmp(other.task.id()))
     }
 }

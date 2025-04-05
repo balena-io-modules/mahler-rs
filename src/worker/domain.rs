@@ -40,7 +40,7 @@ impl Domain {
             mut index,
         } = self;
 
-        let job_id = String::from(intent.job.id());
+        let job_id = String::from(intent.task.id());
         let operation = intent.operation.clone();
 
         // Remove the route from the router if it exists or create
@@ -50,7 +50,7 @@ impl Domain {
         // Do not allow the same job to be assigned to
         // multiple operations. This could cause problems at
         // runtime
-        if queue.iter().any(|i| i.job.id() == job_id) {
+        if queue.iter().any(|i| i.task.id() == job_id) {
             panic!(
                 "cannot assign job '{}' to operation '{:?}', a previous assignment exists",
                 job_id, operation
@@ -302,7 +302,7 @@ mod tests {
 
         let jobs: Vec<&str> = domain
             .find_jobs_at("/counters/{counter}")
-            .map(|(_, iter)| iter.map(|i| i.job.id()).collect())
+            .map(|(_, iter)| iter.map(|i| i.task.id()).collect())
             .unwrap();
 
         // It should return compound jobs first
@@ -317,7 +317,7 @@ mod tests {
 
         let jobs: Vec<&str> = domain
             .find_jobs_at("/counters/{counter}")
-            .map(|(_, iter)| iter.map(|i| i.job.id()).collect())
+            .map(|(_, iter)| iter.map(|i| i.task.id()).collect())
             .unwrap();
 
         // It should not return jobs for None operations

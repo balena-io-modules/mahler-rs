@@ -1,11 +1,9 @@
-mod boxed;
 mod context;
 mod effect;
 mod errors;
 mod handler;
 mod intent;
 mod into_result;
-mod job;
 
 use anyhow::anyhow;
 use anyhow::Context as AnyhowCtx;
@@ -217,6 +215,18 @@ impl Display for Method {
     }
 }
 
+/// The Task degree denotes its cardinality or its position in a search tree
+///
+/// - Atom jobs are the leafs in the search tree, they define the work to be
+///   executed and cannot be expanded
+/// - List jobs define work in terms of other tasks, they are expanded recursively
+///   in order to get to a list of atoms
+#[derive(Clone, PartialEq, PartialOrd, Eq, Ord, Debug)]
+pub(crate) enum Degree {
+    Composite,
+    Atomic,
+}
+
 /// A task is either a concrete unit of work (action) or rule to
 /// derive a list of tasks (method)
 #[derive(Debug, Clone)]
@@ -273,6 +283,13 @@ impl Task {
         }
     }
 
+    pub(crate) fn degree(&self) -> Degree {
+        match self {
+            Self::Action(_) => Degree::Atomic,
+            Self::Method(_) => Degree::Composite,
+        }
+    }
+
     pub(crate) fn context(&self) -> &Context {
         match self {
             Self::Action(Action { context, .. }) => context,
@@ -317,6 +334,19 @@ impl Task {
         match self {
             Self::Action(task) => Self::Action(task.with_path(path)),
             Self::Method(task) => Self::Method(task.with_path(path)),
+        }
+    }
+
+    pub(crate) fn with_context(self, ctx: Context) -> Self {
+        match self {
+            Self::Action(task) => Self::Action(Action {
+                context: ctx,
+                ..task
+            }),
+            Self::Method(task) => Self::Method(Method {
+                context: ctx,
+                ..task
+            }),
         }
     }
 }
