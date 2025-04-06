@@ -5,6 +5,7 @@ mod errors;
 mod handler;
 mod into_result;
 mod job;
+mod with_io;
 
 use anyhow::anyhow;
 use anyhow::Context as AnyhowCtx;
@@ -25,9 +26,15 @@ pub(crate) use into_result::*;
 
 pub use description::*;
 pub use effect::*;
-pub use errors::InputError;
 pub use handler::*;
 pub use job::*;
+pub use with_io::*;
+
+pub mod prelude {
+    pub use super::handler::*;
+    pub use super::job::*;
+    pub use super::with_io::*;
+}
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
 type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch, Error> + Send + Sync>;
