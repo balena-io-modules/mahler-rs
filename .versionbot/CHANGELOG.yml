@@ -1,4 +1,19 @@
 - commits:
+    - subject: Allow describing tasks
+      hash: 475a0a3c3804b33f1d4a8434a5d3235d12bac884
+      body: |
+        The task description is an optional function that can be passed when
+        constructing the domain/worker that will be use in logging to identify
+        the task based on the context
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.9.0
+  title: ""
+  date: 2025-04-06T01:25:15.139Z
+- commits:
     - subject: Rename Intent to Job
       hash: 3be1b24d85983e2ad29a8a6a7c3065c77a7c3a3a
       body: |
