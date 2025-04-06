@@ -1,9 +1,8 @@
 use json_patch::Patch;
 use serde::Serialize;
 
-use super::{Context, Effect, IntoEffect, Task};
+use super::{Context, Effect, Error, IntoEffect, Task};
 use crate::system::{FromSystem, System};
-use crate::task::Error;
 
 pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     fn call(&self, system: &System, context: &Context) -> Effect<O, Error, I>;

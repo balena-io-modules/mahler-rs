@@ -1,4 +1,5 @@
 use super::context::Context;
+use super::description::Description;
 use super::handler::Handler;
 use super::Task;
 use std::cmp::Ordering;
@@ -65,6 +66,22 @@ impl Job {
         Job {
             operation,
             task: job,
+            priority,
+        }
+    }
+
+    pub fn with_description<D, T>(self, description: D) -> Self
+    where
+        D: Description<T>,
+    {
+        let Job {
+            operation,
+            task: job,
+            priority,
+        } = self;
+        Job {
+            operation,
+            task: job.with_description(description),
             priority,
         }
     }
