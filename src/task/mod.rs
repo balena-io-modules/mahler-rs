@@ -1,4 +1,5 @@
 mod context;
+mod description;
 mod effect;
 mod errors;
 mod handler;
@@ -14,6 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tracing::instrument;
+use tracing::warn;
 
 use crate::system::System;
 
@@ -21,6 +23,7 @@ pub(crate) use context::*;
 pub(crate) use errors::*;
 pub(crate) use into_result::*;
 
+pub use description::*;
 pub use effect::*;
 pub use errors::InputError;
 pub use handler::*;
@@ -30,6 +33,7 @@ type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
 type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch, Error> + Send + Sync>;
 type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
 type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>, Error> + Send + Sync>;
+type Describe = Arc<dyn Fn(&Context) -> Result<String, Error> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Action {
@@ -38,6 +42,7 @@ pub struct Action {
     context: Context,
     dry_run: DryRun,
     run: Run,
+    describe: Describe,
 }
 
 impl fmt::Debug for Action {
@@ -119,13 +124,21 @@ impl Action {
 
 impl Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let id = self
-            .id
-            .split("::")
-            .skip(1)
-            .collect::<Vec<&str>>()
-            .join("::");
-        write!(f, "{}({})", id, self.context.path)
+        let description = (self.describe)(self.context()).unwrap_or_else(|e| {
+            match e {
+                Error::Unexpected(_) => {}
+                _ => warn!("failed to expand description for task {}: {}", self.id, e),
+            }
+
+            let id = self
+                .id
+                .split("::")
+                .skip(1)
+                .collect::<Vec<&str>>()
+                .join("::");
+            format!("{}({})", id, self.context.path)
+        });
+        write!(f, "{}", description)
     }
 }
 
@@ -135,6 +148,7 @@ pub struct Method {
     scoped: bool,
     context: Context,
     expand: Expand,
+    describe: Describe,
 }
 
 impl fmt::Debug for Method {
@@ -205,13 +219,20 @@ impl Method {
 
 impl Display for Method {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let id = self
-            .id
-            .split("::")
-            .skip(1)
-            .collect::<Vec<&str>>()
-            .join("::");
-        write!(f, "{}({})", id, self.context.path)
+        let description = (self.describe)(self.context()).unwrap_or_else(|e| {
+            match e {
+                Error::Unexpected(_) => {}
+                _ => warn!("failed to expand description for task {}: {}", self.id, e),
+            }
+            let id = self
+                .id
+                .split("::")
+                .skip(1)
+                .collect::<Vec<&str>>()
+                .join("::");
+            format!("{}({})", id, self.context.path)
+        });
+        write!(f, "{}", description)
     }
 }
 
@@ -255,6 +276,10 @@ impl Task {
 
                 Box::pin(async { effect.run().await })
             }),
+            describe: Arc::new(|_: &Context| {
+                // This error should never be seen
+                Err(UnexpectedError::from(anyhow!("undefined description")))?
+            }),
         })
     }
 
@@ -271,6 +296,10 @@ impl Task {
                 // so the Effect returned by this handler is assumed to
                 // be pure
                 method.call(system, context).pure()
+            }),
+            describe: Arc::new(|_: &Context| {
+                // This error should never be seen
+                Err(UnexpectedError::from(anyhow!("undefined description")))?
             }),
         })
     }
@@ -349,6 +378,22 @@ impl Task {
             }),
         }
     }
+
+    pub(crate) fn with_description<D, T>(self, description: D) -> Self
+    where
+        D: Description<T>,
+    {
+        match self {
+            Self::Action(task) => Self::Action(Action {
+                describe: Arc::new(move |ctx| description.call(ctx)),
+                ..task
+            }),
+            Self::Method(task) => Self::Method(Method {
+                describe: Arc::new(move |ctx| description.call(ctx)),
+                ..task
+            }),
+        }
+    }
 }
 
 impl Display for Task {
@@ -415,6 +460,23 @@ mod tests {
     #[test]
     fn it_gets_metadata_from_function() {
         assert_eq!(plus_one.id(), "gustav::task::tests::plus_one");
+    }
+
+    #[test]
+    fn it_allows_to_describe_a_task() {
+        let task = plus_one.into_task().with_description(|| "+1");
+        assert_eq!(task.to_string(), "+1");
+
+        let task = plus_one
+            .into_task()
+            .with_description(|Target(tgt): Target<i32>| format!("+1 until {tgt}"));
+
+        // The target has not been assigned so the default description is returned
+        assert_eq!(task.to_string(), "task::tests::plus_one()");
+
+        let task = task.with_target(2);
+        // Now the description can be used
+        assert_eq!(task.to_string(), "+1 until 2");
     }
 
     #[test]

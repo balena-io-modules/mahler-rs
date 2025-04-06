@@ -1,6 +1,7 @@
 use jsonptr::PointerBuf;
 use serde_json::Value;
 
+use super::errors::Error;
 use crate::path::{Path, PathArgs};
 
 #[derive(Clone, Default, Debug)]
@@ -34,4 +35,10 @@ impl Context {
         args.insert(key, value);
         Self { args, ..self }
     }
+}
+
+pub trait FromContext: Sized {
+    type Error: Into<Error> + 'static;
+
+    fn from_context(context: &Context) -> Result<Self, Self::Error>;
 }

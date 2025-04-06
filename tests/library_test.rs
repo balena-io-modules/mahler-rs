@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use gustav::extract::{Target, View};
+use gustav::extract::{Args, Target, View};
 use gustav::task::*;
 use gustav::worker::Worker;
 
@@ -41,23 +41,24 @@ fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32
 async fn test_worker() {
     init();
     let worker = Worker::new()
-        .job("/{counter}", update(plus_one))
+        .job(
+            "/{counter}",
+            update(plus_one)
+                .with_description(|Args(counter): Args<String>| format!("{counter} + 1")),
+        )
         .initial_state(Counters(HashMap::from([
-            ("one".to_string(), 0),
-            ("two".to_string(), 0),
+            ("a".to_string(), 0),
+            ("b".to_string(), 0),
         ])))
         .seek_target(Counters(HashMap::from([
-            ("one".to_string(), 2),
-            ("two".to_string(), 0),
+            ("a".to_string(), 2),
+            ("b".to_string(), 0),
         ])));
 
     let worker = worker.wait(None).await.unwrap();
     let state = worker.state();
     assert_eq!(
         state,
-        Counters(HashMap::from([
-            ("one".to_string(), 2),
-            ("two".to_string(), 0),
-        ]))
+        Counters(HashMap::from([("a".to_string(), 2), ("b".to_string(), 0),]))
     );
 }

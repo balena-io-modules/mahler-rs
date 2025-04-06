@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
 use crate::system::{FromSystem, System};
-use crate::task::{Context, InputError};
+use crate::task::{Context, FromContext, InputError};
 
 mod de;
 mod error;
@@ -11,10 +11,10 @@ mod error;
 #[derive(Debug)]
 pub struct Args<T>(pub T);
 
-impl<T: DeserializeOwned + Send> FromSystem for Args<T> {
+impl<T: DeserializeOwned + Send> FromContext for Args<T> {
     type Error = InputError;
 
-    fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
+    fn from_context(context: &Context) -> Result<Self, Self::Error> {
         let args = &context.args;
         let value = T::deserialize(de::PathDeserializer::new(args)).with_context(|| {
             format!(
@@ -24,6 +24,14 @@ impl<T: DeserializeOwned + Send> FromSystem for Args<T> {
         })?;
 
         Ok(Args(value))
+    }
+}
+
+impl<T: DeserializeOwned + Send> FromSystem for Args<T> {
+    type Error = InputError;
+
+    fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
+        Self::from_context(context)
     }
 }
 
