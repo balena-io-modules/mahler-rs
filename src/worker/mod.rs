@@ -19,6 +19,7 @@ pub use logging::init as init_logging;
 use crate::planner::{Domain, Error as PlannerError, Planner};
 use crate::system::System;
 use crate::task::{self, Job};
+use crate::workflow::Status;
 
 pub struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.
@@ -190,7 +191,12 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
             }
 
             // run the plan and update the system
-            workflow.execute(system, interrupted).await?;
+            if matches!(
+                workflow.execute(system, interrupted).await?,
+                Status::Interrupted
+            ) {
+                return Err(RuntimeError::Interrupted);
+            }
 
             Ok(false)
         }

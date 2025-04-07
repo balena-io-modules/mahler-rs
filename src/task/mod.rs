@@ -17,7 +17,6 @@ use std::panic;
 use std::panic::RefUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
-use tracing::instrument;
 use tracing::warn;
 
 use crate::system::System;
@@ -118,7 +117,6 @@ impl Action {
     }
 
     /// Run the task sequentially
-    #[instrument(name="run_task", skip_all, fields(task=%self), err)]
     pub(crate) async fn run(&self, system: &mut System) -> Result<(), Error> {
         let Action { context, run, .. } = self;
         let changes = (run)(system, context).await?;
