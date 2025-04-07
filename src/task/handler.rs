@@ -1,5 +1,6 @@
 use json_patch::Patch;
 use serde::Serialize;
+use std::panic::RefUnwindSafe;
 
 use super::{Action, Context, Effect, Error, IntoEffect, Method, Task};
 use crate::system::{FromSystem, System};
@@ -102,7 +103,7 @@ macro_rules! impl_method_handler {
         #[allow(non_snake_case, unused)]
         impl<F, $($ty,)* Res> Handler<($($ty,)*), Vec<Task>> for F
         where
-            F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
+            F: Fn($($ty,)*) -> Res + Clone + RefUnwindSafe + Send + Sync +'static,
             Res: IntoEffect<Vec<Task>, Error>,
             $($ty: FromSystem,)*
         {

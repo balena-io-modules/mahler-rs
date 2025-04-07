@@ -1,14 +1,3 @@
-mod distance;
-mod domain;
-mod planner;
-mod workflow;
-
-#[cfg(feature = "logging")]
-mod logging;
-
-#[cfg(feature = "logging")]
-pub use logging::init as init_logging;
-
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::sync::{
@@ -19,10 +8,15 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use tracing::{error, field, info, span, Instrument, Level, Span};
 
-pub use domain::*;
-pub use planner::*;
-pub use workflow::*;
+mod runtime;
 
+#[cfg(feature = "logging")]
+mod logging;
+
+#[cfg(feature = "logging")]
+pub use logging::init as init_logging;
+
+use crate::planner::{Domain, Error as PlannerError, Planner};
 use crate::system::System;
 use crate::task::{self, Job};
 
@@ -112,6 +106,10 @@ impl<T, S: WorkerState> Worker<T, S> {
     }
 }
 
+// #[derive(Debug, Error)]
+// #[error(transparent)]
+// pub struct Error(#[from] anyhow::Error);
+
 impl<T> Worker<T, Uninitialized> {
     pub fn new() -> Self {
         Worker::default()
@@ -160,7 +158,7 @@ pub(crate) enum RuntimeError {
     Interrupted,
 
     #[error(transparent)]
-    PlanNotFound(#[from] planner::Error),
+    PlanNotFound(#[from] PlannerError),
 }
 
 impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
@@ -230,7 +228,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                             cur_span.record("return", "interrupted");
                             return (planner, system);
                         }
-                        Err(RuntimeError::PlanNotFound(Error::NotFound)) => false,
+                        Err(RuntimeError::PlanNotFound(PlannerError::NotFound)) => false,
                         Err(RuntimeError::PlanNotFound(_)) => {
                             if cfg!(debug_assertions) {
                                 // TODO: Return the error in debug mode

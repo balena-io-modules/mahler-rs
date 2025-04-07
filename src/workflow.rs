@@ -6,7 +6,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicBool;
 use tracing::instrument;
 
-use super::RuntimeError;
+// TODO: replace by a better error
+use super::worker::RuntimeError;
 use crate::dag::{Dag, Node};
 use crate::system::System;
 use crate::task::Action;

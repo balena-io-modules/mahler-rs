@@ -13,6 +13,8 @@ use json_patch::Patch;
 use serde::Serialize;
 use std::fmt::{self, Display};
 use std::future::Future;
+use std::panic;
+use std::panic::RefUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
 use tracing::instrument;
@@ -186,17 +188,28 @@ impl fmt::Debug for Method {
 impl Method {
     pub(crate) fn new<H, T>(method: H, context: Context) -> Self
     where
-        H: Handler<T, Vec<Task>>,
+        H: Handler<T, Vec<Task>> + RefUnwindSafe,
     {
         Method {
             id: method.id(),
             scoped: method.is_scoped(),
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
-                // List tasks cannot perform changes to the system
-                // so the Effect returned by this handler is assumed to
-                // be pure
-                method.call(system, context).pure()
+                // Because with_target has a chance of panicking, we catch any panics
+                // on task methods to simplify method definitions
+                panic::catch_unwind(|| method.call(system, context))
+                    .map(|r| r.pure())
+                    .map_err(|e| {
+                        let msg = e
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| e.downcast_ref::<String>().cloned())
+                            .or_else(|| e.downcast_ref::<InputError>().map(|err| err.to_string()))
+                            .unwrap_or_else(|| {
+                                format!("Panic while expanding task {}", method.id())
+                            });
+                        InputError::from(anyhow!(msg))
+                    })?
             }),
             describe: Arc::new(|_: &Context| {
                 // This error should never be seen
