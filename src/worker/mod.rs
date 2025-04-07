@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::sync::{
@@ -7,8 +8,6 @@ use std::sync::{
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tracing::{error, field, info, span, Instrument, Level, Span};
-
-mod runtime;
 
 #[cfg(feature = "logging")]
 mod logging;
@@ -21,6 +20,7 @@ use crate::system::System;
 use crate::task::{self, Job};
 use crate::workflow::Status;
 
+#[derive(Clone)]
 pub struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.
     /// Defauts to infinite tries (0).
@@ -107,10 +107,6 @@ impl<T, S: WorkerState> Worker<T, S> {
     }
 }
 
-// #[derive(Debug, Error)]
-// #[error(transparent)]
-// pub struct Error(#[from] anyhow::Error);
-
 impl<T> Worker<T, Uninitialized> {
     pub fn new() -> Self {
         Worker::default()
@@ -151,7 +147,7 @@ impl<T> Worker<T, Uninitialized> {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum RuntimeError {
+enum InternalError {
     #[error(transparent)]
     TaskFailed(#[from] task::Error),
 
@@ -183,7 +179,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
             system: &mut System,
             tgt: &Value,
             interrupted: &AtomicBool,
-        ) -> Result<bool, RuntimeError> {
+        ) -> Result<bool, InternalError> {
             // TODO: maybe use a timeout to finding the plan
             let workflow = planner.find_workflow(system, tgt)?;
             if workflow.is_empty() {
@@ -195,7 +191,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                 workflow.execute(system, interrupted).await?,
                 Status::Interrupted
             ) {
-                return Err(RuntimeError::Interrupted);
+                return Err(InternalError::Interrupted);
             }
 
             Ok(false)
@@ -203,7 +199,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
 
         // Create a flag to signal the cancellation of the planning
         let cancelled = Arc::new(AtomicBool::new(false));
-        let interrupted = cancelled.clone();
+        let sigint = cancelled.clone();
         let target = tgt.clone();
 
         let handle = tokio::task::spawn(
@@ -214,36 +210,30 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
 
                 // continue to re-plan and execute while we have not reached the target state
                 // or we have not been interrupted
-                while !interrupted.load(Ordering::Relaxed) {
-                    let found = match find_and_run_workflow(
-                        &planner,
-                        &mut system,
-                        &tgt,
-                        &interrupted,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            // TODO: we need some result from the worker
-                            break;
-                        }
-                        Ok(false) => true,
-                        Err(RuntimeError::Interrupted) => {
-                            // TODO: implement some way to report the worker status
-                            // rather than just logging
-                            cur_span.record("return", "interrupted");
-                            return (planner, system);
-                        }
-                        Err(RuntimeError::PlanNotFound(PlannerError::NotFound)) => false,
-                        Err(RuntimeError::PlanNotFound(_)) => {
-                            if cfg!(debug_assertions) {
-                                // TODO: Return the error in debug mode
+                while !sigint.load(Ordering::Relaxed) {
+                    let found =
+                        match find_and_run_workflow(&planner, &mut system, &tgt, &sigint).await {
+                            Ok(true) => {
+                                // TODO: we need some result from the worker
+                                break;
+                            }
+                            Ok(false) => true,
+                            Err(InternalError::Interrupted) => {
+                                // TODO: implement some way to report the worker status
+                                // rather than just logging
+                                cur_span.record("return", "interrupted");
                                 return (planner, system);
                             }
-                            false
-                        }
-                        Err(_) => false,
-                    };
+                            Err(InternalError::PlanNotFound(PlannerError::NotFound)) => false,
+                            Err(InternalError::PlanNotFound(_)) => {
+                                if cfg!(debug_assertions) {
+                                    // TODO: Return the error in debug mode
+                                    return (planner, system);
+                                }
+                                false
+                            }
+                            Err(_) => false,
+                        };
 
                     if !found && tries >= opts.max_retries {
                         cur_span.record("return", "failure");
@@ -273,8 +263,17 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
 }
 
 #[derive(Debug, Error)]
-#[error("timeout reached while waiting for the worker to finish")]
-pub struct Timeout;
+#[error(transparent)]
+pub struct UnexpectedError(#[from] anyhow::Error);
+
+#[derive(Debug, Error)]
+pub enum WaitStatus {
+    #[error("timeout reached while waiting for the worker to finish")]
+    Timeout,
+
+    #[error("unexpected error: ${0}")]
+    Error(#[from] UnexpectedError),
+}
 
 impl<T: DeserializeOwned> Worker<T, Running> {
     pub async fn cancel(self) -> Worker<T, Ready> {
@@ -296,27 +295,25 @@ impl<T: DeserializeOwned> Worker<T, Running> {
         })
     }
 
-    // TODO: this is not great because a timeout means that
-    // you'll never be able to use the worker again
     pub async fn wait(
-        self,
+        &mut self,
         timeout: Option<std::time::Duration>,
-    ) -> Result<Worker<T, Ready>, Timeout> {
-        let Running { handle, opts, .. } = self.inner;
+    ) -> Result<Worker<T, Ready>, WaitStatus> {
+        let Running { handle, opts, .. } = &mut self.inner;
 
         match timeout {
             Some(timeout) => match tokio::time::timeout(timeout, handle).await {
                 Ok(Ok((planner, system))) => Ok(Worker::from_inner(Ready {
                     planner,
                     system,
-                    opts,
+                    opts: opts.clone(),
                 })),
                 Ok(Err(e)) => {
                     // A panic happened while waiting for the handle
-                    // this should not happen
-                    panic!("unexpected worker failure: {:?}", e);
+                    // this should not happen but we handle it anyway
+                    Err(UnexpectedError(anyhow!(e)))?
                 }
-                Err(_) => Err(Timeout),
+                Err(_) => Err(WaitStatus::Timeout),
             },
             None => {
                 // Wait indefinitely
@@ -324,7 +321,7 @@ impl<T: DeserializeOwned> Worker<T, Running> {
                 Ok(Worker::from_inner(Ready {
                     planner,
                     system,
-                    opts,
+                    opts: opts.clone(),
                 }))
             }
         }
@@ -372,7 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_complex_state() {
-        let worker = Worker::new()
+        let mut worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .initial_state(Counters(HashMap::from([
                 ("one".to_string(), 0),
@@ -396,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_bug() {
-        let worker = Worker::new()
+        let mut worker = Worker::new()
             .job("", update(buggy_plus_one))
             .initial_state(0)
             .seek_target(2);
@@ -420,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_timeout() {
-        let worker = Worker::new()
+        let mut worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
             .seek_target(2);

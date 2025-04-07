@@ -40,7 +40,7 @@ fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
 // are accessible
 async fn test_worker() {
     init();
-    let worker = Worker::new()
+    let mut worker = Worker::new()
         .job(
             "/{counter}",
             update(plus_one)
