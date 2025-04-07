@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use json_patch::PatchOperation;
+use json_patch::{Patch, PatchOperation};
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
@@ -35,13 +35,16 @@ pub(crate) struct WorkUnit {
      * Only atomic tasks should be added to a worflow item
      */
     action: Action,
-    // TODO: store the planing output of the task
-    // to compare during execution
+
+    /**
+     * The output of the task during planning
+     */
+    output: Vec<PatchOperation>,
 }
 
 impl WorkUnit {
-    pub fn new(id: u64, action: Action) -> Self {
-        Self { id, action }
+    pub fn new(id: u64, action: Action, output: Vec<PatchOperation>) -> Self {
+        Self { id, action, output }
     }
 
     pub fn new_id(task: &Action, state: &Value) -> Result<u64, jsonptr::resolve::ResolveError> {
@@ -82,8 +85,14 @@ impl Task for WorkUnit {
 
     #[instrument(name="run_task", skip_all, fields(task=%self.action), err)]
     async fn run(&self, system: &mut System) -> Result<(), TaskError> {
-        // TODO: dry-run the task to test that conditions hold
-        // before executing the action
+        // dry-run the task to test that conditions hold
+        // before executing the action should not really fail at this point
+        let Patch(changes) = self.action.dry_run(system)?;
+        if changes != self.output {
+            // If the result is different then we assume it's because the
+            // conditions changed since planning
+            return Err(TaskError::ConditionFailed);
+        }
 
         self.action.run(system).await
     }

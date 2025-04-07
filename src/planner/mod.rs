@@ -90,7 +90,7 @@ impl Planner {
 
                 // Otherwise add the task to the plan
                 let Workflow { dag, pending } = cur_plan;
-                let dag = dag.with_head(WorkUnit::new(work_id, action));
+                let dag = dag.with_head(WorkUnit::new(work_id, action, changes.clone()));
                 let pending = [pending, changes].concat();
 
                 Span::current().record("selected", true);
