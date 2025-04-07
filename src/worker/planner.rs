@@ -261,6 +261,7 @@ impl Planner {
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
     use serde::Deserialize;
     use std::collections::HashMap;
 
@@ -322,8 +323,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one()",
-            "worker::planner::tests::plus_one()"
+            "gustav::worker::planner::tests::plus_one()",
+            "gustav::worker::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -351,8 +352,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one()",
-            "worker::planner::tests::plus_one()"
+            "gustav::worker::planner::tests::plus_one()",
+            "gustav::worker::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -382,10 +383,10 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one(/counters/two)",
-            "worker::planner::tests::plus_one(/counters/two)",
-            "worker::planner::tests::plus_one(/counters/one)",
-            "worker::planner::tests::plus_one(/counters/one)",
+            "gustav::worker::planner::tests::plus_one(/counters/two)",
+            "gustav::worker::planner::tests::plus_one(/counters/two)",
+            "gustav::worker::planner::tests::plus_one(/counters/one)",
+            "gustav::worker::planner::tests::plus_one(/counters/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -415,8 +416,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one(/counters/one)",
-            "worker::planner::tests::plus_one(/counters/one)",
+            "gustav::worker::planner::tests::plus_one(/counters/one)",
+            "gustav::worker::planner::tests::plus_one(/counters/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -447,9 +448,9 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one(/counters/one)",
-            "worker::planner::tests::plus_one(/counters/one)",
-            "worker::planner::tests::plus_one(/counters/one)",
+            "gustav::worker::planner::tests::plus_one(/counters/one)",
+            "gustav::worker::planner::tests::plus_one(/counters/one)",
+            "gustav::worker::planner::tests::plus_one(/counters/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -674,12 +675,12 @@ mod tests {
         let workflow = planner.find_plan(initial, target).unwrap();
 
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::test_stacking_problem::unstack(/blocks/C)",
-            "worker::planner::tests::test_stacking_problem::stack(/blocks/C)",
-            "worker::planner::tests::test_stacking_problem::unstack(/blocks/B)",
-            "worker::planner::tests::test_stacking_problem::stack(/blocks/B)",
-            "worker::planner::tests::test_stacking_problem::pickup(/blocks/A)",
-            "worker::planner::tests::test_stacking_problem::stack(/blocks/A)",
+            "gustav::worker::planner::tests::test_stacking_problem::unstack(/blocks/C)",
+            "gustav::worker::planner::tests::test_stacking_problem::stack(/blocks/C)",
+            "gustav::worker::planner::tests::test_stacking_problem::unstack(/blocks/B)",
+            "gustav::worker::planner::tests::test_stacking_problem::stack(/blocks/B)",
+            "gustav::worker::planner::tests::test_stacking_problem::pickup(/blocks/A)",
+            "gustav::worker::planner::tests::test_stacking_problem::stack(/blocks/A)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);

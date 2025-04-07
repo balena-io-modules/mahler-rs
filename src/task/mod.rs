@@ -26,6 +26,7 @@ pub(crate) use into_result::*;
 
 pub use description::*;
 pub use effect::*;
+pub use errors::InputError;
 pub use handler::*;
 pub use job::*;
 pub use with_io::*;
@@ -80,34 +81,38 @@ impl fmt::Debug for Action {
 }
 
 impl Action {
+    pub(crate) fn new<H, T, I>(action: H, context: Context) -> Self
+    where
+        H: Handler<T, Patch, I>,
+        I: Send + 'static,
+    {
+        let handler_clone = action.clone();
+        Self {
+            id: action.id(),
+            scoped: action.is_scoped(),
+            context,
+            dry_run: Arc::new(move |system: &System, context: &Context| {
+                let effect = handler_clone.call(system, context);
+                effect.pure()
+            }),
+            run: Arc::new(move |system: &System, context: &Context| {
+                let effect = action.call(system, context);
+
+                Box::pin(async { effect.run().await })
+            }),
+            describe: Arc::new(|_: &Context| {
+                // This error should never be seen
+                Err(UnexpectedError::from(anyhow!("undefined description")))?
+            }),
+        }
+    }
+
     pub(crate) fn context(&self) -> &Context {
         &self.context
     }
 
     pub fn id(&self) -> &str {
         self.id
-    }
-
-    fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
-        let target = serde_json::to_value(target).context("Serialization failed")?;
-        Ok(Self {
-            context: self.context.with_target(target),
-            ..self
-        })
-    }
-
-    fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
-        Self {
-            context: self.context.with_arg(key, value),
-            ..self
-        }
-    }
-
-    fn with_path(self, path: impl AsRef<str>) -> Self {
-        Self {
-            context: self.context.with_path(path),
-            ..self
-        }
     }
 
     /// Run the task sequentially
@@ -136,14 +141,7 @@ impl Display for Action {
                 Error::Unexpected(_) => {}
                 _ => warn!("failed to expand description for task {}: {}", self.id, e),
             }
-
-            let id = self
-                .id
-                .split("::")
-                .skip(1)
-                .collect::<Vec<&str>>()
-                .join("::");
-            format!("{}({})", id, self.context.path)
+            format!("{}({})", self.id, self.context.path)
         });
         write!(f, "{}", description)
     }
@@ -186,34 +184,33 @@ impl fmt::Debug for Method {
 }
 
 impl Method {
+    pub(crate) fn new<H, T>(method: H, context: Context) -> Self
+    where
+        H: Handler<T, Vec<Task>>,
+    {
+        Method {
+            id: method.id(),
+            scoped: method.is_scoped(),
+            context,
+            expand: Arc::new(move |system: &System, context: &Context| {
+                // List tasks cannot perform changes to the system
+                // so the Effect returned by this handler is assumed to
+                // be pure
+                method.call(system, context).pure()
+            }),
+            describe: Arc::new(|_: &Context| {
+                // This error should never be seen
+                Err(UnexpectedError::from(anyhow!("undefined description")))?
+            }),
+        }
+    }
+
     pub(crate) fn context(&self) -> &Context {
         &self.context
     }
 
     pub fn id(&self) -> &str {
         self.id
-    }
-
-    fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
-        let target = serde_json::to_value(target).context("Serialization failed")?;
-        Ok(Self {
-            context: self.context.with_target(target),
-            ..self
-        })
-    }
-
-    fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
-        Self {
-            context: self.context.with_arg(key, value),
-            ..self
-        }
-    }
-
-    fn with_path(self, path: impl AsRef<str>) -> Self {
-        Self {
-            context: self.context.with_path(path),
-            ..self
-        }
     }
 
     pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>, Error> {
@@ -231,13 +228,7 @@ impl Display for Method {
                 Error::Unexpected(_) => {}
                 _ => warn!("failed to expand description for task {}: {}", self.id, e),
             }
-            let id = self
-                .id
-                .split("::")
-                .skip(1)
-                .collect::<Vec<&str>>()
-                .join("::");
-            format!("{}({})", id, self.context.path)
+            format!("{}({})", self.id, self.context.path)
         });
         write!(f, "{}", description)
     }
@@ -263,54 +254,19 @@ pub enum Task {
     Method(Method),
 }
 
+impl From<Action> for Task {
+    fn from(action: Action) -> Self {
+        Self::Action(action)
+    }
+}
+
+impl From<Method> for Task {
+    fn from(method: Method) -> Self {
+        Self::Method(method)
+    }
+}
+
 impl Task {
-    pub(crate) fn from_action<H, T, I>(action: H, context: Context) -> Self
-    where
-        H: Handler<T, Patch, I>,
-        I: Send + 'static,
-    {
-        let handler_clone = action.clone();
-        Self::Action(Action {
-            id: action.id(),
-            scoped: action.is_scoped(),
-            context,
-            dry_run: Arc::new(move |system: &System, context: &Context| {
-                let effect = handler_clone.call(system, context);
-                effect.pure()
-            }),
-            run: Arc::new(move |system: &System, context: &Context| {
-                let effect = action.call(system, context);
-
-                Box::pin(async { effect.run().await })
-            }),
-            describe: Arc::new(|_: &Context| {
-                // This error should never be seen
-                Err(UnexpectedError::from(anyhow!("undefined description")))?
-            }),
-        })
-    }
-
-    pub(crate) fn from_method<H, T>(method: H, context: Context) -> Self
-    where
-        H: Handler<T, Vec<Task>>,
-    {
-        Self::Method(Method {
-            id: method.id(),
-            scoped: method.is_scoped(),
-            context,
-            expand: Arc::new(move |system: &System, context: &Context| {
-                // List tasks cannot perform changes to the system
-                // so the Effect returned by this handler is assumed to
-                // be pure
-                method.call(system, context).pure()
-            }),
-            describe: Arc::new(|_: &Context| {
-                // This error should never be seen
-                Err(UnexpectedError::from(anyhow!("undefined description")))?
-            }),
-        })
-    }
-
     /// Get the unique identifier for the task
     pub fn id(&self) -> &str {
         match self {
@@ -345,10 +301,23 @@ impl Task {
     ///
     /// This returns a result with an error if the serialization of the target fails
     pub fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
-        match self {
-            Self::Action(task) => task.try_target(target).map(Self::Action),
-            Self::Method(task) => task.try_target(target).map(Self::Method),
-        }
+        let target = serde_json::to_value(target).context("Serialization failed")?;
+        Ok(match self {
+            Self::Action(task) => {
+                let Action { context, .. } = task;
+                Self::Action(Action {
+                    context: context.with_target(target),
+                    ..task
+                })
+            }
+            Self::Method(task) => {
+                let Method { context, .. } = task;
+                Self::Method(Method {
+                    context: context.with_target(target),
+                    ..task
+                })
+            }
+        })
     }
 
     /// Set a target for the task
@@ -361,28 +330,46 @@ impl Task {
     /// Set an argument for the task
     pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         match self {
-            Self::Action(task) => Self::Action(task.with_arg(key, value)),
-            Self::Method(task) => Self::Method(task.with_arg(key, value)),
+            Self::Action(task) => {
+                let Action { context, .. } = task;
+                Self::Action(Action {
+                    context: context.with_arg(key, value),
+                    ..task
+                })
+            }
+            Self::Method(task) => {
+                let Method { context, .. } = task;
+                Self::Method(Method {
+                    context: context.with_arg(key, value),
+                    ..task
+                })
+            }
         }
     }
 
     pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
         match self {
-            Self::Action(task) => Self::Action(task.with_path(path)),
-            Self::Method(task) => Self::Method(task.with_path(path)),
+            Self::Action(task) => {
+                let Action { context, .. } = task;
+                Self::Action(Action {
+                    context: context.with_path(path),
+                    ..task
+                })
+            }
+            Self::Method(task) => {
+                let Method { context, .. } = task;
+                Self::Method(Method {
+                    context: context.with_path(path),
+                    ..task
+                })
+            }
         }
     }
 
-    pub(crate) fn with_context(self, ctx: Context) -> Self {
+    pub(crate) fn with_context(self, context: Context) -> Self {
         match self {
-            Self::Action(task) => Self::Action(Action {
-                context: ctx,
-                ..task
-            }),
-            Self::Method(task) => Self::Method(Method {
-                context: ctx,
-                ..task
-            }),
+            Self::Action(task) => Self::Action(Action { context, ..task }),
+            Self::Method(task) => Self::Method(Method { context, ..task }),
         }
     }
 
@@ -390,15 +377,10 @@ impl Task {
     where
         D: Description<T>,
     {
+        let describe: Describe = Arc::new(move |ctx| description.call(ctx));
         match self {
-            Self::Action(task) => Self::Action(Action {
-                describe: Arc::new(move |ctx| description.call(ctx)),
-                ..task
-            }),
-            Self::Method(task) => Self::Method(Method {
-                describe: Arc::new(move |ctx| description.call(ctx)),
-                ..task
-            }),
+            Self::Action(task) => Self::Action(Action { describe, ..task }),
+            Self::Method(task) => Self::Method(Method { describe, ..task }),
         }
     }
 }
@@ -479,7 +461,7 @@ mod tests {
             .with_description(|Target(tgt): Target<i32>| format!("+1 until {tgt}"));
 
         // The target has not been assigned so the default description is returned
-        assert_eq!(task.to_string(), "task::tests::plus_one()");
+        assert_eq!(task.to_string(), "gustav::task::tests::plus_one()");
 
         let task = task.with_target(2);
         // Now the description can be used

@@ -1,7 +1,7 @@
 use json_patch::Patch;
 use serde::Serialize;
 
-use super::{Context, Effect, Error, IntoEffect, Task};
+use super::{Action, Context, Effect, Error, IntoEffect, Method, Task};
 use crate::system::{FromSystem, System};
 
 pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
@@ -72,7 +72,7 @@ macro_rules! impl_action_handler {
             }
 
             fn into_task(self) -> Task {
-                Task::from_action(self, Context::default())
+                Action::new(self, Context::default()).into()
             }
         }
     };
@@ -129,7 +129,7 @@ macro_rules! impl_method_handler {
             }
 
             fn into_task(self) -> Task {
-                Task::from_method(self, Context::default())
+                Method::new(self, Context::default()).into()
             }
         }
     };
