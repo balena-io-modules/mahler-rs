@@ -34,7 +34,7 @@ pub use with_io::*;
 
 pub mod prelude {
     pub use super::handler::*;
-    pub use super::job::*;
+    pub use super::job::{any, create, delete, none, update};
     pub use super::with_io::*;
 }
 

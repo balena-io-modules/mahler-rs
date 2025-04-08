@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::sync::{
@@ -21,7 +21,7 @@ use crate::task::{self, Job};
 use crate::workflow::WorkflowStatus;
 
 #[derive(Clone)]
-pub struct WorkerOpts {
+pub struct Opts {
     /// The maximum number of attempts to reach the target before giving up.
     /// Defauts to infinite tries (0).
     max_retries: u32,
@@ -31,7 +31,7 @@ pub struct WorkerOpts {
     max_wait_ms: u64,
 }
 
-impl WorkerOpts {
+impl Opts {
     pub fn max_retries(self, max_retries: u32) -> Self {
         let mut opts = self;
         opts.max_retries = max_retries;
@@ -53,9 +53,10 @@ impl WorkerOpts {
 
 #[derive(Debug, Error)]
 #[error(transparent)]
-pub struct UnexpectedError(#[from] anyhow::Error);
+pub struct Error(#[from] anyhow::Error);
 
-pub enum WorkerStatus {
+#[derive(Debug)]
+pub enum Status {
     /// Target state reached
     Success,
     /// Failed to reach the target state after multiple tries
@@ -63,33 +64,46 @@ pub enum WorkerStatus {
     /// Worker interrupted by user request
     Interrupted,
     /// Worker execution terminated due to some unexpected error
-    Aborted(UnexpectedError),
+    Aborted(Error),
 }
+
+impl PartialEq for Status {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Status::Success, Status::Success)
+                | (Status::Failure, Status::Failure)
+                | (Status::Interrupted, Status::Interrupted)
+        )
+    }
+}
+
+impl Eq for Status {}
 
 pub trait WorkerState {}
 
 pub struct Uninitialized {
     domain: Domain,
-    opts: WorkerOpts,
+    opts: Opts,
 }
 
 pub struct Ready {
     planner: Planner,
     system: System,
-    opts: WorkerOpts,
+    opts: Opts,
 }
 
 pub struct Running {
-    opts: WorkerOpts,
-    handle: JoinHandle<(Planner, System, WorkerStatus)>,
+    opts: Opts,
+    handle: JoinHandle<(Planner, System, Status)>,
     sigint: Arc<AtomicBool>,
 }
 
 pub struct Idle {
     planner: Planner,
     system: System,
-    opts: WorkerOpts,
-    status: WorkerStatus,
+    opts: Opts,
+    status: Status,
 }
 
 impl WorkerState for Uninitialized {}
@@ -97,9 +111,9 @@ impl WorkerState for Ready {}
 impl WorkerState for Running {}
 impl WorkerState for Idle {}
 
-impl Default for WorkerOpts {
+impl Default for Opts {
     fn default() -> Self {
-        WorkerOpts {
+        Opts {
             max_retries: 0,
             min_wait_ms: 1000,
             max_wait_ms: 300_000,
@@ -116,7 +130,7 @@ impl<T> Default for Worker<T, Uninitialized> {
     fn default() -> Self {
         Worker::from_inner(Uninitialized {
             domain: Domain::new(),
-            opts: WorkerOpts::default(),
+            opts: Opts::default(),
         })
     }
 }
@@ -147,35 +161,45 @@ impl<T> Worker<T, Uninitialized> {
         Worker::from_inner(inner)
     }
 
-    pub fn with_opts(self, opts: WorkerOpts) -> Worker<T, Uninitialized> {
+    pub fn with_opts(self, opts: Opts) -> Worker<T, Uninitialized> {
         let Self { mut inner, .. } = self;
         inner.opts = opts;
         Worker::from_inner(inner)
     }
 
-    pub fn initial_state(self, state: T) -> Worker<T, Ready>
+    pub fn initial_state(self, state: T) -> Result<Worker<T, Ready>, Error>
     where
         T: Serialize + DeserializeOwned,
     {
         let Uninitialized { domain, opts, .. } = self.inner;
 
         // we want to panic early while setting up the worker
-        let system = System::try_from(state).expect("failed to serialize the initial state");
-        Worker::from_inner(Ready {
+        let system = System::try_from(state).context("could not serialize initial state")?;
+        Ok(Worker::from_inner(Ready {
             planner: Planner::new(domain),
             system,
             opts,
-        })
+        }))
     }
 }
 
-impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
-    pub fn state(&self) -> T {
-        // TODO: handle the error
-        self.inner.system.state().unwrap()
-    }
+pub trait SeekTarget<T> {
+    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error>;
+}
 
-    pub fn seek_target(self, tgt: T) -> Worker<T, Running> {
+impl<T: DeserializeOwned> Worker<T, Ready> {
+    pub fn state(&self) -> Result<T, Error> {
+        let state = self
+            .inner
+            .system
+            .state()
+            .context("could not deserialize state")?;
+        Ok(state)
+    }
+}
+
+impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
+    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
         let Ready {
             planner,
             system,
@@ -183,8 +207,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
             ..
         } = self.inner;
 
-        // TODO: handle the error
-        let tgt = serde_json::to_value(tgt).unwrap();
+        let tgt = serde_json::to_value(tgt).context("could not serialize target")?;
 
         #[derive(Debug, Error)]
         enum InternalError {
@@ -248,7 +271,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                     {
                         Ok(InternalResult::TargetReached) => {
                             cur_span.record("return", "success");
-                            return (planner, system, WorkerStatus::Success);
+                            return (planner, system, Status::Success);
                         }
                         Ok(InternalResult::Completed) => true,
                         Ok(InternalResult::Interrupted) => {
@@ -259,11 +282,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                             if cfg!(debug_assertions) {
                                 // Abort search if a an unexpected error happens during
                                 // planning
-                                return (
-                                    planner,
-                                    system,
-                                    WorkerStatus::Aborted(UnexpectedError(anyhow!(err))),
-                                );
+                                return (planner, system, Status::Aborted(Error(anyhow!(err))));
                             }
                             false
                         }
@@ -272,7 +291,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
 
                     if !found && tries >= opts.max_retries {
                         cur_span.record("return", "failure");
-                        return (planner, system, WorkerStatus::Failure);
+                        return (planner, system, Status::Failure);
                     }
 
                     // Exponential backoff
@@ -284,29 +303,45 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                 }
 
                 cur_span.record("return", "interrupted");
-                (planner, system, WorkerStatus::Interrupted)
+                (planner, system, Status::Interrupted)
             }
             .instrument(span!(Level::INFO, "seek_target", target = %target, return = field::Empty)),
         );
 
-        Worker::from_inner(Running {
+        Ok(Worker::from_inner(Running {
             handle,
             sigint,
             opts,
-        })
+        }))
     }
 }
 
-impl<T: Serialize + DeserializeOwned> Worker<T, Idle> {
-    pub fn state(&self) -> T {
-        self.inner.system.state().unwrap()
+impl<T: Serialize> SeekTarget<T> for Result<Worker<T, Ready>, Error> {
+    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
+        self.and_then(|worker| worker.seek_target(tgt))
+    }
+}
+
+impl<T> Worker<T, Idle> {
+    pub fn state(&self) -> Result<T, Error>
+    where
+        T: DeserializeOwned,
+    {
+        let state = self
+            .inner
+            .system
+            .state()
+            .context("could not deserialize state")?;
+        Ok(state)
     }
 
-    pub fn status(&self) -> &WorkerStatus {
+    pub fn status(&self) -> &Status {
         &self.inner.status
     }
+}
 
-    pub fn seek_target(self, tgt: T) -> Worker<T, Running> {
+impl<T: Serialize> SeekTarget<T> for Worker<T, Idle> {
+    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
         let Idle {
             planner,
             system,
@@ -327,7 +362,7 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Idle> {
 #[error("timeout")]
 pub struct Timeout;
 
-impl<T: DeserializeOwned> Worker<T, Running> {
+impl<T> Worker<T, Running> {
     pub async fn cancel(self) -> Worker<T, Idle> {
         let Running {
             handle: task,
@@ -425,10 +460,12 @@ mod tests {
             .seek_target(Counters(HashMap::from([
                 ("one".to_string(), 2),
                 ("two".to_string(), 0),
-            ])));
+            ])))
+            .unwrap();
 
         let worker = worker.wait(None).await.unwrap();
-        let state = worker.state();
+        let state = worker.state().unwrap();
+        assert_eq!(worker.status(), &Status::Success);
         assert_eq!(
             state,
             Counters(HashMap::from([
@@ -443,7 +480,8 @@ mod tests {
         let mut worker = Worker::new()
             .job("", update(buggy_plus_one))
             .initial_state(0)
-            .seek_target(2);
+            .seek_target(2)
+            .unwrap();
 
         let _ = worker.wait(None).await.unwrap();
     }
@@ -453,12 +491,13 @@ mod tests {
         let worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
-            .seek_target(2);
+            .seek_target(2)
+            .unwrap();
 
         // interrupt the workflow after the first step
         sleep(Duration::from_millis(10)).await;
         let worker = worker.cancel().await;
-        let state = worker.state();
+        let state = worker.state().unwrap();
         assert_eq!(state, 1);
     }
 
@@ -467,7 +506,8 @@ mod tests {
         let mut worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
-            .seek_target(2);
+            .seek_target(2)
+            .unwrap();
 
         let worker = worker.wait(Some(Duration::from_millis(1))).await;
         assert!(worker.is_err());

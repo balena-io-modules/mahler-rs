@@ -5,7 +5,7 @@ use tokio::time::sleep;
 
 use gustav::extract::{Args, Target, View};
 use gustav::task::prelude::*;
-use gustav::worker::Worker;
+use gustav::worker::{SeekTarget, Status, Worker};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct Counters(HashMap<String, i32>);
@@ -53,10 +53,12 @@ async fn test_worker() {
         .seek_target(Counters(HashMap::from([
             ("a".to_string(), 2),
             ("b".to_string(), 0),
-        ])));
+        ])))
+        .unwrap();
 
     let worker = worker.wait(None).await.unwrap();
-    let state = worker.state();
+    let state = worker.state().unwrap();
+    assert_eq!(worker.status(), &Status::Success);
     assert_eq!(
         state,
         Counters(HashMap::from([("a".to_string(), 2), ("b".to_string(), 0),]))
