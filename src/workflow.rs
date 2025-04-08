@@ -104,16 +104,16 @@ pub struct Workflow {
     pub(crate) pending: Vec<PatchOperation>,
 }
 
-pub enum Status {
+pub enum WorkflowStatus {
     Completed,
     Interrupted,
 }
 
-impl From<ExecutionStatus> for Status {
-    fn from(status: ExecutionStatus) -> Status {
+impl From<ExecutionStatus> for WorkflowStatus {
+    fn from(status: ExecutionStatus) -> WorkflowStatus {
         match status {
-            ExecutionStatus::Completed => Status::Completed,
-            ExecutionStatus::Interrupted => Status::Interrupted,
+            ExecutionStatus::Completed => WorkflowStatus::Completed,
+            ExecutionStatus::Interrupted => WorkflowStatus::Interrupted,
         }
     }
 }
@@ -140,7 +140,7 @@ impl Workflow {
         self,
         system: &mut System,
         interrupted: &AtomicBool,
-    ) -> Result<Status, TaskError> {
+    ) -> Result<WorkflowStatus, TaskError> {
         self.dag
             .execute(system, interrupted)
             .await

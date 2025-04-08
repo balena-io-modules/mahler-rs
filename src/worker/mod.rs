@@ -7,7 +7,7 @@ use std::sync::{
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use tracing::{error, field, info, span, Instrument, Level, Span};
+use tracing::{error, field, span, Instrument, Level, Span};
 
 #[cfg(feature = "logging")]
 mod logging;
@@ -18,7 +18,7 @@ pub use logging::init as init_logging;
 use crate::planner::{Domain, Error as PlannerError, Planner};
 use crate::system::System;
 use crate::task::{self, Job};
-use crate::workflow::Status;
+use crate::workflow::WorkflowStatus;
 
 #[derive(Clone)]
 pub struct WorkerOpts {
@@ -51,6 +51,21 @@ impl WorkerOpts {
     }
 }
 
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct UnexpectedError(#[from] anyhow::Error);
+
+pub enum WorkerStatus {
+    /// Target state reached
+    Success,
+    /// Failed to reach the target state after multiple tries
+    Failure,
+    /// Worker interrupted by user request
+    Interrupted,
+    /// Worker execution terminated due to some unexpected error
+    Aborted(UnexpectedError),
+}
+
 pub trait WorkerState {}
 
 pub struct Uninitialized {
@@ -66,13 +81,21 @@ pub struct Ready {
 
 pub struct Running {
     opts: WorkerOpts,
-    handle: JoinHandle<(Planner, System)>,
-    cancelled: Arc<AtomicBool>,
+    handle: JoinHandle<(Planner, System, WorkerStatus)>,
+    sigint: Arc<AtomicBool>,
+}
+
+pub struct Idle {
+    planner: Planner,
+    system: System,
+    opts: WorkerOpts,
+    status: WorkerStatus,
 }
 
 impl WorkerState for Uninitialized {}
 impl WorkerState for Ready {}
 impl WorkerState for Running {}
+impl WorkerState for Idle {}
 
 impl Default for WorkerOpts {
     fn default() -> Self {
@@ -146,20 +169,9 @@ impl<T> Worker<T, Uninitialized> {
     }
 }
 
-#[derive(Debug, Error)]
-enum InternalError {
-    #[error(transparent)]
-    TaskFailed(#[from] task::Error),
-
-    #[error("workflow interrupted")]
-    Interrupted,
-
-    #[error(transparent)]
-    PlanNotFound(#[from] PlannerError),
-}
-
 impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
-    pub fn state(self) -> T {
+    pub fn state(&self) -> T {
+        // TODO: handle the error
         self.inner.system.state().unwrap()
     }
 
@@ -174,32 +186,47 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
         // TODO: handle the error
         let tgt = serde_json::to_value(tgt).unwrap();
 
+        #[derive(Debug, Error)]
+        enum InternalError {
+            #[error(transparent)]
+            Runtime(#[from] task::Error),
+
+            #[error(transparent)]
+            Planning(#[from] PlannerError),
+        }
+
+        enum InternalResult {
+            TargetReached,
+            Completed,
+            Interrupted,
+        }
+
         async fn find_and_run_workflow(
             planner: &Planner,
             system: &mut System,
             tgt: &Value,
             interrupted: &AtomicBool,
-        ) -> Result<bool, InternalError> {
+        ) -> Result<InternalResult, InternalError> {
             // TODO: maybe use a timeout to finding the plan
             let workflow = planner.find_workflow(system, tgt)?;
             if workflow.is_empty() {
-                return Ok(true);
+                return Ok(InternalResult::TargetReached);
             }
 
             // run the plan and update the system
             if matches!(
                 workflow.execute(system, interrupted).await?,
-                Status::Interrupted
+                WorkflowStatus::Interrupted
             ) {
-                return Err(InternalError::Interrupted);
+                return Ok(InternalResult::Interrupted);
             }
 
-            Ok(false)
+            Ok(InternalResult::Completed)
         }
 
         // Create a flag to signal the cancellation of the planning
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let sigint = cancelled.clone();
+        let sigint = Arc::new(AtomicBool::new(false));
+        let interrupted = sigint.clone();
         let target = tgt.clone();
 
         let handle = tokio::task::spawn(
@@ -210,34 +237,42 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
 
                 // continue to re-plan and execute while we have not reached the target state
                 // or we have not been interrupted
-                while !sigint.load(Ordering::Relaxed) {
-                    let found =
-                        match find_and_run_workflow(&planner, &mut system, &tgt, &sigint).await {
-                            Ok(true) => {
-                                // TODO: we need some result from the worker
-                                break;
+                while !interrupted.load(Ordering::Relaxed) {
+                    let found = match find_and_run_workflow(
+                        &planner,
+                        &mut system,
+                        &tgt,
+                        &interrupted,
+                    )
+                    .await
+                    {
+                        Ok(InternalResult::TargetReached) => {
+                            cur_span.record("return", "success");
+                            return (planner, system, WorkerStatus::Success);
+                        }
+                        Ok(InternalResult::Completed) => true,
+                        Ok(InternalResult::Interrupted) => {
+                            break;
+                        }
+                        Err(InternalError::Planning(PlannerError::NotFound)) => false,
+                        Err(InternalError::Planning(err)) => {
+                            if cfg!(debug_assertions) {
+                                // Abort search if a an unexpected error happens during
+                                // planning
+                                return (
+                                    planner,
+                                    system,
+                                    WorkerStatus::Aborted(UnexpectedError(anyhow!(err))),
+                                );
                             }
-                            Ok(false) => true,
-                            Err(InternalError::Interrupted) => {
-                                // TODO: implement some way to report the worker status
-                                // rather than just logging
-                                cur_span.record("return", "interrupted");
-                                return (planner, system);
-                            }
-                            Err(InternalError::PlanNotFound(PlannerError::NotFound)) => false,
-                            Err(InternalError::PlanNotFound(_)) => {
-                                if cfg!(debug_assertions) {
-                                    // TODO: Return the error in debug mode
-                                    return (planner, system);
-                                }
-                                false
-                            }
-                            Err(_) => false,
-                        };
+                            false
+                        }
+                        Err(_) => false,
+                    };
 
                     if !found && tries >= opts.max_retries {
                         cur_span.record("return", "failure");
-                        return (planner, system);
+                        return (planner, system, WorkerStatus::Failure);
                     }
 
                     // Exponential backoff
@@ -248,83 +283,95 @@ impl<T: Serialize + DeserializeOwned> Worker<T, Ready> {
                     tries += if found { 0 } else { 1 };
                 }
 
-                cur_span.record("return", "success");
-                (planner, system)
+                cur_span.record("return", "interrupted");
+                (planner, system, WorkerStatus::Interrupted)
             }
             .instrument(span!(Level::INFO, "seek_target", target = %target, return = field::Empty)),
         );
 
         Worker::from_inner(Running {
             handle,
-            cancelled,
+            sigint,
             opts,
         })
     }
 }
 
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct UnexpectedError(#[from] anyhow::Error);
+impl<T: Serialize + DeserializeOwned> Worker<T, Idle> {
+    pub fn state(&self) -> T {
+        self.inner.system.state().unwrap()
+    }
 
-#[derive(Debug, Error)]
-pub enum WaitStatus {
-    #[error("timeout reached while waiting for the worker to finish")]
-    Timeout,
+    pub fn status(&self) -> &WorkerStatus {
+        &self.inner.status
+    }
 
-    #[error("unexpected error: ${0}")]
-    Error(#[from] UnexpectedError),
-}
-
-impl<T: DeserializeOwned> Worker<T, Running> {
-    pub async fn cancel(self) -> Worker<T, Ready> {
-        let Running {
-            handle: task,
-            cancelled,
+    pub fn seek_target(self, tgt: T) -> Worker<T, Running> {
+        let Idle {
+            planner,
+            system,
             opts,
+            ..
         } = self.inner;
 
-        // Cancel the task
-        cancelled.store(true, Ordering::Relaxed);
-
-        info!("worker interrupted, waiting for running tasks to finish");
-        let (planner, system) = task.await.unwrap();
         Worker::from_inner(Ready {
             planner,
             system,
             opts,
+        })
+        .seek_target(tgt)
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("timeout")]
+pub struct Timeout;
+
+impl<T: DeserializeOwned> Worker<T, Running> {
+    pub async fn cancel(self) -> Worker<T, Idle> {
+        let Running {
+            handle: task,
+            sigint,
+            opts,
+        } = self.inner;
+
+        // Cancel the task
+        sigint.store(true, Ordering::Relaxed);
+
+        // This should not happen
+        let (planner, system, status) = task.await.expect("worker runtime panicked");
+        Worker::from_inner(Idle {
+            planner,
+            system,
+            opts,
+            status,
         })
     }
 
     pub async fn wait(
         &mut self,
         timeout: Option<std::time::Duration>,
-    ) -> Result<Worker<T, Ready>, WaitStatus> {
+    ) -> Result<Worker<T, Idle>, Timeout> {
         let Running { handle, opts, .. } = &mut self.inner;
 
-        match timeout {
+        let res = match timeout {
             Some(timeout) => match tokio::time::timeout(timeout, handle).await {
-                Ok(Ok((planner, system))) => Ok(Worker::from_inner(Ready {
-                    planner,
-                    system,
-                    opts: opts.clone(),
-                })),
-                Ok(Err(e)) => {
-                    // A panic happened while waiting for the handle
-                    // this should not happen but we handle it anyway
-                    Err(UnexpectedError(anyhow!(e)))?
-                }
-                Err(_) => Err(WaitStatus::Timeout),
+                Ok(res) => res,
+                Err(_) => return Err(Timeout),
             },
             None => {
                 // Wait indefinitely
-                let (planner, system) = handle.await.unwrap();
-                Ok(Worker::from_inner(Ready {
-                    planner,
-                    system,
-                    opts: opts.clone(),
-                }))
+                handle.await
             }
-        }
+        };
+
+        let (planner, system, status) = res.expect("worker runtime panicked");
+        Ok(Worker::from_inner(Idle {
+            planner,
+            system,
+            opts: opts.clone(),
+            status,
+        }))
     }
 }
 
