@@ -96,6 +96,13 @@ where
                                 "interrupted" => {
                                     log!(target: meta.target(), Level::Warn, "workflow interrupted by user request")
                                 }
+                                "aborted" => {
+                                    if let Some(err) = map.get("error") {
+                                        log!(target: meta.target(), Level::Error, "workflow aborted due to fatal error: {err}")
+                                    } else {
+                                        log!(target: meta.target(), Level::Error, "workflow aborted due to fatal error")
+                                    }
+                                }
                                 _ => {}
                             }
                         }

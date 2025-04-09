@@ -23,13 +23,14 @@ tokio = { version = "1.43.0", default-features = false, features = [
   "sync",
 ] }
 tracing = "0.1.41"
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+async-trait = "0.1.88"
 
 # only required by the `logging` feature
 log = { version = "0.4.25", optional = true }
 tracing-subscriber = { version = "0.3.19", default-features = false, optional = true, features = [
   "registry",
 ] }
-async-trait = "0.1.88"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.19", default-features = false, features = [

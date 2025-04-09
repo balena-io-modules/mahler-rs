@@ -1,14 +1,17 @@
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::Patch;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
+use std::fmt;
+use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use thiserror::Error;
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
+use tokio::{select, sync::RwLock};
+use tokio::{sync::broadcast, task::JoinHandle};
+use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 use tracing::{debug, error, field, span, Instrument, Level, Span};
 
 #[cfg(feature = "logging")]
@@ -28,7 +31,7 @@ use crate::{
     task::{self, Job},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Opts {
     /// The maximum number of attempts to reach the target before giving up.
     /// Defauts to infinite tries (0).
@@ -86,6 +89,9 @@ impl PartialEq for Status {
     }
 }
 
+#[derive(Debug, Clone)]
+struct UpdateEvent;
+
 impl Eq for Status {}
 
 pub trait WorkerState {}
@@ -103,8 +109,10 @@ pub struct Ready {
 
 pub struct Running {
     opts: Opts,
-    handle: JoinHandle<(Planner, System, Status)>,
-    sigint: Arc<AtomicBool>,
+    handle: Pin<Box<JoinHandle<(Planner, System, Status)>>>,
+    updates: broadcast::Sender<UpdateEvent>,
+    sys_reader: Arc<RwLock<System>>,
+    interrupt: Arc<AtomicBool>,
 }
 
 pub struct Idle {
@@ -240,16 +248,14 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             sigint: &Arc<AtomicBool>,
         ) -> Result<InternalResult, InternalError> {
             let workflow = {
-                let system = &*sys.read().await;
-                // TODO: maybe use a timeout to finding the plan
-                planner.find_workflow(system, tgt)?
+                let system = sys.read().await;
+                planner.find_workflow(&system, tgt)?
             };
 
             if workflow.is_empty() {
                 return Ok(InternalResult::TargetReached);
             }
 
-            // run the plan and update the system
             if matches!(
                 workflow.execute(sys, channel.clone(), sigint).await?,
                 WorkflowStatus::Interrupted
@@ -260,101 +266,137 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             Ok(InternalResult::Completed)
         }
 
-        // Wrap the system in a RwLock
+        // Shared system protected by RwLock
         let syslock = Arc::new(RwLock::new(system));
 
         // Create the messaging channel
         let (tx, mut rx) = ack_channel::<Patch>(100);
 
-        // Spawn the receiving tokio task
-        let sys_writer = Arc::clone(&syslock);
-        tokio::spawn(
-            async move {
-                while let Some(mut msg) = rx.recv().await {
-                    let changes = std::mem::take(&mut msg.data);
-                    debug!("received changes: {:?}", changes);
-                    let mut system = sys_writer.write().await;
-                    if let Err(e) = system.patch(changes) {
-                        // TODO: send the error to the seek_target task
-                        // to abort the operation. While a failed patch should
-                        // be rare, it would mean leaving the system in
-                        // an inconsistent state
-                        error!("failed to patch system: {e}");
-                        break;
-                    }
-                    msg.ack();
-                }
-            }
-            .instrument(span!(Level::DEBUG, "system_writer")),
-        );
+        // Error signal channel (one-shot)
+        let (err_tx, mut err_rx) = tokio::sync::oneshot::channel::<Error>();
 
-        // Create a flag to signal the cancellation of the planning
-        let sigint = Arc::new(AtomicBool::new(false));
-        let interrupted = sigint.clone();
+        // Broadcast channel for state updates
+        let (updates, _) = tokio::sync::broadcast::channel::<UpdateEvent>(16);
+
+        // Spawn system writer task
+        {
+            let sys_writer = Arc::clone(&syslock);
+            let broadcast = updates.clone();
+            tokio::spawn(
+                async move {
+                    while let Some(mut msg) = rx.recv().await {
+                        let changes = std::mem::take(&mut msg.data);
+                        debug!("received changes: {:?}", changes);
+
+                        let mut system = sys_writer.write().await;
+                        if let Err(e) = system.patch(changes) {
+                            // we need to abort on patch failure a this means the
+                            // internal state may have become inconsistent and we cannot continue
+                            // applying changes
+                            error!("system patch failed: {e}");
+                            let _ = err_tx.send(Error(anyhow!(e)));
+                            break;
+                        }
+
+                        // Notify the change over the broadcast channel
+                        let _ = broadcast.send(UpdateEvent);
+
+                        // yield back to the workflow
+                        msg.ack();
+                    }
+                }
+                .instrument(span!(Level::DEBUG, "system_writer")),
+            );
+        }
+
+        // Cancellation flag for external interrupts
+        //
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let sigint = interrupt.clone();
         let target = tgt.clone();
-        let handle = tokio::spawn(
-            async move {
+
+        // Main seek_target planning and execution loop
+        let handle = {
+            let sys_reader = Arc::clone(&syslock);
+            tokio::spawn(async move {
                 let mut tries = 0;
                 let mut wait_ms = opts.min_wait_ms;
                 let cur_span = Span::current();
 
-                // continue to re-plan and execute while we have not reached the target state
-                // or we have not been interrupted
-                while !interrupted.load(Ordering::Relaxed) {
-                    let found =
-                        match find_and_run_workflow(&planner, &syslock, &tgt, &tx, &interrupted)
-                            .await
-                        {
-                            Ok(InternalResult::TargetReached) => {
-                                cur_span.record("return", "success");
-                                let system = syslock.read().await.clone();
-                                return (planner, system, Status::Success);
-                            }
-                            Ok(InternalResult::Completed) => true,
-                            Ok(InternalResult::Interrupted) => {
-                                break;
-                            }
-                            Err(InternalError::Planning(PlannerError::NotFound)) => false,
-                            Err(InternalError::Planning(err)) => {
-                                if cfg!(debug_assertions) {
-                                    // Abort search if a an unexpected error happens during
-                                    // planning
-                                    let system = syslock.read().await.clone();
-                                    return (planner, system, Status::Aborted(Error(anyhow!(err))));
-                                }
-                                false
-                            }
-                            Err(_) => false,
-                        };
+                loop {
+                    select! {
+                        biased;
 
-                    if !found {
-                        tries += 1;
-                        if opts.max_retries != 0 && tries >= opts.max_retries {
-                            cur_span.record("return", "failure");
-                            let system = syslock.read().await.clone();
-                            return (planner, system, Status::Failure);
+                        maybe_err = &mut err_rx => {
+                            if let Ok(err) = maybe_err {
+                                cur_span.record("error", format!("failed to update worker internal state: {err}"));
+                                cur_span.record("return", "aborted");
+                                let system = sys_reader.read().await.clone();
+                                return (planner, system, Status::Aborted(err));
+                            }
                         }
-                        wait_ms = std::cmp::min(wait_ms.saturating_mul(2), opts.max_wait_ms);
-                    } else {
-                        // reset backoff if we made progress
-                        tries = 0;
-                        wait_ms = opts.min_wait_ms;
+
+                        _ = async {}, if sigint.load(Ordering::Relaxed) => {
+                            cur_span.record("return", "interrupted");
+                            let system = sys_reader.read().await.clone();
+                            return (planner, system, Status::Interrupted);
+                        }
+
+                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)) => {
+                            match find_and_run_workflow(&planner, &sys_reader, &tgt, &tx, &sigint).await {
+                                Ok(InternalResult::TargetReached) => {
+                                    cur_span.record("return", "success");
+                                    let system = sys_reader.read().await.clone();
+                                    return (planner, system, Status::Success);
+                                }
+                                Ok(InternalResult::Completed) => {
+                                    // made progress, reset backoff
+                                    tries = 0;
+                                    wait_ms = opts.min_wait_ms;
+                                }
+                                Ok(InternalResult::Interrupted) => {
+                                    cur_span.record("return", "interrupted");
+                                    let system = sys_reader.read().await.clone();
+                                    return (planner, system, Status::Interrupted);
+                                }
+                                Err(InternalError::Planning(PlannerError::NotFound)) => {
+                                    tries += 1;
+                                    if opts.max_retries != 0 && tries >= opts.max_retries {
+                                        cur_span.record("return", "failure");
+                                        let system = sys_reader.read().await.clone();
+                                        return (planner, system, Status::Failure);
+                                    }
+                                    wait_ms = std::cmp::min(wait_ms.saturating_mul(2), opts.max_wait_ms);
+                                }
+                                Err(InternalError::Planning(err)) => {
+                                    if cfg!(debug_assertions) {
+                                        cur_span.record("return", "aborted");
+                                        let system = sys_reader.read().await.clone();
+                                        return (planner, system, Status::Aborted(Error(anyhow!(err))));
+                                    }
+                                    tries += 1;
+                                    wait_ms = std::cmp::min(wait_ms.saturating_mul(2), opts.max_wait_ms);
+                                }
+                                Err(_) => {
+                                    tries += 1;
+                                    wait_ms = std::cmp::min(wait_ms.saturating_mul(2), opts.max_wait_ms);
+                                }
+                            }
+                        }
                     }
-
-                    tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
                 }
-
-                cur_span.record("return", "interrupted");
-                let system = syslock.read().await.clone();
-                (planner, system, Status::Interrupted)
             }
-            .instrument(span!(Level::INFO, "seek_target", target = %target, return = field::Empty)),
-        );
+            .instrument(span!(Level::INFO, "seek_target", target = %target, return = field::Empty)))
+        };
+
+        let handle = Box::pin(handle);
 
         Ok(Worker::from_inner(Running {
             handle,
-            sigint,
+            interrupt,
             opts,
+            sys_reader: syslock,
+            updates,
         }))
     }
 }
@@ -385,6 +427,9 @@ impl<T> Worker<T, Idle> {
 
 impl<T: Serialize> SeekTarget<T> for Worker<T, Idle> {
     fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
+        // TODO: we probably need to fail if the previous execution
+        // terminated due to a patch failure as we can no longer trust
+        // the internal state
         let Idle {
             planner,
             system,
@@ -401,16 +446,108 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Idle> {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 #[error("timeout")]
-pub struct Timeout;
+pub struct Timeout<T>(pub Worker<T, Running>);
+
+impl<T> Timeout<T> {
+    /// Recover the running worker from the timeout.
+    pub fn into_worker(self) -> Worker<T, Running> {
+        self.0
+    }
+
+    /// Wait again for the worker to complete, with an optional timeout.
+    ///
+    /// Returns `Ok(Worker<T, Idle>)` if the worker finishes,
+    /// or `Err(Timeout)` if it times out again.
+    pub async fn wait(self, timeout: Option<std::time::Duration>) -> WaitResult<T> {
+        self.0.wait(timeout).await
+    }
+
+    /// Cancel the worker immediately and return it in the Idle state.
+    ///
+    /// Useful if you decide not to wait after a timeout.
+    pub async fn cancel(self) -> Worker<T, Idle> {
+        self.0.cancel().await
+    }
+}
+
+impl<T> fmt::Debug for Timeout<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Timeout")
+            .field("state", &"running")
+            .finish()
+    }
+}
+
+impl<T> From<Timeout<T>> for Worker<T, Running> {
+    fn from(timeout: Timeout<T>) -> Worker<T, Running> {
+        timeout.0
+    }
+}
+
+pub struct FollowStream<T> {
+    inner: Pin<Box<dyn Stream<Item = T> + Send + 'static>>,
+}
+
+impl<T> FollowStream<T> {
+    pub fn new<S>(stream: S) -> Self
+    where
+        S: Stream<Item = T> + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(stream),
+        }
+    }
+}
+
+impl<T> Stream for FollowStream<T> {
+    type Item = T;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+pub type WaitResult<T> = Result<Worker<T, Idle>, Timeout<T>>;
 
 impl<T> Worker<T, Running> {
+    /// Returns a stream of updated states after each system change.
+    ///
+    /// Best effort: updates may be missed if the receiver lags behind.
+    /// Fetches the current system state at the time of notification.
+    pub fn follow(&self) -> FollowStream<T>
+    where
+        T: DeserializeOwned,
+    {
+        let rx = self.inner.updates.subscribe();
+        let syslock = Arc::clone(&self.inner.sys_reader);
+        FollowStream::new(
+            BroadcastStream::new(rx)
+                .then(move |result| {
+                    let sys_reader = Arc::clone(&syslock);
+                    async move {
+                        if result.is_err() {
+                            return None;
+                        }
+                        // Read the system state
+                        let system = sys_reader.read().await;
+                        system.state::<T>().ok()
+                    }
+                })
+                .filter_map(|opt| opt),
+        )
+    }
+
     pub async fn cancel(self) -> Worker<T, Idle> {
         let Running {
             handle: task,
-            sigint,
+            interrupt: sigint,
             opts,
+            ..
         } = self.inner;
 
         // Cancel the task
@@ -426,30 +563,50 @@ impl<T> Worker<T, Running> {
         })
     }
 
-    pub async fn wait(
-        &mut self,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<Worker<T, Idle>, Timeout> {
-        let Running { handle, opts, .. } = &mut self.inner;
+    pub async fn wait(self, timeout: Option<std::time::Duration>) -> WaitResult<T> {
+        let Running {
+            mut handle,
+            opts,
+            updates,
+            sys_reader,
+            interrupt,
+        } = self.inner;
 
-        let res = match timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, handle).await {
-                Ok(res) => res,
-                Err(_) => return Err(Timeout),
-            },
-            None => {
-                // Wait indefinitely
-                handle.await
+        match timeout {
+            Some(duration) => {
+                let mut sleeper = Box::pin(tokio::time::sleep(duration));
+
+                select! {
+                    res = handle.as_mut() => {
+                        let (planner, system, status) = res.expect("worker runtime panicked");
+                        Ok(Worker::from_inner(Idle {
+                            planner,
+                            system,
+                            opts,
+                            status,
+                        }))
+                    }
+                    _ = &mut sleeper => {
+                        Err(Timeout(Worker::from_inner(Running {
+                            handle,
+                            opts,
+                            updates,
+                            sys_reader,
+                            interrupt,
+                        })))
+                    }
+                }
             }
-        };
-
-        let (planner, system, status) = res.expect("worker runtime panicked");
-        Ok(Worker::from_inner(Idle {
-            planner,
-            system,
-            opts: opts.clone(),
-            status,
-        }))
+            None => {
+                let (planner, system, status) = handle.await.expect("worker runtime panicked");
+                Ok(Worker::from_inner(Idle {
+                    planner,
+                    system,
+                    opts,
+                    status,
+                }))
+            }
+        }
     }
 }
 
@@ -513,7 +670,7 @@ mod tests {
     #[tokio::test]
     async fn test_worker_complex_state() {
         init();
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .initial_state(Counters(HashMap::from([
                 ("one".to_string(), 0),
@@ -540,7 +697,7 @@ mod tests {
     #[tokio::test]
     async fn test_worker_bug() {
         init();
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("", update(buggy_plus_one))
             .initial_state(0)
             .seek_target(2)
@@ -568,7 +725,7 @@ mod tests {
     #[tokio::test]
     async fn test_worker_timeout() {
         init();
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
             .seek_target(2)
@@ -576,5 +733,118 @@ mod tests {
 
         let worker = worker.wait(Some(Duration::from_millis(1))).await;
         assert!(worker.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_worker_follow_updates() {
+        init();
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .seek_target(2)
+            .unwrap();
+
+        let mut updates = worker.follow();
+
+        // Capture two updates
+        let first_update = updates.next().await;
+        let second_update = updates.next().await;
+
+        // Wait for worker to finish
+        let worker = worker.wait(None).await.unwrap();
+        let final_state = worker.state().unwrap();
+
+        assert!(first_update.is_some(), "should receive first state update");
+        assert!(
+            second_update.is_some(),
+            "should receive second state update"
+        );
+
+        assert_eq!(final_state, 2);
+    }
+
+    #[tokio::test]
+    async fn test_worker_follow_best_effort_loss() {
+        init();
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .seek_target(100)
+            .unwrap();
+
+        let mut updates = worker.follow();
+
+        // Consume only some of the updates to simulate slow reader
+        let first = updates.next().await;
+        assert!(first.is_some(), "should receive at least one update");
+
+        // Sleep to let many updates be missed
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Attempt to read again (might be after some lag)
+        let maybe_update = updates.next().await;
+
+        assert!(
+            maybe_update.is_some(),
+            "even if lagged, we eventually catch up"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_worker_interrupt_status() {
+        init();
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .seek_target(5)
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let worker = worker.cancel().await;
+
+        assert_eq!(worker.status(), &Status::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn test_follow_stream_closes_on_worker_end() {
+        init();
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .seek_target(1)
+            .unwrap();
+
+        let mut updates = worker.follow();
+
+        // Wait for worker to finish
+        let _ = worker.wait(None).await.unwrap();
+
+        // After worker finishes, stream should terminate
+        let maybe_update = updates.next().await;
+        assert!(maybe_update.is_some(), "should get at least one update");
+
+        let end = updates.next().await;
+        assert!(end.is_none(), "stream should end after worker shutdown");
+    }
+
+    #[tokio::test]
+    async fn test_worker_timeout_then_complete() {
+        init();
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .seek_target(2)
+            .unwrap();
+
+        // First wait with very short timeout
+        let res = worker.wait(Some(Duration::from_millis(1))).await;
+        assert!(res.is_err(), "should timeout");
+
+        let worker = res.err().unwrap().into_worker();
+
+        // Now wait without timeout (should finish)
+        let worker = worker.wait(None).await.unwrap();
+
+        assert_eq!(worker.status(), &Status::Success);
     }
 }
