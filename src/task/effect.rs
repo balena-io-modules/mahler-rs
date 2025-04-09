@@ -2,18 +2,6 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::system::System;
-
-pub(crate) trait IntoEffect<O, E, I = O> {
-    fn into_effect(self, system: &System) -> Effect<O, E, I>;
-}
-
-impl<O, E, I> IntoEffect<O, E, I> for Effect<O, E, I> {
-    fn into_effect(self, _: &System) -> Effect<O, E, I> {
-        self
-    }
-}
-
 type IOResult<O, E> = Pin<Box<dyn Future<Output = Result<O, E>> + Send>>;
 type IO<O, E = Infallible, I = O> = Box<dyn FnOnce(I) -> IOResult<O, E> + Send>;
 type Pure<O, E, I> = Box<dyn FnOnce(I) -> Result<O, E> + Send>;

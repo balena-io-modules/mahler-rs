@@ -2,7 +2,7 @@ use json_patch::Patch;
 use serde::Serialize;
 use std::panic::RefUnwindSafe;
 
-use super::{Action, Context, Effect, Error, IntoEffect, Method, Task};
+use super::{Action, Context, Effect, Error, Method, Task};
 use crate::system::{FromSystem, System};
 
 pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
@@ -46,7 +46,7 @@ macro_rules! impl_action_handler {
         impl<F, $($ty,)* Res, I> Handler<($($ty,)*), Patch, I> for F
         where
             F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
-            Res: IntoEffect<Patch, Error, I> + Send,
+            Res: Into<Effect<Patch, Error, I>> + Send,
             $($ty: FromSystem,)*
             I: Send + 'static
         {
@@ -63,8 +63,8 @@ macro_rules! impl_action_handler {
 
                 let res = (self)($($ty,)*);
 
-                // Update the system
-                res.into_effect(system)
+                // Convert to effect
+                res.into()
             }
 
             fn is_scoped(&self) -> bool {
@@ -104,7 +104,7 @@ macro_rules! impl_method_handler {
         impl<F, $($ty,)* Res> Handler<($($ty,)*), Vec<Task>> for F
         where
             F: Fn($($ty,)*) -> Res + Clone + RefUnwindSafe + Send + Sync +'static,
-            Res: IntoEffect<Vec<Task>, Error>,
+            Res: Into<Effect<Vec<Task>, Error>>,
             $($ty: FromSystem,)*
         {
 
@@ -120,8 +120,8 @@ macro_rules! impl_method_handler {
 
                 let res = (self)($($ty,)*);
 
-                // Update the system
-                res.into_effect(system)
+                // Convert to effect
+                res.into()
             }
 
             fn is_scoped(&self) -> bool {

@@ -34,10 +34,6 @@ impl System {
         &self.state
     }
 
-    pub(crate) fn root_mut(&mut self) -> &mut Value {
-        &mut self.state
-    }
-
     pub(crate) fn patch(&mut self, changes: Patch) -> Result<(), PatchError> {
         patch(&mut self.state, &changes)?;
         Ok(())

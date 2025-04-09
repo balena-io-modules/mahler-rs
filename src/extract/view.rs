@@ -1,13 +1,18 @@
 use anyhow::{anyhow, Context as AnyhowCtx};
-use json_patch::{diff, Patch};
+use json_patch::{
+    diff, AddOperation, CopyOperation, MoveOperation, Patch, PatchOperation, RemoveOperation,
+    ReplaceOperation, TestOperation,
+};
 use jsonptr::resolve::ResolveError;
+use jsonptr::PointerBuf;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde_json::Value;
 use std::ops::{Deref, DerefMut};
 
 use crate::path::Path;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, Effect, Error, InputError, IntoEffect, IntoResult, UnexpectedError};
+use crate::task::{Context, Effect, Error, InputError, IntoResult, UnexpectedError};
 
 /// Extracts a pointer to a sub-element of the global state indicated
 /// by the path.
@@ -18,6 +23,7 @@ use crate::task::{Context, Effect, Error, InputError, IntoEffect, IntoResult, Un
 /// but the specific location pointed by the path does not exist.
 #[derive(Debug)]
 pub struct Pointer<T> {
+    initial: Value,
     state: Option<T>,
     path: Path,
 }
@@ -25,8 +31,12 @@ pub struct Pointer<T> {
 impl<T> Pointer<T> {
     // The only way to create a pointer is via the
     // from_system method
-    fn new(state: Option<T>, path: Path) -> Self {
-        Pointer { state, path }
+    fn new(initial: Value, state: Option<T>, path: Path) -> Self {
+        Pointer {
+            initial,
+            state,
+            path,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -74,16 +84,19 @@ impl<T: DeserializeOwned> FromSystem for Pointer<T> {
         // At this point we assume that if the pointer cannot be
         // resolved is because the value does not exist yet unless
         // the parent is a scalar
-        let state: Option<T> = match json_ptr.resolve(root) {
-            Ok(value) => Some(serde_json::from_value::<T>(value.clone()).with_context(|| {
-                format!(
-                    "Failed to deserialize {value} into {}",
-                    std::any::type_name::<T>()
-                )
-            })?),
+        let (state, initial): (Option<T>, Value) = match json_ptr.resolve(root) {
+            Ok(value) => (
+                Some(serde_json::from_value::<T>(value.clone()).with_context(|| {
+                    format!(
+                        "Failed to deserialize {value} into {}",
+                        std::any::type_name::<T>()
+                    )
+                })?),
+                value.clone(),
+            ),
             Err(e) => match e {
-                ResolveError::NotFound { .. } => None,
-                ResolveError::OutOfBounds { .. } => None,
+                ResolveError::NotFound { .. } => (None, Value::Null),
+                ResolveError::OutOfBounds { .. } => (None, Value::Null),
                 _ => {
                     return Err(
                         anyhow!(e).context(format!("Failed to resolve path {}", context.path))
@@ -92,7 +105,7 @@ impl<T: DeserializeOwned> FromSystem for Pointer<T> {
             },
         };
 
-        Ok(Pointer::new(state, context.path.clone()))
+        Ok(Pointer::new(initial, state, context.path.clone()))
     }
 }
 
@@ -110,37 +123,83 @@ impl<T> DerefMut for Pointer<T> {
     }
 }
 
+fn prepend_path(pointer: PointerBuf, patch: Patch) -> Patch {
+    let Patch(changes) = patch;
+    let changes = changes
+        .into_iter()
+        .map(|op| match op {
+            PatchOperation::Replace(ReplaceOperation { path, value }) => {
+                PatchOperation::Replace(ReplaceOperation {
+                    path: pointer.concat(&path),
+                    value,
+                })
+            }
+            PatchOperation::Remove(RemoveOperation { path }) => {
+                PatchOperation::Remove(RemoveOperation {
+                    path: pointer.concat(&path),
+                })
+            }
+            PatchOperation::Add(AddOperation { path, value }) => {
+                PatchOperation::Add(AddOperation {
+                    path: pointer.concat(&path),
+                    value,
+                })
+            }
+            PatchOperation::Move(MoveOperation { from, path }) => {
+                PatchOperation::Move(MoveOperation {
+                    from,
+                    path: pointer.concat(&path),
+                })
+            }
+            PatchOperation::Copy(CopyOperation { from, path }) => {
+                PatchOperation::Copy(CopyOperation {
+                    from,
+                    path: pointer.concat(&path),
+                })
+            }
+            PatchOperation::Test(TestOperation { path, value }) => {
+                PatchOperation::Test(TestOperation {
+                    path: pointer.concat(&path),
+                    value,
+                })
+            }
+        })
+        .collect::<Vec<PatchOperation>>();
+    Patch(changes)
+}
+
 impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
-    fn into_result(self, system: &System) -> Result<Patch, Error> {
-        // Get the root value
-        let mut after = system.clone();
-        let root = after.root_mut();
-
-        let json_ptr = self.path.as_ref();
-
-        if let Some(state) = self.state {
-            let value = serde_json::to_value(state)
+    fn into_result(self) -> Result<Patch, Error> {
+        let before = self.initial;
+        let after = if let Some(state) = self.state {
+            serde_json::to_value(state)
                 .with_context(|| "Failed to serialize pointer value")
-                .map_err(UnexpectedError::from)?;
-
-            // Assign the state to the copy
-            json_ptr
-                .assign(root, value)
-                .with_context(|| format!("Failed to assign path {}", self.path))
-                .map_err(UnexpectedError::from)?;
+                .map_err(UnexpectedError::from)?
         } else {
-            // Otherwise delete the path at the pointer
-            json_ptr.delete(root);
-        }
-        Ok(diff(system.root(), root))
+            Value::Null
+        };
+
+        let patch = match (before, after) {
+            (Value::Null, Value::Null) => Patch(vec![]),
+            (Value::Null, after) => Patch(vec![PatchOperation::Add(AddOperation {
+                path: self.path.into(),
+                value: after,
+            })]),
+            (_, Value::Null) => Patch(vec![PatchOperation::Remove(RemoveOperation {
+                path: self.path.into(),
+            })]),
+            (before, after) => prepend_path(self.path.into(), diff(&before, &after)),
+        };
+
+        Ok(patch)
     }
 }
 
 // Allow tasks to return a pointer
 // This converts the pointer into a pure effect
-impl<T: Serialize> IntoEffect<Patch, Error> for Pointer<T> {
-    fn into_effect(self, system: &System) -> Effect<Patch, Error> {
-        Effect::from(self.into_result(system))
+impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
+    fn from(ptr: Pointer<T>) -> Effect<Patch, Error> {
+        Effect::from(ptr.into_result())
     }
 }
 
@@ -189,16 +248,16 @@ impl<T> DerefMut for View<T> {
 }
 
 impl<T: Serialize> IntoResult<Patch> for View<T> {
-    fn into_result(self, system: &System) -> Result<Patch, Error> {
-        self.0.into_result(system)
+    fn into_result(self) -> Result<Patch, Error> {
+        self.0.into_result()
     }
 }
 
 // Allow tasks to return a view
 // This converts the view into a pure effect
-impl<T: Serialize> IntoEffect<Patch, Error> for View<T> {
-    fn into_effect(self, system: &System) -> Effect<Patch, Error> {
-        Effect::from(self.into_result(system))
+impl<T: Serialize> From<View<T>> for Effect<Patch, Error> {
+    fn from(view: View<T>) -> Effect<Patch, Error> {
+        Effect::from(view.into_result())
     }
 }
 
@@ -207,6 +266,7 @@ mod tests {
     use super::*;
     use crate::system::System;
     use json_patch::Patch;
+    use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::collections::HashMap;
@@ -241,7 +301,7 @@ mod tests {
 
         // Get the list changes to the view
 
-        let changes = ptr.into_result(&system).unwrap();
+        let changes = ptr.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -289,7 +349,7 @@ mod tests {
         ptr.assign(3);
 
         // Get the list changes to the view
-        let changes = ptr.into_result(&system).unwrap();
+        let changes = ptr.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -314,7 +374,7 @@ mod tests {
         *view = 3;
 
         // Get the list changes to the view
-        let changes = view.into_result(&system).unwrap();
+        let changes = view.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -361,7 +421,7 @@ mod tests {
         *value = 3;
 
         // Get the list changes to the view
-        let changes = ptr.into_result(&system).unwrap();
+        let changes = ptr.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -388,7 +448,7 @@ mod tests {
         ptr.unassign();
 
         // Get the list changes to the view
-        let changes = ptr.into_result(&system).unwrap();
+        let changes = ptr.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -415,7 +475,7 @@ mod tests {
         *value = "TWO".to_string();
 
         // Get the list changes to the view
-        let changes = ptr.into_result(&system).unwrap();
+        let changes = ptr.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -440,7 +500,7 @@ mod tests {
         ptr.assign("three");
 
         // Get the list changes to the view
-        let changes = ptr.into_result(&system).unwrap();
+        let changes = ptr.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
@@ -456,7 +516,7 @@ mod tests {
             numbers: vec!["one".to_string(), "two".to_string(), "three".to_string()],
         };
 
-        let system = System::try_from(state).unwrap();
+        let mut system = System::try_from(state).unwrap();
 
         let mut ptr: Pointer<String> =
             Pointer::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
@@ -465,15 +525,20 @@ mod tests {
         ptr.unassign();
 
         // Get the list changes to the view
-        let changes = ptr.into_result(&system).unwrap();
+        let changes = ptr.into_result().unwrap();
         assert_eq!(
             changes,
             // Removing a value from the middle of the array requires shifting the indexes
             serde_json::from_value::<Patch>(json!([
-              { "op": "replace", "path": "/numbers/1", "value": "three" },
-              { "op": "remove", "path": "/numbers/2" },
+              { "op": "remove", "path": "/numbers/1" },
             ]))
             .unwrap()
+        );
+
+        system.patch(changes).unwrap();
+        assert_eq!(
+            system.root(),
+            &serde_json::from_value::<Value>(json!({"numbers": ["one", "three"]})).unwrap()
         );
     }
 
@@ -492,7 +557,7 @@ mod tests {
         ptr.unassign();
 
         // Get the list changes to the view
-        let changes = ptr.into_result(&system).unwrap();
+        let changes = ptr.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([

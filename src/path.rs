@@ -37,6 +37,12 @@ impl From<Path> for String {
     }
 }
 
+impl From<Path> for PointerBuf {
+    fn from(path: Path) -> Self {
+        path.0
+    }
+}
+
 impl AsRef<Pointer> for Path {
     fn as_ref(&self) -> &Pointer {
         &self.0
