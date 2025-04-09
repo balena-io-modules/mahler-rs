@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use async_trait::async_trait;
 use json_patch::{Patch, PatchOperation};
 use serde_json::Value;
@@ -5,11 +6,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::instrument;
 
 use crate::dag::{Dag, ExecutionStatus, Task};
 use crate::system::System;
-use crate::task::{Action, Error as TaskError};
+use crate::task::{Action, Error as TaskError, UnexpectedError};
 
 #[derive(Hash)]
 struct WorkUnitId<'s> {
@@ -80,11 +83,11 @@ impl Display for WorkUnit {
 #[async_trait]
 impl Task for WorkUnit {
     type Input = System;
-    type Output = ();
+    type Changes = Patch;
     type Error = TaskError;
 
-    #[instrument(name="run_task", skip_all, fields(task=%self.action), err)]
-    async fn run(&self, system: &mut System) -> Result<(), TaskError> {
+    #[instrument(name="run_task", skip_all, fields(task=%self.action, state=%system.root()), err)]
+    async fn run(&self, system: &System) -> Result<Patch, TaskError> {
         // dry-run the task to test that conditions hold
         // before executing the action should not really fail at this point
         let Patch(changes) = self.action.dry_run(system)?;
@@ -95,6 +98,13 @@ impl Task for WorkUnit {
         }
 
         self.action.run(system).await
+    }
+
+    fn apply(&self, system: &mut System, changes: Patch) -> Result<(), TaskError> {
+        system
+            .patch(changes)
+            .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
+        Ok(())
     }
 }
 
@@ -138,13 +148,10 @@ impl Workflow {
     #[instrument(name = "run_workflow", skip_all, err)]
     pub async fn execute(
         self,
-        system: &mut System,
-        interrupted: &AtomicBool,
+        system: &Arc<RwLock<System>>,
+        sigint: &Arc<AtomicBool>,
     ) -> Result<WorkflowStatus, TaskError> {
-        self.dag
-            .execute(system, interrupted)
-            .await
-            .map(|s| s.into())
+        self.dag.execute(system, sigint).await.map(|s| s.into())
     }
 }
 

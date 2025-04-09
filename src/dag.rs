@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::fmt;
 use std::ops::Add;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 type Link<T> = Option<Arc<RwLock<Node<T>>>>;
@@ -581,17 +581,19 @@ pub enum ExecutionStatus {
 #[async_trait]
 pub trait Task {
     type Input;
-    type Output;
+    type Changes;
     type Error;
 
-    async fn run(&self, input: &mut Self::Input) -> Result<Self::Output, Self::Error>;
+    async fn run(&self, input: &Self::Input) -> Result<Self::Changes, Self::Error>;
+
+    fn apply(&self, input: &mut Self::Input, changes: Self::Changes) -> Result<(), Self::Error>;
 }
 
 impl<T: Task + Clone> Dag<T> {
     pub(crate) async fn execute(
         self,
-        input: &mut T::Input,
-        sigint: &AtomicBool,
+        input: &Arc<tokio::sync::RwLock<T::Input>>,
+        sigint: &Arc<AtomicBool>,
     ) -> Result<ExecutionStatus, T::Error> {
         // TODO: implement parallel execution of the DAG
         for node in self.iter() {
@@ -606,11 +608,18 @@ impl<T: Task + Clone> Dag<T> {
                 }
             };
 
-            // TODO: so something with output
-            task.run(input).await?;
+            let changes = {
+                let value = input.read().await;
+                task.run(&*value).await?
+            };
 
-            // Check if the task was interrupted before continuing
-            if sigint.load(std::sync::atomic::Ordering::Relaxed) {
+            // try to acquire a write lock
+            {
+                let value = &mut *input.write().await;
+                task.apply(value, changes)?;
+            }
+
+            if sigint.load(Ordering::Relaxed) {
                 return Ok(ExecutionStatus::Interrupted);
             }
         }
@@ -623,7 +632,6 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use dedent::dedent;
-    use std::sync::atomic::AtomicBool;
 
     fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
         if let Node::Item { .. } = &*node.read().unwrap() {
@@ -939,18 +947,27 @@ mod tests {
         #[async_trait]
         impl Task for DummyTask {
             type Input = ();
-            type Output = ();
+            type Changes = ();
             type Error = ();
 
-            async fn run(&self, _input: &mut Self::Input) -> Result<Self::Output, Self::Error> {
+            async fn run(&self, _input: &Self::Input) -> Result<Self::Changes, Self::Error> {
+                Ok(())
+            }
+
+            fn apply(
+                &self,
+                _input: &mut Self::Input,
+                _changes: Self::Changes,
+            ) -> Result<(), Self::Error> {
                 Ok(())
             }
         }
 
         let dag: Dag<DummyTask> = seq!(DummyTask, DummyTask, DummyTask);
-        let sigint = AtomicBool::new(false);
+        let reader = Arc::new(tokio::sync::RwLock::new(()));
+        let sigint = Arc::new(AtomicBool::new(false));
 
-        let result = dag.execute(&mut (), &sigint).await;
+        let result = dag.execute(&reader, &sigint).await;
         assert!(matches!(result, Ok(ExecutionStatus::Completed)));
     }
 }

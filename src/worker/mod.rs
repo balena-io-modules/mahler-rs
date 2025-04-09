@@ -6,6 +6,7 @@ use std::sync::{
     Arc,
 };
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{error, field, span, Instrument, Level, Span};
 
@@ -226,19 +227,23 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
 
         async fn find_and_run_workflow(
             planner: &Planner,
-            system: &mut System,
+            sys: &Arc<RwLock<System>>,
             tgt: &Value,
-            interrupted: &AtomicBool,
+            sigint: &Arc<AtomicBool>,
         ) -> Result<InternalResult, InternalError> {
-            // TODO: maybe use a timeout to finding the plan
-            let workflow = planner.find_workflow(system, tgt)?;
+            let workflow = {
+                let system = &*sys.read().await;
+                // TODO: maybe use a timeout to finding the plan
+                planner.find_workflow(system, tgt)?
+            };
+
             if workflow.is_empty() {
                 return Ok(InternalResult::TargetReached);
             }
 
             // run the plan and update the system
             if matches!(
-                workflow.execute(system, interrupted).await?,
+                workflow.execute(sys, sigint).await?,
                 WorkflowStatus::Interrupted
             ) {
                 return Ok(InternalResult::Interrupted);
@@ -247,62 +252,64 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             Ok(InternalResult::Completed)
         }
 
+        let syslock = Arc::new(RwLock::new(system));
+
         // Create a flag to signal the cancellation of the planning
         let sigint = Arc::new(AtomicBool::new(false));
         let interrupted = sigint.clone();
         let target = tgt.clone();
-
         let handle = tokio::task::spawn(
             async move {
-                let mut system = system;
                 let mut tries = 0;
+                let mut wait_ms = opts.min_wait_ms;
                 let cur_span = Span::current();
 
                 // continue to re-plan and execute while we have not reached the target state
                 // or we have not been interrupted
                 while !interrupted.load(Ordering::Relaxed) {
-                    let found = match find_and_run_workflow(
-                        &planner,
-                        &mut system,
-                        &tgt,
-                        &interrupted,
-                    )
-                    .await
-                    {
-                        Ok(InternalResult::TargetReached) => {
-                            cur_span.record("return", "success");
-                            return (planner, system, Status::Success);
-                        }
-                        Ok(InternalResult::Completed) => true,
-                        Ok(InternalResult::Interrupted) => {
-                            break;
-                        }
-                        Err(InternalError::Planning(PlannerError::NotFound)) => false,
-                        Err(InternalError::Planning(err)) => {
-                            if cfg!(debug_assertions) {
-                                // Abort search if a an unexpected error happens during
-                                // planning
-                                return (planner, system, Status::Aborted(Error(anyhow!(err))));
+                    let found =
+                        match find_and_run_workflow(&planner, &syslock, &tgt, &interrupted).await {
+                            Ok(InternalResult::TargetReached) => {
+                                cur_span.record("return", "success");
+                                let system = syslock.read().await.clone();
+                                return (planner, system, Status::Success);
                             }
-                            false
-                        }
-                        Err(_) => false,
-                    };
+                            Ok(InternalResult::Completed) => true,
+                            Ok(InternalResult::Interrupted) => {
+                                break;
+                            }
+                            Err(InternalError::Planning(PlannerError::NotFound)) => false,
+                            Err(InternalError::Planning(err)) => {
+                                if cfg!(debug_assertions) {
+                                    // Abort search if a an unexpected error happens during
+                                    // planning
+                                    let system = syslock.read().await.clone();
+                                    return (planner, system, Status::Aborted(Error(anyhow!(err))));
+                                }
+                                false
+                            }
+                            Err(_) => false,
+                        };
 
-                    if !found && tries >= opts.max_retries {
-                        cur_span.record("return", "failure");
-                        return (planner, system, Status::Failure);
+                    if !found {
+                        tries += 1;
+                        if opts.max_retries != 0 && tries >= opts.max_retries {
+                            cur_span.record("return", "failure");
+                            let system = syslock.read().await.clone();
+                            return (planner, system, Status::Failure);
+                        }
+                        wait_ms = std::cmp::min(wait_ms.saturating_mul(2), opts.max_wait_ms);
+                    } else {
+                        // reset backoff if we made progress
+                        tries = 0;
+                        wait_ms = opts.min_wait_ms;
                     }
 
-                    // Exponential backoff
-                    let wait = std::cmp::min(opts.min_wait_ms * 2u64.pow(tries), opts.max_wait_ms);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(wait)).await;
-
-                    // Only backoff if we did not find the target
-                    tries += if found { 0 } else { 1 };
+                    tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)).await;
                 }
 
                 cur_span.record("return", "interrupted");
+                let system = syslock.read().await.clone();
                 (planner, system, Status::Interrupted)
             }
             .instrument(span!(Level::INFO, "seek_target", target = %target, return = field::Empty)),
@@ -420,6 +427,8 @@ mod tests {
     use crate::task::*;
     use serde::Deserialize;
     use tokio::time::sleep;
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::{prelude::*, EnvFilter};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct Counters(HashMap<String, i32>);
@@ -449,8 +458,25 @@ mod tests {
         counter
     }
 
+    fn init() {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .pretty()
+                    .with_target(false)
+                    .with_thread_names(true)
+                    .with_thread_ids(true)
+                    .with_line_number(true)
+                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE),
+            )
+            .with(EnvFilter::from_default_env())
+            .try_init()
+            .unwrap_or(());
+    }
+
     #[tokio::test]
     async fn test_worker_complex_state() {
+        init();
         let mut worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .initial_state(Counters(HashMap::from([
@@ -464,8 +490,8 @@ mod tests {
             .unwrap();
 
         let worker = worker.wait(None).await.unwrap();
-        let state = worker.state().unwrap();
         assert_eq!(worker.status(), &Status::Success);
+        let state = worker.state().unwrap();
         assert_eq!(
             state,
             Counters(HashMap::from([
@@ -477,6 +503,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_bug() {
+        init();
         let mut worker = Worker::new()
             .job("", update(buggy_plus_one))
             .initial_state(0)
@@ -488,6 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_cancel() {
+        init();
         let worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
@@ -503,6 +531,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_timeout() {
+        init();
         let mut worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)

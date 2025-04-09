@@ -117,13 +117,9 @@ impl Action {
     }
 
     /// Run the task sequentially
-    pub(crate) async fn run(&self, system: &mut System) -> Result<(), Error> {
+    pub(crate) async fn run(&self, system: &System) -> Result<Patch, Error> {
         let Action { context, run, .. } = self;
-        let changes = (run)(system, context).await?;
-        system
-            .patch(changes)
-            .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
-        Ok(())
+        (run)(system, context).await
     }
 
     pub(crate) fn dry_run(&self, system: &System) -> Result<Patch, Error> {
@@ -510,17 +506,21 @@ mod tests {
 
     #[tokio::test]
     async fn it_runs_async_actions() {
-        let mut system = System::try_from(0).unwrap();
+        let system = System::try_from(0).unwrap();
         let task = plus_one.with_target(1);
 
         if let Task::Action(action) = task {
             // Run the action
-            action.run(&mut system).await.unwrap();
-
-            let state = system.state::<i32>().unwrap();
+            let changes = action.run(&system).await.unwrap();
 
             // The referenced value was modified
-            assert_eq!(state, 1);
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 1 },
+                ]))
+                .unwrap()
+            );
         } else {
             panic!("Expected an Action task");
         }
@@ -528,16 +528,21 @@ mod tests {
 
     #[tokio::test]
     async fn it_allows_extending_actions_with_effect() {
-        let mut system = System::try_from(0).unwrap();
+        let system = System::try_from(0).unwrap();
         let task = plus_one_async_with_effect.with_target(1);
 
         if let Task::Action(action) = task {
             // Run the action
-            action.run(&mut system).await.unwrap();
+            let changes = action.run(&system).await.unwrap();
 
-            // Check that the system state was modified
-            let state = system.state::<i32>().unwrap();
-            assert_eq!(state, 1);
+            // The referenced value was modified
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 1 },
+                ]))
+                .unwrap()
+            );
         } else {
             panic!("Expected an Action task");
         }
@@ -545,11 +550,11 @@ mod tests {
 
     #[tokio::test]
     async fn it_allows_actions_returning_runtime_errors() {
-        let mut system = System::try_from(0).unwrap();
+        let system = System::try_from(0).unwrap();
         let task = plus_one_async_with_error.with_target(1);
 
         if let Task::Action(action) = task {
-            let res = action.run(&mut system).await;
+            let res = action.run(&system).await;
             assert!(res.is_err());
             assert_eq!(
                 res.unwrap_err().to_string(),
@@ -638,21 +643,20 @@ mod tests {
             counters: [("a".to_string(), 0), ("b".to_string(), 0)].into(),
         };
 
-        let mut system = System::try_from(state).unwrap();
+        let system = System::try_from(state).unwrap();
         let task = update_counter.with_target(2).with_path("/counters/a");
 
         if let Task::Action(action) = task {
             // Run the action
-            action.run(&mut system).await.unwrap();
-
-            let state = system.state::<State>().unwrap();
+            let changes = action.run(&system).await.unwrap();
 
             // Only the referenced value was modified
             assert_eq!(
-                state,
-                State {
-                    counters: [("a".to_string(), 1), ("b".to_string(), 0)].into()
-                }
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "/counters/a", "value": 1 },
+                ]))
+                .unwrap()
             );
         } else {
             panic!("Expected an Action Task");
