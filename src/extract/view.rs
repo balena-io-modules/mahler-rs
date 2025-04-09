@@ -199,7 +199,7 @@ impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
 // This converts the pointer into a pure effect
 impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
     fn from(ptr: Pointer<T>) -> Effect<Patch, Error> {
-        Effect::from(ptr.into_result())
+        Effect::from_result(ptr.into_result())
     }
 }
 
@@ -257,7 +257,7 @@ impl<T: Serialize> IntoResult<Patch> for View<T> {
 // This converts the view into a pure effect
 impl<T: Serialize> From<View<T>> for Effect<Patch, Error> {
     fn from(view: View<T>) -> Effect<Patch, Error> {
-        Effect::from(view.into_result())
+        Effect::from_result(view.into_result())
     }
 }
 

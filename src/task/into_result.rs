@@ -49,3 +49,24 @@ impl<const N: usize> From<[Task; N]> for Effect<Vec<Task>, Error> {
         Effect::of(slice.into())
     }
 }
+
+impl<T> From<Option<T>> for Effect<Vec<Task>, Error>
+where
+    T: Into<Effect<Vec<Task>, Error>>,
+{
+    fn from(opt: Option<T>) -> Effect<Vec<Task>, Error> {
+        opt.map(|t| t.into())
+            .unwrap_or_else(|| Effect::from_error(Error::ConditionFailed))
+    }
+}
+
+impl<T, E> From<Result<T, E>> for Effect<Vec<Task>, Error>
+where
+    T: Into<Effect<Vec<Task>, Error>>,
+    E: Into<Error>,
+{
+    fn from(res: Result<T, E>) -> Effect<Vec<Task>, Error> {
+        res.map(|t| t.into())
+            .unwrap_or_else(|e| Effect::from_error(e.into()))
+    }
+}

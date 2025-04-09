@@ -190,7 +190,7 @@ impl Method {
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
                 // Because with_target has a chance of panicking, we catch any panics
-                // on task methods to simplify method definitions
+                // on task methods to simplify things for library users
                 panic::catch_unwind(|| method.call(system, context))
                     .map(|r| r.pure())
                     .map_err(|e| {
@@ -198,10 +198,10 @@ impl Method {
                             .downcast_ref::<&str>()
                             .map(|s| (*s).to_string())
                             .or_else(|| e.downcast_ref::<String>().cloned())
-                            .or_else(|| e.downcast_ref::<InputError>().map(|err| err.to_string()))
                             .unwrap_or_else(|| {
                                 format!("Panic while expanding task {}", method.id())
                             });
+
                         InputError::from(anyhow!(msg))
                     })?
             }),
@@ -406,9 +406,10 @@ mod tests {
     use super::*;
     use crate::extract::{System as Sys, Target, View};
     use crate::system::System;
+    use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
     use serde_json::{from_value, json};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use thiserror::Error;
     use tokio::time::{sleep, Duration};
 
@@ -660,6 +661,106 @@ mod tests {
             );
         } else {
             panic!("Expected an Action Task");
+        }
+    }
+
+    fn plus_two_with_error(
+        counter: View<i32>,
+        Target(tgt): Target<i32>,
+    ) -> Result<[Task; 2], Error> {
+        if tgt - *counter > 1 {
+            return Ok([
+                plus_one.into_task().try_target(tgt)?,
+                plus_one.into_task().try_target(tgt)?,
+            ]);
+        }
+
+        Err(Error::ConditionFailed)
+    }
+
+    #[test]
+    fn it_allows_expanding_methods_with_result() {
+        let task = plus_two_with_error.with_target(3);
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            let tasks = method.expand(&system).unwrap();
+            assert_eq!(
+                tasks.iter().map(|t| t.id()).collect::<Vec<&str>>(),
+                vec![plus_one.id(), plus_one.id()]
+            );
+        } else {
+            panic!("Expected a method task");
+        }
+    }
+
+    #[test]
+    fn it_catches_input_errors_in_method_expansions() {
+        let task = plus_two_with_error.with_target("a");
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            assert!(matches!(method.expand(&system), Err(Error::BadInput(_))));
+        } else {
+            panic!("Expected a method task");
+        }
+    }
+
+    #[test]
+    fn it_catches_condition_failure_in_method_expansions() {
+        let task = plus_two_with_error.with_target(1);
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            assert!(matches!(
+                method.expand(&system),
+                Err(Error::ConditionFailed)
+            ));
+        } else {
+            panic!("Expected a method task");
+        }
+    }
+
+    fn plus_two_with_panic(counter: View<i32>, Target(tgt): Target<i32>) -> Option<[Task; 2]> {
+        if tgt - *counter > 1 {
+            // Force `with_target` to panic
+            // See: https://docs.rs/serde_json/latest/serde_json/fn.to_value.html#errors
+            let mut map = BTreeMap::new();
+            map.insert(vec![32, 64], "x86");
+            return Some([
+                plus_one.into_task().with_target(map),
+                plus_one.into_task().with_target(tgt),
+            ]);
+        }
+
+        None
+    }
+
+    #[test]
+    fn it_catches_panics_in_method_expansions() {
+        // this will cause the
+        let task = plus_two_with_panic.with_target(3);
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            assert!(matches!(method.expand(&system), Err(Error::BadInput(_))));
+        } else {
+            panic!("Expected a method task");
+        }
+    }
+
+    #[test]
+    fn it_catches_condition_failure_in_methods_returning_option() {
+        let task = plus_two_with_panic.with_target(1);
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            assert!(matches!(
+                method.expand(&system),
+                Err(Error::ConditionFailed)
+            ));
+        } else {
+            panic!("Expected a method task");
         }
     }
 }
