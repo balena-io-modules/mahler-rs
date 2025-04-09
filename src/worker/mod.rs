@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context};
+use json_patch::Patch;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::sync::{
@@ -8,7 +9,7 @@ use std::sync::{
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use tracing::{error, field, span, Instrument, Level, Span};
+use tracing::{debug, error, field, span, Instrument, Level, Span};
 
 #[cfg(feature = "logging")]
 mod logging;
@@ -16,10 +17,16 @@ mod logging;
 #[cfg(feature = "logging")]
 pub use logging::init as init_logging;
 
-use crate::planner::{Domain, Error as PlannerError, Planner};
 use crate::system::System;
-use crate::task::{self, Job};
 use crate::workflow::WorkflowStatus;
+use crate::{
+    ack_channel::ack_channel,
+    planner::{Domain, Error as PlannerError, Planner},
+};
+use crate::{
+    ack_channel::Sender,
+    task::{self, Job},
+};
 
 #[derive(Clone)]
 pub struct Opts {
@@ -229,6 +236,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             planner: &Planner,
             sys: &Arc<RwLock<System>>,
             tgt: &Value,
+            channel: &Sender<Patch>,
             sigint: &Arc<AtomicBool>,
         ) -> Result<InternalResult, InternalError> {
             let workflow = {
@@ -243,7 +251,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
 
             // run the plan and update the system
             if matches!(
-                workflow.execute(sys, sigint).await?,
+                workflow.execute(sys, channel.clone(), sigint).await?,
                 WorkflowStatus::Interrupted
             ) {
                 return Ok(InternalResult::Interrupted);
@@ -252,13 +260,39 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             Ok(InternalResult::Completed)
         }
 
+        // Wrap the system in a RwLock
         let syslock = Arc::new(RwLock::new(system));
+
+        // Create the messaging channel
+        let (tx, mut rx) = ack_channel::<Patch>(100);
+
+        // Spawn the receiving tokio task
+        let sys_writer = Arc::clone(&syslock);
+        tokio::spawn(
+            async move {
+                while let Some(mut msg) = rx.recv().await {
+                    let changes = std::mem::take(&mut msg.data);
+                    debug!("received changes: {:?}", changes);
+                    let mut system = sys_writer.write().await;
+                    if let Err(e) = system.patch(changes) {
+                        // TODO: send the error to the seek_target task
+                        // to abort the operation. While a failed patch should
+                        // be rare, it would mean leaving the system in
+                        // an inconsistent state
+                        error!("failed to patch system: {e}");
+                        break;
+                    }
+                    msg.ack();
+                }
+            }
+            .instrument(span!(Level::DEBUG, "system_writer")),
+        );
 
         // Create a flag to signal the cancellation of the planning
         let sigint = Arc::new(AtomicBool::new(false));
         let interrupted = sigint.clone();
         let target = tgt.clone();
-        let handle = tokio::task::spawn(
+        let handle = tokio::spawn(
             async move {
                 let mut tries = 0;
                 let mut wait_ms = opts.min_wait_ms;
@@ -268,7 +302,9 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
                 // or we have not been interrupted
                 while !interrupted.load(Ordering::Relaxed) {
                     let found =
-                        match find_and_run_workflow(&planner, &syslock, &tgt, &interrupted).await {
+                        match find_and_run_workflow(&planner, &syslock, &tgt, &tx, &interrupted)
+                            .await
+                        {
                             Ok(InternalResult::TargetReached) => {
                                 cur_span.record("return", "success");
                                 let system = syslock.read().await.clone();

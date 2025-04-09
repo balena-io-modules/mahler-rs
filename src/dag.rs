@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use std::fmt;
 use std::ops::Add;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
+
+use crate::ack_channel::Sender;
 
 type Link<T> = Option<Arc<RwLock<Node<T>>>>;
 
@@ -585,16 +587,19 @@ pub trait Task {
     type Error;
 
     async fn run(&self, input: &Self::Input) -> Result<Self::Changes, Self::Error>;
-
-    fn apply(&self, input: &mut Self::Input, changes: Self::Changes) -> Result<(), Self::Error>;
 }
 
-impl<T: Task + Clone> Dag<T> {
+impl<T> Dag<T> {
     pub(crate) async fn execute(
         self,
         input: &Arc<tokio::sync::RwLock<T::Input>>,
+        channel: Sender<T::Changes>,
         sigint: &Arc<AtomicBool>,
-    ) -> Result<ExecutionStatus, T::Error> {
+    ) -> Result<ExecutionStatus, T::Error>
+    where
+        T: Task + Clone,
+        T::Input: Clone,
+    {
         // TODO: implement parallel execution of the DAG
         for node in self.iter() {
             let task = {
@@ -608,18 +613,24 @@ impl<T: Task + Clone> Dag<T> {
                 }
             };
 
-            let changes = {
-                let value = input.read().await;
-                task.run(&*value).await?
+            // Read the updated value
+            let value = {
+                let value_guard = input.read().await;
+                // Unfortunately this clone is needed to avoid
+                // holding on to the read lock for long running
+                // operations
+                value_guard.clone()
             };
 
-            // try to acquire a write lock
-            {
-                let value = &mut *input.write().await;
-                task.apply(value, changes)?;
-            }
+            // Run the task
+            let changes = task.run(&value).await?;
 
-            if sigint.load(Ordering::Relaxed) {
+            // Communicate the changes to the channel
+            if channel.send(changes).await.is_err()
+                || sigint.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                // Terminate the execution if the receiver closes
+                // or the workflow is interrupted
                 return Ok(ExecutionStatus::Interrupted);
             }
         }
@@ -629,9 +640,12 @@ impl<T: Task + Clone> Dag<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use async_trait::async_trait;
     use dedent::dedent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::ack_channel::ack_channel;
 
     fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
         if let Node::Item { .. } = &*node.read().unwrap() {
@@ -953,21 +967,25 @@ mod tests {
             async fn run(&self, _input: &Self::Input) -> Result<Self::Changes, Self::Error> {
                 Ok(())
             }
-
-            fn apply(
-                &self,
-                _input: &mut Self::Input,
-                _changes: Self::Changes,
-            ) -> Result<(), Self::Error> {
-                Ok(())
-            }
         }
 
         let dag: Dag<DummyTask> = seq!(DummyTask, DummyTask, DummyTask);
         let reader = Arc::new(tokio::sync::RwLock::new(()));
+        let (tx, mut rx) = ack_channel(10);
         let sigint = Arc::new(AtomicBool::new(false));
 
-        let result = dag.execute(&reader, &sigint).await;
+        let count_atomic = Arc::new(AtomicUsize::new(0));
+        let counter = count_atomic.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                let c = counter.load(Ordering::Relaxed);
+                counter.store(c + 1, Ordering::Relaxed);
+                msg.ack();
+            }
+        });
+
+        let result = dag.execute(&reader, tx, &sigint).await;
         assert!(matches!(result, Ok(ExecutionStatus::Completed)));
+        assert_eq!(count_atomic.load(Ordering::Relaxed), 3);
     }
 }

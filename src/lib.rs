@@ -1,3 +1,4 @@
+mod ack_channel;
 mod dag;
 mod path;
 

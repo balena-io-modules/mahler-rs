@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use async_trait::async_trait;
 use json_patch::{Patch, PatchOperation};
 use serde_json::Value;
@@ -10,9 +9,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::instrument;
 
+use crate::ack_channel::Sender;
 use crate::dag::{Dag, ExecutionStatus, Task};
 use crate::system::System;
-use crate::task::{Action, Error as TaskError, UnexpectedError};
+use crate::task::{Action, Error as TaskError};
 
 #[derive(Hash)]
 struct WorkUnitId<'s> {
@@ -99,13 +99,6 @@ impl Task for WorkUnit {
 
         self.action.run(system).await
     }
-
-    fn apply(&self, system: &mut System, changes: Patch) -> Result<(), TaskError> {
-        system
-            .patch(changes)
-            .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
-        Ok(())
-    }
 }
 
 #[derive(Default, Clone)]
@@ -149,9 +142,13 @@ impl Workflow {
     pub async fn execute(
         self,
         system: &Arc<RwLock<System>>,
+        channel: Sender<Patch>,
         sigint: &Arc<AtomicBool>,
     ) -> Result<WorkflowStatus, TaskError> {
-        self.dag.execute(system, sigint).await.map(|s| s.into())
+        self.dag
+            .execute(system, channel, sigint)
+            .await
+            .map(|s| s.into())
     }
 }
 
