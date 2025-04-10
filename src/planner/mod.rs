@@ -8,11 +8,13 @@ use tracing::{error, field, instrument, trace_span, warn, Level, Span};
 use crate::path::Path;
 use crate::system::System;
 use crate::task::{self, Context, Operation, Task};
+use crate::workflow::{WorkUnit, Workflow};
 
-use super::distance::Distance;
-use super::domain::Domain;
-use super::workflow::{WorkUnit, Workflow};
-use super::PathSearchError;
+mod distance;
+mod domain;
+
+use distance::*;
+pub use domain::*;
 
 #[derive(Debug)]
 pub struct Planner(Domain);
@@ -50,7 +52,7 @@ impl Planner {
         Self(domain)
     }
 
-    #[instrument(level = "trace", skip_all, fields(task=%task, selected=field::Empty), err(level=Level::TRACE))]
+    #[instrument(level = "trace", skip_all, fields(task=?task, selected=field::Empty), err(level=Level::TRACE))]
     fn try_task(
         &self,
         task: Task,
@@ -88,7 +90,7 @@ impl Planner {
 
                 // Otherwise add the task to the plan
                 let Workflow { dag, pending } = cur_plan;
-                let dag = dag.with_head(WorkUnit::new(work_id, action));
+                let dag = dag.with_head(WorkUnit::new(work_id, action, changes.clone()));
                 let pending = [pending, changes].concat();
 
                 Span::current().record("selected", true);
@@ -261,13 +263,13 @@ impl Planner {
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
     use serde::Deserialize;
     use std::collections::HashMap;
 
     use super::*;
     use crate::extract::{Args, System, Target, View};
     use crate::task::*;
-    use crate::worker::Domain;
     use crate::{seq, Dag};
 
     fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
@@ -322,8 +324,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one()",
-            "worker::planner::tests::plus_one()"
+            "gustav::planner::tests::plus_one()",
+            "gustav::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -351,8 +353,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one()",
-            "worker::planner::tests::plus_one()"
+            "gustav::planner::tests::plus_one()",
+            "gustav::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -382,10 +384,10 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one(/counters/two)",
-            "worker::planner::tests::plus_one(/counters/two)",
-            "worker::planner::tests::plus_one(/counters/one)",
-            "worker::planner::tests::plus_one(/counters/one)",
+            "gustav::planner::tests::plus_one(/counters/two)",
+            "gustav::planner::tests::plus_one(/counters/two)",
+            "gustav::planner::tests::plus_one(/counters/one)",
+            "gustav::planner::tests::plus_one(/counters/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -415,8 +417,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one(/counters/one)",
-            "worker::planner::tests::plus_one(/counters/one)",
+            "gustav::planner::tests::plus_one(/counters/one)",
+            "gustav::planner::tests::plus_one(/counters/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -447,9 +449,9 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::plus_one(/counters/one)",
-            "worker::planner::tests::plus_one(/counters/one)",
-            "worker::planner::tests::plus_one(/counters/one)",
+            "gustav::planner::tests::plus_one(/counters/one)",
+            "gustav::planner::tests::plus_one(/counters/one)",
+            "gustav::planner::tests::plus_one(/counters/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -674,12 +676,12 @@ mod tests {
         let workflow = planner.find_plan(initial, target).unwrap();
 
         let expected: Dag<&str> = seq!(
-            "worker::planner::tests::test_stacking_problem::unstack(/blocks/C)",
-            "worker::planner::tests::test_stacking_problem::stack(/blocks/C)",
-            "worker::planner::tests::test_stacking_problem::unstack(/blocks/B)",
-            "worker::planner::tests::test_stacking_problem::stack(/blocks/B)",
-            "worker::planner::tests::test_stacking_problem::pickup(/blocks/A)",
-            "worker::planner::tests::test_stacking_problem::stack(/blocks/A)",
+            "gustav::planner::tests::test_stacking_problem::unstack(/blocks/C)",
+            "gustav::planner::tests::test_stacking_problem::stack(/blocks/C)",
+            "gustav::planner::tests::test_stacking_problem::unstack(/blocks/B)",
+            "gustav::planner::tests::test_stacking_problem::stack(/blocks/B)",
+            "gustav::planner::tests::test_stacking_problem::pickup(/blocks/A)",
+            "gustav::planner::tests::test_stacking_problem::stack(/blocks/A)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);

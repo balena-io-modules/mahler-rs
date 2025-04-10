@@ -4,8 +4,8 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use gustav::extract::{Args, Target, View};
-use gustav::task::*;
-use gustav::worker::Worker;
+use gustav::task::prelude::*;
+use gustav::worker::{prelude::*, Status as WorkerStatus, Worker};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct Counters(HashMap<String, i32>);
@@ -19,7 +19,7 @@ fn init() {
         .unwrap_or(());
 }
 
-fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
+fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
     if *counter < tgt {
         // Modify the counter if we are below target
         *counter += 1;
@@ -29,7 +29,7 @@ fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32
     // effect will only be called if the job is chosen
     // in the workflow which will only happens if there are
     // changes
-    Effect::of(counter).with_io(|counter| async {
+    with_io(counter, |counter| async {
         sleep(Duration::from_millis(10)).await;
         Ok(counter)
     })
@@ -53,10 +53,12 @@ async fn test_worker() {
         .seek_target(Counters(HashMap::from([
             ("a".to_string(), 2),
             ("b".to_string(), 0),
-        ])));
+        ])))
+        .unwrap();
 
-    let worker = worker.wait(None).await.unwrap();
-    let state = worker.state();
+    let worker = worker.wait(None).await.unwrap_idle();
+    let state = worker.state().unwrap();
+    assert_eq!(worker.status(), &WorkerStatus::Success);
     assert_eq!(
         state,
         Counters(HashMap::from([("a".to_string(), 2), ("b".to_string(), 0),]))

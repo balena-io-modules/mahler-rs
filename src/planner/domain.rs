@@ -217,7 +217,10 @@ mod test_utils {
             let task = task.with_path(path);
             match &task {
                 Task::Action(action) => {
-                    action.run(system).await?;
+                    let changes = action.run(system).await?;
+                    system
+                        .patch(changes)
+                        .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
                 }
                 Task::Method(method) => {
                     let tasks = method.expand(system)?;
@@ -265,6 +268,7 @@ mod test_utils {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(debug_assertions)]
     use serde::{Deserialize, Serialize};
 
     use super::*;
@@ -413,6 +417,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn it_allows_testing_atomic_tasks() {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -444,6 +449,7 @@ mod tests {
         );
     }
 
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn it_allows_testing_compound_tasks() {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]

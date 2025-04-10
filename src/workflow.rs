@@ -1,15 +1,18 @@
-use json_patch::PatchOperation;
+use async_trait::async_trait;
+use json_patch::{Patch, PatchOperation};
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::instrument;
 
-use super::RuntimeError;
-use crate::dag::{Dag, Node};
+use crate::ack_channel::Sender;
+use crate::dag::{Dag, ExecutionStatus, Task};
 use crate::system::System;
-use crate::task::Action;
+use crate::task::{Action, Error as TaskError};
 
 #[derive(Hash)]
 struct WorkUnitId<'s> {
@@ -34,12 +37,17 @@ pub(crate) struct WorkUnit {
      *
      * Only atomic tasks should be added to a worflow item
      */
-    pub task: Action,
+    action: Action,
+
+    /**
+     * The output of the task during planning
+     */
+    output: Vec<PatchOperation>,
 }
 
 impl WorkUnit {
-    pub fn new(id: u64, task: Action) -> Self {
-        Self { id, task }
+    pub fn new(id: u64, action: Action, output: Vec<PatchOperation>) -> Self {
+        Self { id, action, output }
     }
 
     pub fn new_id(task: &Action, state: &Value) -> Result<u64, jsonptr::resolve::ResolveError> {
@@ -66,47 +74,30 @@ impl WorkUnit {
     }
 }
 
-impl From<WorkUnit> for Action {
-    fn from(action: WorkUnit) -> Action {
-        action.task
-    }
-}
-
 impl Display for WorkUnit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.task.fmt(f)
+        self.action.fmt(f)
     }
 }
 
-impl<T: Into<Action> + Clone> Dag<T> {
-    #[instrument(name = "run_workflow", skip_all, err)]
-    pub(crate) async fn execute(
-        self,
-        system: &mut System,
-        interrupted: &AtomicBool,
-    ) -> Result<(), RuntimeError> {
-        // TODO: implement parallel execution of the DAG
-        for node in self.iter() {
-            let value = {
-                if let Node::Item { value, .. } = &*node.read().unwrap() {
-                    // This clone is necessary for now because of the iterator, but a future version
-                    // of execute will just consume the DAG, avoiding the need
-                    // for cloning
-                    value.clone()
-                } else {
-                    continue;
-                }
-            };
+#[async_trait]
+impl Task for WorkUnit {
+    type Input = System;
+    type Changes = Patch;
+    type Error = TaskError;
 
-            let task = value.into();
-            task.run(system).await?;
-
-            // Check if the task was interrupted before continuing
-            if interrupted.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(RuntimeError::Interrupted)?;
-            }
+    #[instrument(name="run_task", skip_all, fields(task=%self.action, state=%system.root()), err)]
+    async fn run(&self, system: &System) -> Result<Patch, TaskError> {
+        // dry-run the task to test that conditions hold
+        // before executing the action should not really fail at this point
+        let Patch(changes) = self.action.dry_run(system)?;
+        if changes != self.output {
+            // If the result is different then we assume it's because the
+            // conditions changed since planning
+            return Err(TaskError::ConditionFailed);
         }
-        Ok(())
+
+        self.action.run(system).await
     }
 }
 
@@ -114,6 +105,20 @@ impl<T: Into<Action> + Clone> Dag<T> {
 pub struct Workflow {
     pub(crate) dag: Dag<WorkUnit>,
     pub(crate) pending: Vec<PatchOperation>,
+}
+
+pub enum WorkflowStatus {
+    Completed,
+    Interrupted,
+}
+
+impl From<ExecutionStatus> for WorkflowStatus {
+    fn from(status: ExecutionStatus) -> WorkflowStatus {
+        match status {
+            ExecutionStatus::Completed => WorkflowStatus::Completed,
+            ExecutionStatus::Interrupted => WorkflowStatus::Interrupted,
+        }
+    }
 }
 
 impl Workflow {
@@ -133,12 +138,17 @@ impl Workflow {
         self.dag.is_empty()
     }
 
-    pub(crate) async fn execute(
+    #[instrument(name = "run_workflow", skip_all, err)]
+    pub async fn execute(
         self,
-        system: &mut System,
-        interrupted: &AtomicBool,
-    ) -> Result<(), RuntimeError> {
-        self.dag.execute(system, interrupted).await
+        system: &Arc<RwLock<System>>,
+        channel: Sender<Patch>,
+        sigint: &Arc<AtomicBool>,
+    ) -> Result<WorkflowStatus, TaskError> {
+        self.dag
+            .execute(system, channel, sigint)
+            .await
+            .map(|s| s.into())
     }
 }
 

@@ -2,18 +2,6 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::system::System;
-
-pub(crate) trait IntoEffect<O, E, I = O> {
-    fn into_effect(self, system: &System) -> Effect<O, E, I>;
-}
-
-impl<O, E, I> IntoEffect<O, E, I> for Effect<O, E, I> {
-    fn into_effect(self, _: &System) -> Effect<O, E, I> {
-        self
-    }
-}
-
 type IOResult<O, E> = Pin<Box<dyn Future<Output = Result<O, E>> + Send>>;
 type IO<O, E = Infallible, I = O> = Box<dyn FnOnce(I) -> IOResult<O, E> + Send>;
 type Pure<O, E, I> = Box<dyn FnOnce(I) -> Result<O, E> + Send>;
@@ -30,6 +18,10 @@ pub enum Effect<O, E = Infallible, I = O> {
 impl<O, E> Effect<O, E> {
     pub fn of(o: O) -> Self {
         Effect::Pure(Ok(o))
+    }
+
+    pub fn from_result(res: Result<O, E>) -> Effect<O, E> {
+        Effect::Pure(res)
     }
 
     pub fn with_io<
@@ -153,18 +145,6 @@ impl<T: 'static, E: 'static, I: Send + 'static> Effect<T, E, I> {
     }
 }
 
-impl<T: 'static, E: 'static> From<Result<T, E>> for Effect<T, E> {
-    fn from(res: Result<T, E>) -> Effect<T, E> {
-        Effect::Pure(res)
-    }
-}
-
-impl<T: Send + 'static, E: std::error::Error + 'static> From<E> for Effect<T, E> {
-    fn from(err: E) -> Effect<T, E> {
-        Effect::Pure(Err(err))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,10 +184,11 @@ mod tests {
 
     #[test]
     fn it_allows_errors_in_sync_executions() {
-        let effect = Effect::from(Err("ERROR") as Result<i32, &str>).with_io(|x| async move {
-            sleep(Duration::from_millis(10)).await;
-            Ok(x + 1)
-        });
+        let effect =
+            Effect::from_result(Err("ERROR") as Result<i32, &str>).with_io(|x| async move {
+                sleep(Duration::from_millis(10)).await;
+                Ok(x + 1)
+            });
 
         assert_eq!(effect.pure(), Err("ERROR"))
     }

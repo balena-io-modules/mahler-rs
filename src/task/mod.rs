@@ -5,6 +5,7 @@ mod errors;
 mod handler;
 mod into_result;
 mod job;
+mod with_io;
 
 use anyhow::anyhow;
 use anyhow::Context as AnyhowCtx;
@@ -12,9 +13,10 @@ use json_patch::Patch;
 use serde::Serialize;
 use std::fmt::{self, Display};
 use std::future::Future;
+use std::panic;
+use std::panic::RefUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
-use tracing::instrument;
 use tracing::warn;
 
 use crate::system::System;
@@ -28,6 +30,13 @@ pub use effect::*;
 pub use errors::InputError;
 pub use handler::*;
 pub use job::*;
+pub use with_io::*;
+
+pub mod prelude {
+    pub use super::handler::*;
+    pub use super::job::{any, create, delete, none, update};
+    pub use super::with_io::*;
+}
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
 type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch, Error> + Send + Sync>;
@@ -73,6 +82,32 @@ impl fmt::Debug for Action {
 }
 
 impl Action {
+    pub(crate) fn new<H, T, I>(action: H, context: Context) -> Self
+    where
+        H: Handler<T, Patch, I>,
+        I: Send + 'static,
+    {
+        let handler_clone = action.clone();
+        Self {
+            id: action.id(),
+            scoped: action.is_scoped(),
+            context,
+            dry_run: Arc::new(move |system: &System, context: &Context| {
+                let effect = handler_clone.call(system, context);
+                effect.pure()
+            }),
+            run: Arc::new(move |system: &System, context: &Context| {
+                let effect = action.call(system, context);
+
+                Box::pin(async { effect.run().await })
+            }),
+            describe: Arc::new(|_: &Context| {
+                // This error should never be seen
+                Err(UnexpectedError::from(anyhow!("undefined description")))?
+            }),
+        }
+    }
+
     pub(crate) fn context(&self) -> &Context {
         &self.context
     }
@@ -81,37 +116,10 @@ impl Action {
         self.id
     }
 
-    fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
-        let target = serde_json::to_value(target).context("Serialization failed")?;
-        Ok(Self {
-            context: self.context.with_target(target),
-            ..self
-        })
-    }
-
-    fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
-        Self {
-            context: self.context.with_arg(key, value),
-            ..self
-        }
-    }
-
-    fn with_path(self, path: impl AsRef<str>) -> Self {
-        Self {
-            context: self.context.with_path(path),
-            ..self
-        }
-    }
-
     /// Run the task sequentially
-    #[instrument(name="run_task", skip_all, fields(task=%self), err)]
-    pub(crate) async fn run(&self, system: &mut System) -> Result<(), Error> {
+    pub(crate) async fn run(&self, system: &System) -> Result<Patch, Error> {
         let Action { context, run, .. } = self;
-        let changes = (run)(system, context).await?;
-        system
-            .patch(changes)
-            .map_err(|e| UnexpectedError::from(anyhow!(e)))?;
-        Ok(())
+        (run)(system, context).await
     }
 
     pub(crate) fn dry_run(&self, system: &System) -> Result<Patch, Error> {
@@ -129,14 +137,7 @@ impl Display for Action {
                 Error::Unexpected(_) => {}
                 _ => warn!("failed to expand description for task {}: {}", self.id, e),
             }
-
-            let id = self
-                .id
-                .split("::")
-                .skip(1)
-                .collect::<Vec<&str>>()
-                .join("::");
-            format!("{}({})", id, self.context.path)
+            format!("{}({})", self.id, self.context.path)
         });
         write!(f, "{}", description)
     }
@@ -179,34 +180,44 @@ impl fmt::Debug for Method {
 }
 
 impl Method {
+    pub(crate) fn new<H, T>(method: H, context: Context) -> Self
+    where
+        H: Handler<T, Vec<Task>> + RefUnwindSafe,
+    {
+        Method {
+            id: method.id(),
+            scoped: method.is_scoped(),
+            context,
+            expand: Arc::new(move |system: &System, context: &Context| {
+                // Because with_target has a chance of panicking, we catch any panics
+                // on task methods to simplify things for library users
+                panic::catch_unwind(|| method.call(system, context))
+                    .map(|r| r.pure())
+                    .map_err(|e| {
+                        let msg = e
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| e.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| {
+                                format!("Panic while expanding task {}", method.id())
+                            });
+
+                        InputError::from(anyhow!(msg))
+                    })?
+            }),
+            describe: Arc::new(|_: &Context| {
+                // This error should never be seen
+                Err(UnexpectedError::from(anyhow!("undefined description")))?
+            }),
+        }
+    }
+
     pub(crate) fn context(&self) -> &Context {
         &self.context
     }
 
     pub fn id(&self) -> &str {
         self.id
-    }
-
-    fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
-        let target = serde_json::to_value(target).context("Serialization failed")?;
-        Ok(Self {
-            context: self.context.with_target(target),
-            ..self
-        })
-    }
-
-    fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
-        Self {
-            context: self.context.with_arg(key, value),
-            ..self
-        }
-    }
-
-    fn with_path(self, path: impl AsRef<str>) -> Self {
-        Self {
-            context: self.context.with_path(path),
-            ..self
-        }
     }
 
     pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>, Error> {
@@ -224,13 +235,7 @@ impl Display for Method {
                 Error::Unexpected(_) => {}
                 _ => warn!("failed to expand description for task {}: {}", self.id, e),
             }
-            let id = self
-                .id
-                .split("::")
-                .skip(1)
-                .collect::<Vec<&str>>()
-                .join("::");
-            format!("{}({})", id, self.context.path)
+            format!("{}({})", self.id, self.context.path)
         });
         write!(f, "{}", description)
     }
@@ -256,54 +261,19 @@ pub enum Task {
     Method(Method),
 }
 
+impl From<Action> for Task {
+    fn from(action: Action) -> Self {
+        Self::Action(action)
+    }
+}
+
+impl From<Method> for Task {
+    fn from(method: Method) -> Self {
+        Self::Method(method)
+    }
+}
+
 impl Task {
-    pub(crate) fn from_action<H, T, I>(action: H, context: Context) -> Self
-    where
-        H: Handler<T, Patch, I>,
-        I: Send + 'static,
-    {
-        let handler_clone = action.clone();
-        Self::Action(Action {
-            id: action.id(),
-            scoped: action.is_scoped(),
-            context,
-            dry_run: Arc::new(move |system: &System, context: &Context| {
-                let effect = handler_clone.call(system, context);
-                effect.pure()
-            }),
-            run: Arc::new(move |system: &System, context: &Context| {
-                let effect = action.call(system, context);
-
-                Box::pin(async { effect.run().await })
-            }),
-            describe: Arc::new(|_: &Context| {
-                // This error should never be seen
-                Err(UnexpectedError::from(anyhow!("undefined description")))?
-            }),
-        })
-    }
-
-    pub(crate) fn from_method<H, T>(method: H, context: Context) -> Self
-    where
-        H: Handler<T, Vec<Task>>,
-    {
-        Self::Method(Method {
-            id: method.id(),
-            scoped: method.is_scoped(),
-            context,
-            expand: Arc::new(move |system: &System, context: &Context| {
-                // List tasks cannot perform changes to the system
-                // so the Effect returned by this handler is assumed to
-                // be pure
-                method.call(system, context).pure()
-            }),
-            describe: Arc::new(|_: &Context| {
-                // This error should never be seen
-                Err(UnexpectedError::from(anyhow!("undefined description")))?
-            }),
-        })
-    }
-
     /// Get the unique identifier for the task
     pub fn id(&self) -> &str {
         match self {
@@ -338,10 +308,23 @@ impl Task {
     ///
     /// This returns a result with an error if the serialization of the target fails
     pub fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
-        match self {
-            Self::Action(task) => task.try_target(target).map(Self::Action),
-            Self::Method(task) => task.try_target(target).map(Self::Method),
-        }
+        let target = serde_json::to_value(target).context("Serialization failed")?;
+        Ok(match self {
+            Self::Action(task) => {
+                let Action { context, .. } = task;
+                Self::Action(Action {
+                    context: context.with_target(target),
+                    ..task
+                })
+            }
+            Self::Method(task) => {
+                let Method { context, .. } = task;
+                Self::Method(Method {
+                    context: context.with_target(target),
+                    ..task
+                })
+            }
+        })
     }
 
     /// Set a target for the task
@@ -354,28 +337,46 @@ impl Task {
     /// Set an argument for the task
     pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         match self {
-            Self::Action(task) => Self::Action(task.with_arg(key, value)),
-            Self::Method(task) => Self::Method(task.with_arg(key, value)),
+            Self::Action(task) => {
+                let Action { context, .. } = task;
+                Self::Action(Action {
+                    context: context.with_arg(key, value),
+                    ..task
+                })
+            }
+            Self::Method(task) => {
+                let Method { context, .. } = task;
+                Self::Method(Method {
+                    context: context.with_arg(key, value),
+                    ..task
+                })
+            }
         }
     }
 
     pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
         match self {
-            Self::Action(task) => Self::Action(task.with_path(path)),
-            Self::Method(task) => Self::Method(task.with_path(path)),
+            Self::Action(task) => {
+                let Action { context, .. } = task;
+                Self::Action(Action {
+                    context: context.with_path(path),
+                    ..task
+                })
+            }
+            Self::Method(task) => {
+                let Method { context, .. } = task;
+                Self::Method(Method {
+                    context: context.with_path(path),
+                    ..task
+                })
+            }
         }
     }
 
-    pub(crate) fn with_context(self, ctx: Context) -> Self {
+    pub(crate) fn with_context(self, context: Context) -> Self {
         match self {
-            Self::Action(task) => Self::Action(Action {
-                context: ctx,
-                ..task
-            }),
-            Self::Method(task) => Self::Method(Method {
-                context: ctx,
-                ..task
-            }),
+            Self::Action(task) => Self::Action(Action { context, ..task }),
+            Self::Method(task) => Self::Method(Method { context, ..task }),
         }
     }
 
@@ -383,15 +384,10 @@ impl Task {
     where
         D: Description<T>,
     {
+        let describe: Describe = Arc::new(move |ctx| description.call(ctx));
         match self {
-            Self::Action(task) => Self::Action(Action {
-                describe: Arc::new(move |ctx| description.call(ctx)),
-                ..task
-            }),
-            Self::Method(task) => Self::Method(Method {
-                describe: Arc::new(move |ctx| description.call(ctx)),
-                ..task
-            }),
+            Self::Action(task) => Self::Action(Action { describe, ..task }),
+            Self::Method(task) => Self::Method(Method { describe, ..task }),
         }
     }
 }
@@ -410,9 +406,10 @@ mod tests {
     use super::*;
     use crate::extract::{System as Sys, Target, View};
     use crate::system::System;
+    use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
     use serde_json::{from_value, json};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use thiserror::Error;
     use tokio::time::{sleep, Duration};
 
@@ -472,7 +469,7 @@ mod tests {
             .with_description(|Target(tgt): Target<i32>| format!("+1 until {tgt}"));
 
         // The target has not been assigned so the default description is returned
-        assert_eq!(task.to_string(), "task::tests::plus_one()");
+        assert_eq!(task.to_string(), "gustav::task::tests::plus_one()");
 
         let task = task.with_target(2);
         // Now the description can be used
@@ -510,17 +507,21 @@ mod tests {
 
     #[tokio::test]
     async fn it_runs_async_actions() {
-        let mut system = System::try_from(0).unwrap();
+        let system = System::try_from(0).unwrap();
         let task = plus_one.with_target(1);
 
         if let Task::Action(action) = task {
             // Run the action
-            action.run(&mut system).await.unwrap();
-
-            let state = system.state::<i32>().unwrap();
+            let changes = action.run(&system).await.unwrap();
 
             // The referenced value was modified
-            assert_eq!(state, 1);
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 1 },
+                ]))
+                .unwrap()
+            );
         } else {
             panic!("Expected an Action task");
         }
@@ -528,16 +529,21 @@ mod tests {
 
     #[tokio::test]
     async fn it_allows_extending_actions_with_effect() {
-        let mut system = System::try_from(0).unwrap();
+        let system = System::try_from(0).unwrap();
         let task = plus_one_async_with_effect.with_target(1);
 
         if let Task::Action(action) = task {
             // Run the action
-            action.run(&mut system).await.unwrap();
+            let changes = action.run(&system).await.unwrap();
 
-            // Check that the system state was modified
-            let state = system.state::<i32>().unwrap();
-            assert_eq!(state, 1);
+            // The referenced value was modified
+            assert_eq!(
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "", "value": 1 },
+                ]))
+                .unwrap()
+            );
         } else {
             panic!("Expected an Action task");
         }
@@ -545,11 +551,11 @@ mod tests {
 
     #[tokio::test]
     async fn it_allows_actions_returning_runtime_errors() {
-        let mut system = System::try_from(0).unwrap();
+        let system = System::try_from(0).unwrap();
         let task = plus_one_async_with_error.with_target(1);
 
         if let Task::Action(action) = task {
-            let res = action.run(&mut system).await;
+            let res = action.run(&system).await;
             assert!(res.is_err());
             assert_eq!(
                 res.unwrap_err().to_string(),
@@ -638,24 +644,123 @@ mod tests {
             counters: [("a".to_string(), 0), ("b".to_string(), 0)].into(),
         };
 
-        let mut system = System::try_from(state).unwrap();
+        let system = System::try_from(state).unwrap();
         let task = update_counter.with_target(2).with_path("/counters/a");
 
         if let Task::Action(action) = task {
             // Run the action
-            action.run(&mut system).await.unwrap();
-
-            let state = system.state::<State>().unwrap();
+            let changes = action.run(&system).await.unwrap();
 
             // Only the referenced value was modified
             assert_eq!(
-                state,
-                State {
-                    counters: [("a".to_string(), 1), ("b".to_string(), 0)].into()
-                }
+                changes,
+                from_value::<Patch>(json!([
+                  { "op": "replace", "path": "/counters/a", "value": 1 },
+                ]))
+                .unwrap()
             );
         } else {
             panic!("Expected an Action Task");
+        }
+    }
+
+    fn plus_two_with_error(
+        counter: View<i32>,
+        Target(tgt): Target<i32>,
+    ) -> Result<[Task; 2], Error> {
+        if tgt - *counter > 1 {
+            return Ok([
+                plus_one.into_task().try_target(tgt)?,
+                plus_one.into_task().try_target(tgt)?,
+            ]);
+        }
+
+        Err(Error::ConditionFailed)
+    }
+
+    #[test]
+    fn it_allows_expanding_methods_with_result() {
+        let task = plus_two_with_error.with_target(3);
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            let tasks = method.expand(&system).unwrap();
+            assert_eq!(
+                tasks.iter().map(|t| t.id()).collect::<Vec<&str>>(),
+                vec![plus_one.id(), plus_one.id()]
+            );
+        } else {
+            panic!("Expected a method task");
+        }
+    }
+
+    #[test]
+    fn it_catches_input_errors_in_method_expansions() {
+        let task = plus_two_with_error.with_target("a");
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            assert!(matches!(method.expand(&system), Err(Error::BadInput(_))));
+        } else {
+            panic!("Expected a method task");
+        }
+    }
+
+    #[test]
+    fn it_catches_condition_failure_in_method_expansions() {
+        let task = plus_two_with_error.with_target(1);
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            assert!(matches!(
+                method.expand(&system),
+                Err(Error::ConditionFailed)
+            ));
+        } else {
+            panic!("Expected a method task");
+        }
+    }
+
+    fn plus_two_with_panic(counter: View<i32>, Target(tgt): Target<i32>) -> Option<[Task; 2]> {
+        if tgt - *counter > 1 {
+            // Force `with_target` to panic
+            // See: https://docs.rs/serde_json/latest/serde_json/fn.to_value.html#errors
+            let mut map = BTreeMap::new();
+            map.insert(vec![32, 64], "x86");
+            return Some([
+                plus_one.into_task().with_target(map),
+                plus_one.into_task().with_target(tgt),
+            ]);
+        }
+
+        None
+    }
+
+    #[test]
+    fn it_catches_panics_in_method_expansions() {
+        // this will cause the
+        let task = plus_two_with_panic.with_target(3);
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            assert!(matches!(method.expand(&system), Err(Error::BadInput(_))));
+        } else {
+            panic!("Expected a method task");
+        }
+    }
+
+    #[test]
+    fn it_catches_condition_failure_in_methods_returning_option() {
+        let task = plus_two_with_panic.with_target(1);
+        let system = System::try_from(0).unwrap();
+
+        if let Task::Method(method) = task {
+            assert!(matches!(
+                method.expand(&system),
+                Err(Error::ConditionFailed)
+            ));
+        } else {
+            panic!("Expected a method task");
         }
     }
 }
