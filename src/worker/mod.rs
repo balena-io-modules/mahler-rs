@@ -2,7 +2,6 @@ use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::Patch;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use std::fmt;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -68,6 +67,8 @@ pub struct Error(#[from] anyhow::Error);
 
 #[derive(Debug)]
 pub enum Status {
+    // Worker is running
+    Running,
     /// Target state reached
     Success,
     /// Failed to reach the target state after multiple tries
@@ -126,6 +127,13 @@ impl WorkerState for Uninitialized {}
 impl WorkerState for Ready {}
 impl WorkerState for Running {}
 impl WorkerState for Idle {}
+
+pub enum Waiting {
+    Idle(Idle),
+    Running(Running),
+}
+
+impl WorkerState for Waiting {}
 
 impl Default for Opts {
     fn default() -> Self {
@@ -267,7 +275,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
         }
 
         // Shared system protected by RwLock
-        let syslock = Arc::new(RwLock::new(system));
+        let sys_reader = Arc::new(RwLock::new(system));
 
         // Create the messaging channel
         let (tx, mut rx) = ack_channel::<Patch>(100);
@@ -280,7 +288,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
 
         // Spawn system writer task
         {
-            let sys_writer = Arc::clone(&syslock);
+            let sys_writer = Arc::clone(&sys_reader);
             let broadcast = updates.clone();
             tokio::spawn(
                 async move {
@@ -317,7 +325,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
 
         // Main seek_target planning and execution loop
         let handle = {
-            let sys_reader = Arc::clone(&syslock);
+            let sys_reader = Arc::clone(&sys_reader);
             tokio::spawn(async move {
                 let mut tries = 0;
                 let mut wait_ms = opts.min_wait_ms;
@@ -395,7 +403,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             handle,
             interrupt,
             opts,
-            sys_reader: syslock,
+            sys_reader,
             updates,
         }))
     }
@@ -446,46 +454,6 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Idle> {
     }
 }
 
-#[derive(Error)]
-#[error("timeout")]
-pub struct Timeout<T>(pub Worker<T, Running>);
-
-impl<T> Timeout<T> {
-    /// Recover the running worker from the timeout.
-    pub fn into_worker(self) -> Worker<T, Running> {
-        self.0
-    }
-
-    /// Wait again for the worker to complete, with an optional timeout.
-    ///
-    /// Returns `Ok(Worker<T, Idle>)` if the worker finishes,
-    /// or `Err(Timeout)` if it times out again.
-    pub async fn wait(self, timeout: Option<std::time::Duration>) -> WaitResult<T> {
-        self.0.wait(timeout).await
-    }
-
-    /// Cancel the worker immediately and return it in the Idle state.
-    ///
-    /// Useful if you decide not to wait after a timeout.
-    pub async fn cancel(self) -> Worker<T, Idle> {
-        self.0.cancel().await
-    }
-}
-
-impl<T> fmt::Debug for Timeout<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Timeout")
-            .field("state", &"running")
-            .finish()
-    }
-}
-
-impl<T> From<Timeout<T>> for Worker<T, Running> {
-    fn from(timeout: Timeout<T>) -> Worker<T, Running> {
-        timeout.0
-    }
-}
-
 pub struct FollowStream<T> {
     inner: Pin<Box<dyn Stream<Item = T> + Send + 'static>>,
 }
@@ -511,8 +479,6 @@ impl<T> Stream for FollowStream<T> {
         self.inner.as_mut().poll_next(cx)
     }
 }
-
-pub type WaitResult<T> = Result<Worker<T, Idle>, Timeout<T>>;
 
 impl<T> Worker<T, Running> {
     /// Returns a stream of updated states after each system change.
@@ -545,13 +511,13 @@ impl<T> Worker<T, Running> {
     pub async fn cancel(self) -> Worker<T, Idle> {
         let Running {
             handle: task,
-            interrupt: sigint,
+            interrupt,
             opts,
             ..
         } = self.inner;
 
         // Cancel the task
-        sigint.store(true, Ordering::Relaxed);
+        interrupt.store(true, Ordering::Relaxed);
 
         // This should not happen
         let (planner, system, status) = task.await.expect("worker runtime panicked");
@@ -563,7 +529,7 @@ impl<T> Worker<T, Running> {
         })
     }
 
-    pub async fn wait(self, timeout: Option<std::time::Duration>) -> WaitResult<T> {
+    pub async fn wait(self, timeout: Option<std::time::Duration>) -> Worker<T, Waiting> {
         let Running {
             mut handle,
             opts,
@@ -579,7 +545,7 @@ impl<T> Worker<T, Running> {
                 select! {
                     res = handle.as_mut() => {
                         let (planner, system, status) = res.expect("worker runtime panicked");
-                        Ok(Worker::from_inner(Idle {
+                        Worker::from_inner(Waiting::Idle( Idle {
                             planner,
                             system,
                             opts,
@@ -587,19 +553,19 @@ impl<T> Worker<T, Running> {
                         }))
                     }
                     _ = &mut sleeper => {
-                        Err(Timeout(Worker::from_inner(Running {
+                        Worker::from_inner(Waiting::Running(Running {
                             handle,
                             opts,
                             updates,
                             sys_reader,
                             interrupt,
-                        })))
+                        }))
                     }
                 }
             }
             None => {
                 let (planner, system, status) = handle.await.expect("worker runtime panicked");
-                Ok(Worker::from_inner(Idle {
+                Worker::from_inner(Waiting::Idle(Idle {
                     planner,
                     system,
                     opts,
@@ -607,6 +573,59 @@ impl<T> Worker<T, Running> {
                 }))
             }
         }
+    }
+}
+
+impl<T> Worker<T, Waiting> {
+    pub async fn cancel(self) -> Worker<T, Idle> {
+        match self.inner {
+            Waiting::Running(running) => Worker::from_inner(running).cancel().await,
+            Waiting::Idle(idle) => Worker::from_inner(idle),
+        }
+    }
+
+    pub fn status(&self) -> &Status {
+        match &self.inner {
+            Waiting::Running(_) => &Status::Running, // maybe use custom status
+            Waiting::Idle(idle) => &idle.status,
+        }
+    }
+
+    pub async fn wait(self, timeout: Option<std::time::Duration>) -> Worker<T, Waiting> {
+        match self.inner {
+            Waiting::Running(running) => Worker::from_inner(running).wait(timeout).await,
+            Waiting::Idle(idle) => Worker::from_inner(Waiting::Idle(idle)),
+        }
+    }
+
+    pub fn is_idle(&self) -> bool {
+        matches!(self.inner, Waiting::Idle(_))
+    }
+
+    pub fn idle(self) -> Option<Worker<T, Idle>> {
+        if let Waiting::Idle(idle) = self.inner {
+            return Some(Worker::from_inner(idle));
+        }
+        None
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.inner, Waiting::Running(_))
+    }
+
+    pub fn unwrap_idle(self) -> Worker<T, Idle> {
+        self.idle().unwrap()
+    }
+
+    pub fn running(self) -> Option<Worker<T, Running>> {
+        if let Waiting::Running(running) = self.inner {
+            return Some(Worker::from_inner(running));
+        }
+        None
+    }
+
+    pub fn unwrap_running(self) -> Worker<T, Running> {
+        self.running().unwrap()
     }
 }
 
@@ -682,9 +701,9 @@ mod tests {
             ])))
             .unwrap();
 
-        let worker = worker.wait(None).await.unwrap();
+        let worker = worker.wait(None).await;
         assert_eq!(worker.status(), &Status::Success);
-        let state = worker.state().unwrap();
+        let state = worker.unwrap_idle().state().unwrap();
         assert_eq!(
             state,
             Counters(HashMap::from([
@@ -703,7 +722,7 @@ mod tests {
             .seek_target(2)
             .unwrap();
 
-        let _ = worker.wait(None).await.unwrap();
+        let _ = worker.wait(None).await;
     }
 
     #[tokio::test]
@@ -732,7 +751,7 @@ mod tests {
             .unwrap();
 
         let worker = worker.wait(Some(Duration::from_millis(1))).await;
-        assert!(worker.is_err());
+        assert!(!worker.is_idle());
     }
 
     #[tokio::test]
@@ -751,8 +770,8 @@ mod tests {
         let second_update = updates.next().await;
 
         // Wait for worker to finish
-        let worker = worker.wait(None).await.unwrap();
-        let final_state = worker.state().unwrap();
+        let worker = worker.wait(None).await;
+        let final_state = worker.unwrap_idle().state().unwrap();
 
         assert!(first_update.is_some(), "should receive first state update");
         assert!(
@@ -817,7 +836,7 @@ mod tests {
         let mut updates = worker.follow();
 
         // Wait for worker to finish
-        let _ = worker.wait(None).await.unwrap();
+        let _ = worker.wait(None).await;
 
         // After worker finishes, stream should terminate
         let maybe_update = updates.next().await;
@@ -837,13 +856,10 @@ mod tests {
             .unwrap();
 
         // First wait with very short timeout
-        let res = worker.wait(Some(Duration::from_millis(1))).await;
-        assert!(res.is_err(), "should timeout");
-
-        let worker = res.err().unwrap().into_worker();
+        let worker = worker.wait(Some(Duration::from_millis(1))).await;
 
         // Now wait without timeout (should finish)
-        let worker = worker.wait(None).await.unwrap();
+        let worker = worker.wait(None).await;
 
         assert_eq!(worker.status(), &Status::Success);
     }

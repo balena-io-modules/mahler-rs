@@ -56,7 +56,7 @@ async fn test_worker() {
         ])))
         .unwrap();
 
-    let worker = worker.wait(None).await.unwrap();
+    let worker = worker.wait(None).await.unwrap_idle();
     let state = worker.state().unwrap();
     assert_eq!(worker.status(), &Status::Success);
     assert_eq!(
