@@ -1,3 +1,8 @@
+//! Worker module for orchestrating system workflows toward a target state.
+//!
+//! This module provides a `Worker` abstraction that manages the lifecycle of reaching a desired state
+//! through workflows, handling retries, failures, cancellations, and live state tracking.
+
 use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::Patch;
 use serde::{de::DeserializeOwned, Serialize};
@@ -30,6 +35,11 @@ use crate::{
     task::{self, Job},
 };
 
+pub mod prelude {
+    pub use super::SeekTarget;
+}
+
+/// Worker configuration options
 #[derive(Clone, Debug)]
 pub struct Opts {
     /// The maximum number of attempts to reach the target before giving up.
@@ -62,8 +72,21 @@ impl Opts {
 }
 
 #[derive(Debug, Error)]
-#[error(transparent)]
-pub struct Error(#[from] anyhow::Error);
+#[error("unexpected error: {0}")]
+pub struct Unexpected(#[from] anyhow::Error);
+
+#[derive(Debug, Error)]
+#[error("fatal error: {0}")]
+pub struct Fatal(#[from] anyhow::Error);
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error(transparent)]
+    Unexpected(#[from] Unexpected),
+
+    #[error(transparent)]
+    Unrecoverable(#[from] Fatal),
+}
 
 #[derive(Debug)]
 pub enum Status {
@@ -76,7 +99,9 @@ pub enum Status {
     /// Worker interrupted by user request
     Interrupted,
     /// Worker execution terminated due to some unexpected error
-    Aborted(Error),
+    Aborted(Unexpected),
+    // Fatal error happened, the worker cannot be recovered
+    Dead(Fatal),
 }
 
 impl PartialEq for Status {
@@ -90,8 +115,9 @@ impl PartialEq for Status {
     }
 }
 
-#[derive(Debug, Clone)]
-struct UpdateEvent;
+pub trait SeekTarget<T> {
+    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error>;
+}
 
 impl Eq for Status {}
 
@@ -145,6 +171,17 @@ impl Default for Opts {
     }
 }
 
+impl<T, S: WorkerState> Worker<T, S> {
+    fn from_inner(inner: S) -> Self {
+        Worker {
+            inner,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+// -- Worker initialization
+
 pub struct Worker<T, S: WorkerState = Uninitialized> {
     inner: S,
     _marker: std::marker::PhantomData<T>,
@@ -159,39 +196,36 @@ impl<T> Default for Worker<T, Uninitialized> {
     }
 }
 
-impl<T, S: WorkerState> Worker<T, S> {
-    fn from_inner(inner: S) -> Self {
-        Worker {
-            inner,
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
 impl<T> Worker<T, Uninitialized> {
     pub fn new() -> Self {
         Worker::default()
     }
 
+    /// Add a job to the worker domain
     pub fn job(self, route: &'static str, job: Job) -> Self {
         let Self { mut inner, .. } = self;
         inner.domain = inner.domain.job(route, job);
         Worker::from_inner(inner)
     }
 
+    /// Replace the internal worker domain
     pub fn with_domain(self, domain: Domain) -> Worker<T, Uninitialized> {
         let Self { mut inner, .. } = self;
         inner.domain = domain;
         Worker::from_inner(inner)
     }
 
+    /// Set worker options
     pub fn with_opts(self, opts: Opts) -> Worker<T, Uninitialized> {
         let Self { mut inner, .. } = self;
         inner.opts = opts;
         Worker::from_inner(inner)
     }
 
-    pub fn initial_state(self, state: T) -> Result<Worker<T, Ready>, Error>
+    /// Provide the initial worker state
+    ///
+    /// This moves the state of the worker to `ready`
+    pub fn initial_state(self, state: T) -> Result<Worker<T, Ready>, Unexpected>
     where
         T: Serialize + DeserializeOwned,
     {
@@ -207,12 +241,11 @@ impl<T> Worker<T, Uninitialized> {
     }
 }
 
-pub trait SeekTarget<T> {
-    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error>;
-}
+// -- Worker is ready to receive a target state
 
 impl<T: DeserializeOwned> Worker<T, Ready> {
-    pub fn state(&self) -> Result<T, Error> {
+    /// Read the current system state from the worker
+    pub fn state(&self) -> Result<T, Unexpected> {
         let state = self
             .inner
             .system
@@ -222,7 +255,18 @@ impl<T: DeserializeOwned> Worker<T, Ready> {
     }
 }
 
+impl<T: Serialize> SeekTarget<T> for Result<Worker<T, Ready>, Unexpected> {
+    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
+        self.map_err(Error::from)
+            .and_then(|worker| worker.seek_target(tgt))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UpdateEvent;
+
 impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
+    /// Run the worker and start looking for the given target
     fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
         let Ready {
             planner,
@@ -231,7 +275,9 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             ..
         } = self.inner;
 
-        let tgt = serde_json::to_value(tgt).context("could not serialize target")?;
+        let tgt = serde_json::to_value(tgt)
+            .context("could not serialize target")
+            .map_err(Unexpected::from)?;
 
         #[derive(Debug, Error)]
         enum InternalError {
@@ -281,7 +327,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
         let (tx, mut rx) = ack_channel::<Patch>(100);
 
         // Error signal channel (one-shot)
-        let (err_tx, mut err_rx) = tokio::sync::oneshot::channel::<Error>();
+        let (err_tx, mut err_rx) = tokio::sync::oneshot::channel::<Fatal>();
 
         // Broadcast channel for state updates
         let (updates, _) = tokio::sync::broadcast::channel::<UpdateEvent>(16);
@@ -302,7 +348,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
                             // internal state may have become inconsistent and we cannot continue
                             // applying changes
                             error!("system patch failed: {e}");
-                            let _ = err_tx.send(Error(anyhow!(e)));
+                            let _ = err_tx.send(Fatal(anyhow!(e)));
                             break;
                         }
 
@@ -340,7 +386,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
                                 cur_span.record("error", format!("failed to update worker internal state: {err}"));
                                 cur_span.record("return", "aborted");
                                 let system = sys_reader.read().await.clone();
-                                return (planner, system, Status::Aborted(err));
+                                return (planner, system, Status::Dead(err));
                             }
                         }
 
@@ -380,7 +426,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
                                     if cfg!(debug_assertions) {
                                         cur_span.record("return", "aborted");
                                         let system = sys_reader.read().await.clone();
-                                        return (planner, system, Status::Aborted(Error(anyhow!(err))));
+                                        return (planner, system, Status::Aborted(Unexpected(anyhow!(err))));
                                     }
                                     tries += 1;
                                     wait_ms = std::cmp::min(wait_ms.saturating_mul(2), opts.max_wait_ms);
@@ -409,50 +455,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
     }
 }
 
-impl<T: Serialize> SeekTarget<T> for Result<Worker<T, Ready>, Error> {
-    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
-        self.and_then(|worker| worker.seek_target(tgt))
-    }
-}
-
-impl<T> Worker<T, Idle> {
-    pub fn state(&self) -> Result<T, Error>
-    where
-        T: DeserializeOwned,
-    {
-        let state = self
-            .inner
-            .system
-            .state()
-            .context("could not deserialize state")?;
-        Ok(state)
-    }
-
-    pub fn status(&self) -> &Status {
-        &self.inner.status
-    }
-}
-
-impl<T: Serialize> SeekTarget<T> for Worker<T, Idle> {
-    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
-        // TODO: we probably need to fail if the previous execution
-        // terminated due to a patch failure as we can no longer trust
-        // the internal state
-        let Idle {
-            planner,
-            system,
-            opts,
-            ..
-        } = self.inner;
-
-        Worker::from_inner(Ready {
-            planner,
-            system,
-            opts,
-        })
-        .seek_target(tgt)
-    }
-}
+// -- Worker is running
 
 pub struct FollowStream<T> {
     inner: Pin<Box<dyn Stream<Item = T> + Send + 'static>>,
@@ -576,7 +579,60 @@ impl<T> Worker<T, Running> {
     }
 }
 
+// -- Worker is idle after target state finished
+
+impl<T> Worker<T, Idle> {
+    /// Return the internal state of the worker
+    pub fn state(&self) -> Result<T, Unexpected>
+    where
+        T: DeserializeOwned,
+    {
+        let state = self
+            .inner
+            .system
+            .state()
+            .context("could not deserialize state")?;
+        Ok(state)
+    }
+
+    /// Return the result of the last worker run
+    pub fn status(&self) -> &Status {
+        &self.inner.status
+    }
+}
+
+impl<T: Serialize> SeekTarget<T> for Worker<T, Idle> {
+    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
+        // A dead worker may have an inconsistent state.
+        // Do not allow seeking target in that case
+        if let Status::Dead(err) = self.inner.status {
+            return Err(err)?;
+        }
+
+        let Idle {
+            planner,
+            system,
+            opts,
+            ..
+        } = self.inner;
+
+        Worker::from_inner(Ready {
+            planner,
+            system,
+            opts,
+        })
+        .seek_target(tgt)
+    }
+}
+
+// -- Worker is waiting for the target search to finish
+
+const RUNNING_STATUS: Status = Status::Running;
+
 impl<T> Worker<T, Waiting> {
+    /// Cancel the running worker
+    ///
+    /// It does nothing if the worker is already idle
     pub async fn cancel(self) -> Worker<T, Idle> {
         match self.inner {
             Waiting::Running(running) => Worker::from_inner(running).cancel().await,
@@ -584,13 +640,15 @@ impl<T> Worker<T, Waiting> {
         }
     }
 
+    /// Return the worker runtime status
     pub fn status(&self) -> &Status {
         match &self.inner {
-            Waiting::Running(_) => &Status::Running, // maybe use custom status
+            Waiting::Running(_) => &RUNNING_STATUS, // maybe use custom status
             Waiting::Idle(idle) => &idle.status,
         }
     }
 
+    /// Wait for the worker to finish
     pub async fn wait(self, timeout: Option<std::time::Duration>) -> Worker<T, Waiting> {
         match self.inner {
             Waiting::Running(running) => Worker::from_inner(running).wait(timeout).await,
@@ -598,10 +656,12 @@ impl<T> Worker<T, Waiting> {
         }
     }
 
+    /// Return true if the worker is idle
     pub fn is_idle(&self) -> bool {
         matches!(self.inner, Waiting::Idle(_))
     }
 
+    /// Return the worker if it is idle
     pub fn idle(self) -> Option<Worker<T, Idle>> {
         if let Waiting::Idle(idle) = self.inner {
             return Some(Worker::from_inner(idle));
@@ -609,14 +669,19 @@ impl<T> Worker<T, Waiting> {
         None
     }
 
-    pub fn is_running(&self) -> bool {
-        matches!(self.inner, Waiting::Running(_))
-    }
-
+    /// Unwrap the worker into an Idle worker
+    ///
+    /// This function will panic if the worker is still running
     pub fn unwrap_idle(self) -> Worker<T, Idle> {
         self.idle().unwrap()
     }
 
+    /// Return true if the worker is running
+    pub fn is_running(&self) -> bool {
+        matches!(self.inner, Waiting::Running(_))
+    }
+
+    /// Return the worker if it is running
     pub fn running(self) -> Option<Worker<T, Running>> {
         if let Waiting::Running(running) = self.inner {
             return Some(Worker::from_inner(running));
@@ -624,6 +689,9 @@ impl<T> Worker<T, Waiting> {
         None
     }
 
+    /// Unwrap the worker into a Running worker
+    ///
+    /// This function will panic if the worker is not running
     pub fn unwrap_running(self) -> Worker<T, Running> {
         self.running().unwrap()
     }
@@ -767,18 +835,13 @@ mod tests {
 
         // Capture two updates
         let first_update = updates.next().await;
+        assert_eq!(first_update, Some(1));
         let second_update = updates.next().await;
+        assert_eq!(second_update, Some(2));
 
         // Wait for worker to finish
         let worker = worker.wait(None).await;
         let final_state = worker.unwrap_idle().state().unwrap();
-
-        assert!(first_update.is_some(), "should receive first state update");
-        assert!(
-            second_update.is_some(),
-            "should receive second state update"
-        );
-
         assert_eq!(final_state, 2);
     }
 
