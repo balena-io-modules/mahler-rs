@@ -1,4 +1,74 @@
 - commits:
+    - subject: Allow to follow a running worker progress
+      hash: b733125827e9c2e78682e20f654e739d52fa2776
+      body: |
+        This adds a `follow()` method to Worker<T,Running>, this method returns
+        a Stream with the changing state of the system.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Allow method tasks to return Option/Result
+      hash: dfa270bcfa2efb2ab456be1c20f0a99c827f7d23
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Use RwLock to synchronize reads/writes to system
+      hash: 8e24a42a69e3e0ef0f5d886c4bc5f155420c97dd
+      body: |
+        This will be helpful when executing the DAG in parallel. This only a
+        first version.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Allow to obtain the result from the Worker run
+      hash: dd33511a84aafbfbdcd863f340e4830a3bfdcf87
+      body: |
+        Adds a new worker state (Idle) that can be queried to get the status
+        of the previous run.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Improve Worker::wait function
+      hash: e0cb30422ee4b2289c52312385fb3a0e977e29b7
+      body: |
+        The function now receives a `&mut self` as input to allow
+        to wait multiple times for the worker
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Simulate the task at runtime
+      hash: 25f4959afaf34e2cee425e1eab11b50148c2c18b
+      body: |
+        This is a final check to ensure the conditions for running the task have
+        not changed since what was expected during planning.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Add some convenience methods to task module
+      hash: 14f36767e60c8f594018a643bbe3047e3d4f0d2f
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.10.0
+  title: ""
+  date: 2025-04-10T14:45:56.879Z
+- commits:
     - subject: Allow describing tasks
       hash: 475a0a3c3804b33f1d4a8434a5d3235d12bac884
       body: |
