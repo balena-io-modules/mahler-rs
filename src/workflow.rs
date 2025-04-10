@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use tracing::instrument;
 
 use crate::ack_channel::Sender;
-use crate::dag::{Dag, ExecutionStatus, Task};
+use crate::dag::{AggregateError, Dag, ExecutionStatus, Task};
 use crate::system::System;
 use crate::task::{Action, Error as TaskError};
 
@@ -139,12 +139,12 @@ impl Workflow {
     }
 
     #[instrument(name = "run_workflow", skip_all, err)]
-    pub async fn execute(
+    pub(crate) async fn execute(
         self,
         system: &Arc<RwLock<System>>,
         channel: Sender<Patch>,
         sigint: &Arc<AtomicBool>,
-    ) -> Result<WorkflowStatus, TaskError> {
+    ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
         self.dag
             .execute(system, channel, sigint)
             .await

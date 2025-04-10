@@ -32,6 +32,7 @@ log = { version = "0.4.25", optional = true }
 tracing-subscriber = { version = "0.3.19", default-features = false, optional = true, features = [
   "registry",
 ] }
+futures = "0.3.31"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.19", default-features = false, features = [

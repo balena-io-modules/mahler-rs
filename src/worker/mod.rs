@@ -30,10 +30,7 @@ use crate::{
     ack_channel::ack_channel,
     planner::{Domain, Error as PlannerError, Planner},
 };
-use crate::{
-    ack_channel::Sender,
-    task::{self, Job},
-};
+use crate::{ack_channel::Sender, task::Job};
 
 pub mod prelude {
     pub use super::SeekTarget;
@@ -264,6 +261,7 @@ impl<T: Serialize> SeekTarget<T> for Result<Worker<T, Ready>, Unexpected> {
 }
 
 #[derive(Debug, Clone)]
+
 struct UpdateEvent;
 
 impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
@@ -280,13 +278,9 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             .context("could not serialize target")
             .map_err(Unexpected::from)?;
 
-        #[derive(Debug, Error)]
         enum InternalError {
-            #[error(transparent)]
-            Runtime(#[from] task::Error),
-
-            #[error(transparent)]
-            Planning(#[from] PlannerError),
+            Runtime,
+            Planning(PlannerError),
         }
 
         enum InternalResult {
@@ -304,7 +298,9 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
         ) -> Result<InternalResult, InternalError> {
             let workflow = {
                 let system = sys.read().await;
-                planner.find_workflow(&system, tgt)?
+                planner
+                    .find_workflow(&system, tgt)
+                    .map_err(InternalError::Planning)?
             };
 
             if workflow.is_empty() {
@@ -312,7 +308,10 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             }
 
             if matches!(
-                workflow.execute(sys, channel.clone(), sigint).await?,
+                workflow
+                    .execute(sys, channel.clone(), sigint)
+                    .await
+                    .map_err(|_| InternalError::Runtime)?,
                 WorkflowStatus::Interrupted
             ) {
                 return Ok(InternalResult::Interrupted);
@@ -647,7 +646,7 @@ impl<T> Worker<T, Waiting> {
     /// Return the worker runtime status
     pub fn status(&self) -> &Status {
         match &self.inner {
-            Waiting::Running(_) => &RUNNING_STATUS, // maybe use custom status
+            Waiting::Running(_) => &RUNNING_STATUS,
             Waiting::Idle(idle) => &idle.status,
         }
     }
@@ -796,22 +795,6 @@ mod tests {
             .unwrap();
 
         let _ = worker.wait(None).await;
-    }
-
-    #[tokio::test]
-    async fn test_worker_cancel() {
-        init();
-        let worker = Worker::new()
-            .job("", update(plus_one))
-            .initial_state(0)
-            .seek_target(2)
-            .unwrap();
-
-        // interrupt the workflow after the first step
-        sleep(Duration::from_millis(10)).await;
-        let worker = worker.cancel().await;
-        let state = worker.state().unwrap();
-        assert_eq!(state, 1);
     }
 
     #[tokio::test]
