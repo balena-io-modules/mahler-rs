@@ -41,7 +41,7 @@ pub mod prelude {
 
 /// Worker configuration options
 #[derive(Clone, Debug)]
-pub struct Opts {
+pub struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.
     /// Defauts to infinite tries (0).
     max_retries: u32,
@@ -51,20 +51,20 @@ pub struct Opts {
     max_wait_ms: u64,
 }
 
-impl Opts {
-    pub fn max_retries(self, max_retries: u32) -> Self {
+impl WorkerOpts {
+    pub fn with_max_retries(self, max_retries: u32) -> Self {
         let mut opts = self;
         opts.max_retries = max_retries;
         opts
     }
 
-    pub fn min_wait_ms(self, min_wait_ms: u64) -> Self {
+    pub fn with_min_wait_ms(self, min_wait_ms: u64) -> Self {
         let mut opts = self;
         opts.min_wait_ms = min_wait_ms;
         opts
     }
 
-    pub fn max_wait_ms(self, max_wait_ms: u64) -> Self {
+    pub fn with_max_wait_ms(self, max_wait_ms: u64) -> Self {
         let mut opts = self;
         opts.max_wait_ms = max_wait_ms;
         opts
@@ -90,15 +90,16 @@ pub enum Error {
 
 #[derive(Debug)]
 pub enum Status {
-    // Worker is running
+    // Worker is still running
     Running,
-    /// Target state reached
+    /// Worker has reached the target state
     Success,
-    /// Failed to reach the target state after multiple tries
+    /// Worker failed to reach the target state after multiple tries
     Failure,
     /// Worker interrupted by user request
     Interrupted,
     /// Worker execution terminated due to some unexpected error
+    /// this should only happen during testing
     Aborted(Unexpected),
     // Fatal error happened, the worker cannot be recovered
     Dead(Fatal),
@@ -125,17 +126,17 @@ pub trait WorkerState {}
 
 pub struct Uninitialized {
     domain: Domain,
-    opts: Opts,
+    opts: WorkerOpts,
 }
 
 pub struct Ready {
     planner: Planner,
     system: System,
-    opts: Opts,
+    opts: WorkerOpts,
 }
 
 pub struct Running {
-    opts: Opts,
+    opts: WorkerOpts,
     handle: Pin<Box<JoinHandle<(Planner, System, Status)>>>,
     updates: broadcast::Sender<UpdateEvent>,
     sys_reader: Arc<RwLock<System>>,
@@ -145,7 +146,7 @@ pub struct Running {
 pub struct Idle {
     planner: Planner,
     system: System,
-    opts: Opts,
+    opts: WorkerOpts,
     status: Status,
 }
 
@@ -161,9 +162,9 @@ pub enum Waiting {
 
 impl WorkerState for Waiting {}
 
-impl Default for Opts {
+impl Default for WorkerOpts {
     fn default() -> Self {
-        Opts {
+        WorkerOpts {
             max_retries: 0,
             min_wait_ms: 1000,
             max_wait_ms: 300_000,
@@ -191,7 +192,7 @@ impl<T> Default for Worker<T, Uninitialized> {
     fn default() -> Self {
         Worker::from_inner(Uninitialized {
             domain: Domain::new(),
-            opts: Opts::default(),
+            opts: WorkerOpts::default(),
         })
     }
 }
@@ -216,7 +217,7 @@ impl<T> Worker<T, Uninitialized> {
     }
 
     /// Set worker options
-    pub fn with_opts(self, opts: Opts) -> Worker<T, Uninitialized> {
+    pub fn with_opts(self, opts: WorkerOpts) -> Worker<T, Uninitialized> {
         let Self { mut inner, .. } = self;
         inner.opts = opts;
         Worker::from_inner(inner)
@@ -413,22 +414,25 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
                                     let system = sys_reader.read().await.clone();
                                     return (planner, system, Status::Interrupted);
                                 }
-                                Err(InternalError::Planning(PlannerError::NotFound)) => {
-                                    tries += 1;
-                                    if opts.max_retries != 0 && tries >= opts.max_retries {
-                                        cur_span.record("return", "failure");
-                                        let system = sys_reader.read().await.clone();
-                                        return (planner, system, Status::Failure);
-                                    }
-                                    wait_ms = std::cmp::min(wait_ms.saturating_mul(2), opts.max_wait_ms);
-                                }
                                 Err(InternalError::Planning(err)) => {
-                                    if cfg!(debug_assertions) {
+                                    // Abort if an unexpected error happens in planning while in
+                                    // debug mode
+                                    if !matches!(err, PlannerError::NotFound) && !cfg!(debug_assertions) {
                                         cur_span.record("return", "aborted");
                                         let system = sys_reader.read().await.clone();
                                         return (planner, system, Status::Aborted(Unexpected(anyhow!(err))));
                                     }
                                     tries += 1;
+
+                                    // Terminate  the search if we have reached the maximum number
+                                    // of retries
+                                    if opts.max_retries != 0 && tries >= opts.max_retries {
+                                        cur_span.record("return", "failure");
+                                        let system = sys_reader.read().await.clone();
+                                        return (planner, system, Status::Failure);
+                                    }
+
+                                    // Otherwise update the timeout
                                     wait_ms = std::cmp::min(wait_ms.saturating_mul(2), opts.max_wait_ms);
                                 }
                                 Err(_) => {
@@ -786,6 +790,7 @@ mod tests {
         init();
         let worker = Worker::new()
             .job("", update(buggy_plus_one))
+            .with_opts(WorkerOpts::default().with_max_retries(1))
             .initial_state(0)
             .seek_target(2)
             .unwrap();

@@ -268,6 +268,7 @@ mod test_utils {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(debug_assertions)]
     use serde::{Deserialize, Serialize};
 
     use super::*;
@@ -416,6 +417,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn it_allows_testing_atomic_tasks() {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -447,6 +449,7 @@ mod tests {
         );
     }
 
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn it_allows_testing_compound_tasks() {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
