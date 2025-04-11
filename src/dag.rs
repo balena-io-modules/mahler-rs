@@ -1,8 +1,9 @@
 use async_trait::async_trait;
-use std::fmt;
+use std::fmt::{self, Display};
 use std::ops::Add;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
+use thiserror::Error;
 
 use crate::ack_channel::Sender;
 
@@ -580,6 +581,21 @@ pub enum ExecutionStatus {
     Interrupted,
 }
 
+#[derive(Error, Debug)]
+pub struct AggregateError<E>(#[from] pub Vec<E>);
+
+impl<E> Display for AggregateError<E>
+where
+    E: Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for e in &self.0 {
+            writeln!(f, "- {}", e)?;
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 pub trait Task {
     type Input;
@@ -589,51 +605,133 @@ pub trait Task {
     async fn run(&self, input: &Self::Input) -> Result<Self::Changes, Self::Error>;
 }
 
-impl<T> Dag<T> {
+impl<T> Dag<T>
+where
+    T: Task + Clone,
+    T::Input: Clone,
+{
     pub(crate) async fn execute(
         self,
         input: &Arc<tokio::sync::RwLock<T::Input>>,
         channel: Sender<T::Changes>,
-        sigint: &Arc<AtomicBool>,
-    ) -> Result<ExecutionStatus, T::Error>
-    where
-        T: Task + Clone,
-        T::Input: Clone,
-    {
-        // TODO: implement parallel execution of the DAG
-        for node in self.iter() {
-            let task = {
-                if let Node::Item { value, .. } = &*node.read().unwrap() {
-                    // This clone is necessary for now because of the iterator, but a future version
-                    // of execute will just consume the DAG, avoiding the need
-                    // for cloning
-                    value.clone()
-                } else {
-                    continue;
+        interrupt: &Arc<AtomicBool>,
+    ) -> Result<ExecutionStatus, AggregateError<T::Error>> {
+        enum InnerNode<T> {
+            Item { task: T, next: Link<T> },
+            Fork { branches: Vec<Link<T>> },
+            Join { next: Link<T> },
+        }
+
+        enum InnerError<E> {
+            Failure(Vec<E>),
+            Interrupted,
+        }
+
+        async fn exec_node<T>(
+            node: Link<T>,
+            input: &Arc<tokio::sync::RwLock<T::Input>>,
+            channel: &Sender<T::Changes>,
+            interrupt: &Arc<AtomicBool>,
+        ) -> Result<Link<T>, InnerError<T::Error>>
+        where
+            T: Task + Clone,
+            T::Input: Clone,
+        {
+            let mut current = node;
+            let mut errors = Vec::new();
+
+            while let Some(node_rc) = current {
+                if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(InnerError::Interrupted);
                 }
-            };
 
-            // Read the updated value
-            let value = {
-                let value_guard = input.read().await;
-                // Unfortunately this clone is needed to avoid
-                // holding on to the read lock for long running
-                // operations
-                value_guard.clone()
-            };
+                // We get the node data in advance to avoid holding
+                // the node across the await
+                let node = match &*node_rc.read().unwrap() {
+                    Node::Item { value, next } => InnerNode::Item {
+                        task: value.clone(),
+                        next: next.clone(),
+                    },
+                    Node::Fork { next } => InnerNode::Fork {
+                        branches: next.clone(),
+                    },
+                    Node::Join { next } => InnerNode::Join { next: next.clone() },
+                };
 
-            // Run the task
-            let changes = task.run(&value).await?;
+                match node {
+                    InnerNode::Item { task, next } => {
+                        let value = {
+                            let guard = input.read().await;
+                            guard.clone()
+                        };
 
-            // Communicate the changes to the channel
-            if channel.send(changes).await.is_err()
-                || sigint.load(std::sync::atomic::Ordering::Relaxed)
-            {
-                // Terminate the execution if the receiver closes
-                // or the workflow is interrupted
-                return Ok(ExecutionStatus::Interrupted);
+                        match task.run(&value).await {
+                            Ok(changes) => {
+                                if channel.send(changes).await.is_err() {
+                                    return Err(InnerError::Interrupted);
+                                }
+                            }
+                            Err(err) => {
+                                errors.push(err);
+                                break;
+                            }
+                        };
+                        current = next;
+                    }
+                    InnerNode::Fork { branches } => {
+                        let mut futures = Vec::new();
+
+                        for branch in branches.into_iter().filter(|b| b.is_some()) {
+                            futures.push(exec_node(branch, input, channel, interrupt));
+                        }
+
+                        let results = futures::future::join_all(futures).await;
+
+                        let mut join_next: Link<T> = None;
+
+                        for res in results {
+                            match res {
+                                Ok(next) => {
+                                    join_next = next;
+                                }
+                                Err(e) => match e {
+                                    InnerError::Interrupted => return Err(InnerError::Interrupted),
+                                    InnerError::Failure(mut err) => errors.append(&mut err),
+                                },
+                            }
+                        }
+
+                        // Stop running if there are failures on any branch
+                        if !errors.is_empty() {
+                            return Err(InnerError::Failure(errors));
+                        }
+
+                        // After all branches, continue at join's next
+                        current = join_next;
+                    }
+                    InnerNode::Join { next } => {
+                        // Reached a Join: stop branch and return the Join's next node
+                        return Ok(next);
+                    }
+                }
+            }
+
+            if errors.is_empty() {
+                Ok(None)
+            } else {
+                Err(InnerError::Failure(errors))
             }
         }
+
+        let mut next = self.head;
+        while next.is_some() {
+            next = match exec_node(next, input, &channel, interrupt).await {
+                Ok(next) => next,
+                Err(InnerError::Interrupted) => return Ok(ExecutionStatus::Interrupted),
+                Err(InnerError::Failure(err)) => return Err(AggregateError(err)),
+            }
+        }
+
         Ok(ExecutionStatus::Completed)
     }
 }
@@ -642,7 +740,11 @@ impl<T> Dag<T> {
 mod tests {
     use async_trait::async_trait;
     use dedent::dedent;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use pretty_assertions::{assert_eq, assert_str_eq};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Instant,
+    };
 
     use super::*;
     use crate::ack_channel::ack_channel;
@@ -840,7 +942,7 @@ mod tests {
     fn test_reverse_dag_with_forks() {
         let dag: Dag<char> = seq!('A') + dag!(seq!('B', 'C'), seq!('D')) + seq!('E');
         let reversed = dag.reverse();
-        assert_eq!(
+        assert_str_eq!(
             reversed.to_string(),
             dedent!(
                 r#"
@@ -863,7 +965,7 @@ mod tests {
     #[test]
     fn converts_linked_list_to_string() {
         let dag: Dag<char> = seq!('A', 'B', 'C', 'D');
-        assert_eq!(
+        assert_str_eq!(
             dag.to_string(),
             dedent!(
                 r#"
@@ -879,7 +981,7 @@ mod tests {
     #[test]
     fn converts_branching_dag_to_string() {
         let dag: Dag<char> = dag!(seq!('A', 'B'), seq!('C', 'D', 'E')) + seq!('F');
-        assert_eq!(
+        assert_str_eq!(
             dag.to_string(),
             dedent!(
                 r#"
@@ -902,7 +1004,7 @@ mod tests {
                 seq!('G', 'H', 'I')
             )
             + seq!('J', 'K');
-        assert_eq!(
+        assert_str_eq!(
             dag.to_string(),
             dedent!(
                 r#"
@@ -931,7 +1033,7 @@ mod tests {
             )
             + seq!(13);
 
-        assert_eq!(
+        assert_str_eq!(
             dag.to_string(),
             dedent!(
                 r#"
@@ -987,5 +1089,208 @@ mod tests {
         let result = dag.execute(&reader, tx, &sigint).await;
         assert!(matches!(result, Ok(ExecutionStatus::Completed)));
         assert_eq!(count_atomic.load(Ordering::Relaxed), 3);
+    }
+
+    #[derive(Clone)]
+    struct SleepyTask {
+        pub name: &'static str,
+        pub delay_ms: u64,
+    }
+
+    #[async_trait]
+    impl Task for SleepyTask {
+        type Input = ();
+        type Changes = &'static str;
+        type Error = ();
+
+        async fn run(&self, _input: &Self::Input) -> Result<Self::Changes, Self::Error> {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            Ok(self.name)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parallel_execution() {
+        let task_a = SleepyTask {
+            name: "A",
+            delay_ms: 100,
+        };
+        let task_b = SleepyTask {
+            name: "B",
+            delay_ms: 100,
+        };
+        let task_c = SleepyTask {
+            name: "C",
+            delay_ms: 0,
+        };
+
+        let dag: Dag<SleepyTask> = dag!(seq!(task_a), seq!(task_b)) + seq!(task_c);
+
+        let input = Arc::new(tokio::sync::RwLock::new(()));
+        let (tx, mut rx) = ack_channel::<&'static str>(10);
+        let sigint = Arc::new(AtomicBool::new(false));
+
+        let start = Instant::now();
+
+        // Collect all results
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    let mut res = results.write().await;
+                    res.push(msg.data);
+                    msg.ack();
+                }
+            });
+        }
+
+        let exec_result = dag.execute(&input, tx, &sigint).await;
+        let elapsed = start.elapsed();
+        println!("Execution time: {:?}", elapsed);
+        assert!(matches!(exec_result, Ok(ExecutionStatus::Completed)));
+
+        let results = results.read().await;
+        assert_eq!(*results, vec!["A", "B", "C"]);
+
+        // Because a and b run in parallel, total time should be just a bit over 100ms, not 200ms
+        assert!(
+            elapsed.as_millis() < 200,
+            "Execution took too long, not parallel!"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_during_execution() {
+        let dag: Dag<SleepyTask> = seq!(
+            SleepyTask {
+                name: "A",
+                delay_ms: 100
+            },
+            SleepyTask {
+                name: "B",
+                delay_ms: 100
+            },
+            SleepyTask {
+                name: "C",
+                delay_ms: 100
+            }
+        );
+
+        let input = Arc::new(tokio::sync::RwLock::new(()));
+        let (tx, mut rx) = ack_channel::<&'static str>(10);
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        let interrupt_clone = Arc::clone(&interrupt);
+
+        // Collect all results
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    let mut res = results.write().await;
+                    res.push(msg.data);
+                    msg.ack();
+                }
+            });
+        }
+
+        // Set interrupt after 50ms
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            interrupt_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let exec_result = dag.execute(&input, tx, &interrupt).await;
+
+        assert!(matches!(exec_result, Ok(ExecutionStatus::Interrupted)));
+
+        // Could be 0, 1, maybe 2 (depending on timing) but not all 3
+        let results = results.read().await;
+        assert!(
+            results.len() < 3,
+            "Expected partial execution but got all results"
+        );
+    }
+
+    #[derive(Clone)]
+    struct MaybeFailTask {
+        name: &'static str,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl Task for MaybeFailTask {
+        type Input = ();
+        type Changes = &'static str;
+        type Error = &'static str; // Simple error
+        async fn run(&self, _input: &Self::Input) -> Result<Self::Changes, Self::Error> {
+            if self.fail {
+                Err("task failed")
+            } else {
+                Ok(self.name)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_error_interrupts_execution() {
+        let dag: Dag<MaybeFailTask> = dag!(
+            dag!(
+                seq!(
+                    MaybeFailTask {
+                        name: "A",
+                        fail: false
+                    },
+                    MaybeFailTask {
+                        name: "B",
+                        fail: false
+                    }
+                ),
+                seq!(
+                    MaybeFailTask {
+                        name: "C",
+                        fail: true
+                    },
+                    MaybeFailTask {
+                        name: "D",
+                        fail: false
+                    }
+                )
+            ),
+            seq!(MaybeFailTask {
+                name: "E",
+                fail: false
+            })
+        ) + seq!(MaybeFailTask {
+            name: "F",
+            fail: false
+        });
+
+        let input = Arc::new(tokio::sync::RwLock::new(()));
+        let (tx, mut rx) = ack_channel::<&'static str>(10);
+        let interrupt = Arc::new(AtomicBool::new(false));
+
+        // Collect all results
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    let mut res = results.write().await;
+                    res.push(msg.data);
+                    msg.ack();
+                }
+            });
+        }
+
+        let exec_result = dag.execute(&input, tx, &interrupt).await;
+
+        assert!(exec_result.is_err(), "Expected execution to fail on error");
+
+        // Only successful tasks should have sent their changes
+        let results = results.read().await;
+        assert_eq!(*results, vec!["A", "E", "B"]);
     }
 }

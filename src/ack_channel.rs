@@ -27,9 +27,16 @@ impl<T> Drop for WithAck<T> {
 }
 
 /// An acknowledged sender
-#[derive(Clone)]
 pub struct Sender<T> {
     inner: mpsc::Sender<WithAck<T>>,
+}
+
+impl<T> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<T> Sender<T> {
