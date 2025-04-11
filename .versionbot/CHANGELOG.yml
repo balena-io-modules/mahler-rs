@@ -1,4 +1,21 @@
 - commits:
+    - subject: Add support for executing parallel workflows
+      hash: 44e8df9483dda882a1d4fc40ee4c285071a0ed8e
+      body: |
+        Running DAGs now creates separate futures for graph branches that are
+        joined later. This means that workflows with IO operations will run in
+        parallel. Note that branches do not spawn new tokio tasks, so long
+        running synchronous tasks (rather than I/O operations) may still result
+        in inefficient execution of workflows.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.11.0
+  title: ""
+  date: 2025-04-11T03:17:29.046Z
+- commits:
     - subject: Allow to follow a running worker progress
       hash: b733125827e9c2e78682e20f654e739d52fa2776
       body: |
