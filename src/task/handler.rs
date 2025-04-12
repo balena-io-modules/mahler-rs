@@ -1,6 +1,5 @@
 use json_patch::Patch;
 use serde::Serialize;
-use std::panic::RefUnwindSafe;
 
 use super::{Action, Context, Effect, Error, Method, Task};
 use crate::system::{FromSystem, System};
@@ -33,6 +32,9 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     }
 
     /// Create a task from the handler with a specific path argument
+    ///
+    /// This is a convenience method and it is equivalent to calling
+    /// handler.into_task().with_path();
     fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Task {
         self.into_task().with_arg(key, value)
     }
@@ -103,7 +105,7 @@ macro_rules! impl_method_handler {
         #[allow(non_snake_case, unused)]
         impl<F, $($ty,)* Res> Handler<($($ty,)*), Vec<Task>> for F
         where
-            F: Fn($($ty,)*) -> Res + Clone + RefUnwindSafe + Send + Sync +'static,
+            F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
             Res: Into<Effect<Vec<Task>, Error>>,
             $($ty: FromSystem,)*
         {

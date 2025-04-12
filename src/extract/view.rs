@@ -265,7 +265,7 @@ impl<T: Serialize> From<View<T>> for Effect<Patch, Error> {
 mod tests {
     use super::*;
     use crate::system::System;
-    use json_patch::Patch;
+    use json_patch::{patch, Patch};
     use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
@@ -382,6 +382,27 @@ mod tests {
             ]))
             .unwrap()
         );
+    }
+
+    #[test]
+    fn test_patching() {
+        let changes = vec![
+            PatchOperation::Add(AddOperation {
+                value: Value::String("123".to_string()),
+                path: jsonptr::Pointer::from_static("/hello").to_buf(),
+            }),
+            PatchOperation::Remove(RemoveOperation {
+                path: jsonptr::Pointer::from_static("/nono").to_buf(),
+            }),
+        ];
+
+        let mut value = serde_json::from_value::<Value>(json!(
+          { "hello": "000", "goodbye": "poop" }
+        ))
+        .unwrap();
+        let _ = patch(&mut value, &changes);
+
+        println!("{}", value)
     }
 
     #[test]

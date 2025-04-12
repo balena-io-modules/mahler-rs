@@ -9,7 +9,7 @@ pub trait FromSystem: Sized {
     fn from_system(state: &System, context: &Context) -> Result<Self, Self::Error>;
 
     /// The extractor is scoped if it only requires access to some
-    /// part of the system state rather than to the global state
+    /// part of the system state rather than to the global state.
     fn is_scoped() -> bool {
         true
     }

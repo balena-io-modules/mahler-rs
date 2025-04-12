@@ -13,8 +13,6 @@ use json_patch::Patch;
 use serde::Serialize;
 use std::fmt::{self, Display};
 use std::future::Future;
-use std::panic;
-use std::panic::RefUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
 use tracing::warn;
@@ -55,29 +53,12 @@ pub struct Action {
 }
 
 impl fmt::Debug for Action {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        #[derive(Debug)]
-        #[allow(dead_code)]
-        struct Action<'a> {
-            id: &'a str,
-            scoped: &'a bool,
-            context: &'a Context,
-        }
-
-        let Self {
-            id,
-            scoped,
-            context,
-            ..
-        } = self;
-        fmt::Debug::fmt(
-            &Action {
-                id,
-                scoped,
-                context,
-            },
-            f,
-        )
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Action")
+            .field("id", &self.id)
+            .field("context", &self.context)
+            .field("scoped", &self.scoped)
+            .finish()
     }
 }
 
@@ -153,57 +134,26 @@ pub struct Method {
 }
 
 impl fmt::Debug for Method {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        #[derive(Debug)]
-        #[allow(dead_code)]
-        struct Method<'a> {
-            id: &'a str,
-            scoped: &'a bool,
-            context: &'a Context,
-        }
-
-        let Self {
-            id,
-            scoped,
-            context,
-            ..
-        } = self;
-        fmt::Debug::fmt(
-            &Method {
-                id,
-                scoped,
-                context,
-            },
-            f,
-        )
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Method")
+            .field("id", &self.id)
+            .field("context", &self.context)
+            .field("scoped", &self.scoped)
+            .finish()
     }
 }
 
 impl Method {
     pub(crate) fn new<H, T>(method: H, context: Context) -> Self
     where
-        H: Handler<T, Vec<Task>> + RefUnwindSafe,
+        H: Handler<T, Vec<Task>>,
     {
         Method {
             id: method.id(),
             scoped: method.is_scoped(),
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
-                // Because with_target has a chance of panicking, we catch any panics
-                // on task methods to simplify things for library users
-                panic::catch_unwind(|| method.call(system, context))
-                    .map(|r| r.pure())
-                    .map_err(|e| {
-                        let msg = e
-                            .downcast_ref::<&str>()
-                            .map(|s| (*s).to_string())
-                            .or_else(|| e.downcast_ref::<String>().cloned())
-                            .unwrap_or_else(|| {
-                                format!("Panic while expanding task {}", method.id())
-                            });
-
-                        InputError::from(anyhow!(msg))
-                    })?
+                method.call(system, context).pure()
             }),
             describe: Arc::new(|_: &Context| {
                 // This error should never be seen
@@ -310,19 +260,13 @@ impl Task {
     pub fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
         let target = serde_json::to_value(target).context("Serialization failed")?;
         Ok(match self {
-            Self::Action(task) => {
-                let Action { context, .. } = task;
-                Self::Action(Action {
-                    context: context.with_target(target),
-                    ..task
-                })
+            Self::Action(mut action) => {
+                action.context = action.context.with_target(target);
+                Self::Action(action)
             }
-            Self::Method(task) => {
-                let Method { context, .. } = task;
-                Self::Method(Method {
-                    context: context.with_target(target),
-                    ..task
-                })
+            Self::Method(mut method) => {
+                method.context = method.context.with_target(target);
+                Self::Method(method)
             }
         })
     }
@@ -337,38 +281,26 @@ impl Task {
     /// Set an argument for the task
     pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         match self {
-            Self::Action(task) => {
-                let Action { context, .. } = task;
-                Self::Action(Action {
-                    context: context.with_arg(key, value),
-                    ..task
-                })
+            Self::Action(mut action) => {
+                action.context = action.context.with_arg(key, value);
+                Self::Action(action)
             }
-            Self::Method(task) => {
-                let Method { context, .. } = task;
-                Self::Method(Method {
-                    context: context.with_arg(key, value),
-                    ..task
-                })
+            Self::Method(mut method) => {
+                method.context = method.context.with_arg(key, value);
+                Self::Method(method)
             }
         }
     }
 
     pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
         match self {
-            Self::Action(task) => {
-                let Action { context, .. } = task;
-                Self::Action(Action {
-                    context: context.with_path(path),
-                    ..task
-                })
+            Self::Action(mut action) => {
+                action.context = action.context.with_path(path);
+                Self::Action(action)
             }
-            Self::Method(task) => {
-                let Method { context, .. } = task;
-                Self::Method(Method {
-                    context: context.with_path(path),
-                    ..task
-                })
+            Self::Method(mut method) => {
+                method.context = method.context.with_path(path);
+                Self::Method(method)
             }
         }
     }
@@ -409,7 +341,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
     use serde_json::{from_value, json};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
     use thiserror::Error;
     use tokio::time::{sleep, Duration};
 
@@ -721,14 +653,10 @@ mod tests {
         }
     }
 
-    fn plus_two_with_panic(counter: View<i32>, Target(tgt): Target<i32>) -> Option<[Task; 2]> {
+    fn plus_two_with_option(counter: View<i32>, Target(tgt): Target<i32>) -> Option<[Task; 2]> {
         if tgt - *counter > 1 {
-            // Force `with_target` to panic
-            // See: https://docs.rs/serde_json/latest/serde_json/fn.to_value.html#errors
-            let mut map = BTreeMap::new();
-            map.insert(vec![32, 64], "x86");
             return Some([
-                plus_one.into_task().with_target(map),
+                plus_one.into_task().with_target(tgt),
                 plus_one.into_task().with_target(tgt),
             ]);
         }
@@ -737,21 +665,8 @@ mod tests {
     }
 
     #[test]
-    fn it_catches_panics_in_method_expansions() {
-        // this will cause the
-        let task = plus_two_with_panic.with_target(3);
-        let system = System::try_from(0).unwrap();
-
-        if let Task::Method(method) = task {
-            assert!(matches!(method.expand(&system), Err(Error::BadInput(_))));
-        } else {
-            panic!("Expected a method task");
-        }
-    }
-
-    #[test]
     fn it_catches_condition_failure_in_methods_returning_option() {
-        let task = plus_two_with_panic.with_target(1);
+        let task = plus_two_with_option.with_target(1);
         let system = System::try_from(0).unwrap();
 
         if let Task::Method(method) = task {

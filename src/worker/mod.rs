@@ -24,7 +24,7 @@ mod logging;
 #[cfg(feature = "logging")]
 pub use logging::init as init_logging;
 
-use crate::system::System;
+use crate::system::{Resources, SerializationError, System};
 use crate::workflow::WorkflowStatus;
 use crate::{
     ack_channel::ack_channel,
@@ -38,7 +38,7 @@ pub mod prelude {
 
 /// Worker configuration options
 #[derive(Clone, Debug)]
-pub struct WorkerOpts {
+struct WorkerOpts {
     /// The maximum number of attempts to reach the target before giving up.
     /// Defauts to infinite tries (0).
     max_retries: u32,
@@ -48,41 +48,21 @@ pub struct WorkerOpts {
     max_wait_ms: u64,
 }
 
-impl WorkerOpts {
-    pub fn with_max_retries(self, max_retries: u32) -> Self {
-        let mut opts = self;
-        opts.max_retries = max_retries;
-        opts
-    }
-
-    pub fn with_min_wait_ms(self, min_wait_ms: u64) -> Self {
-        let mut opts = self;
-        opts.min_wait_ms = min_wait_ms;
-        opts
-    }
-
-    pub fn with_max_wait_ms(self, max_wait_ms: u64) -> Self {
-        let mut opts = self;
-        opts.max_wait_ms = max_wait_ms;
-        opts
-    }
-}
-
 #[derive(Debug, Error)]
 #[error("unexpected error: {0}")]
-pub struct Unexpected(#[from] anyhow::Error);
+pub struct UnexpectedError(#[from] anyhow::Error);
 
 #[derive(Debug, Error)]
 #[error("fatal error: {0}")]
-pub struct Fatal(#[from] anyhow::Error);
+pub struct FatalError(#[from] anyhow::Error);
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error(transparent)]
-    Unexpected(#[from] Unexpected),
+    Unexpected(#[from] UnexpectedError),
 
     #[error(transparent)]
-    Unrecoverable(#[from] Fatal),
+    Unrecoverable(#[from] FatalError),
 }
 
 #[derive(Debug)]
@@ -97,9 +77,9 @@ pub enum Status {
     Interrupted,
     /// Worker execution terminated due to some unexpected error
     /// this should only happen during testing
-    Aborted(Unexpected),
+    Aborted(UnexpectedError),
     // Fatal error happened, the worker cannot be recovered
-    Dead(Fatal),
+    Dead(FatalError),
 }
 
 impl PartialEq for Status {
@@ -123,6 +103,7 @@ pub trait WorkerState {}
 
 pub struct Uninitialized {
     domain: Domain,
+    resources: Resources,
     opts: WorkerOpts,
 }
 
@@ -131,6 +112,9 @@ pub struct Ready {
     system: System,
     opts: WorkerOpts,
 }
+
+#[derive(Debug, Clone)]
+struct UpdateEvent;
 
 pub struct Running {
     opts: WorkerOpts,
@@ -190,6 +174,7 @@ impl<T> Default for Worker<T, Uninitialized> {
         Worker::from_inner(Uninitialized {
             domain: Domain::new(),
             opts: WorkerOpts::default(),
+            resources: Resources::new(),
         })
     }
 }
@@ -200,37 +185,64 @@ impl<T> Worker<T, Uninitialized> {
     }
 
     /// Add a job to the worker domain
-    pub fn job(self, route: &'static str, job: Job) -> Self {
-        let Self { mut inner, .. } = self;
-        inner.domain = inner.domain.job(route, job);
-        Worker::from_inner(inner)
+    pub fn job(mut self, route: &'static str, job: Job) -> Self {
+        self.inner.domain = self.inner.domain.job(route, job);
+        self
     }
 
-    /// Replace the internal worker domain
-    pub fn with_domain(self, domain: Domain) -> Worker<T, Uninitialized> {
-        let Self { mut inner, .. } = self;
-        inner.domain = domain;
-        Worker::from_inner(inner)
+    /// Add a list if jobs linked to a route on the worker domain
+    pub fn jobs<const N: usize>(mut self, route: &'static str, list: [Job; N]) -> Self {
+        self.inner.domain = self.inner.domain.jobs(route, list);
+        self
     }
 
-    /// Set worker options
-    pub fn with_opts(self, opts: WorkerOpts) -> Worker<T, Uninitialized> {
-        let Self { mut inner, .. } = self;
-        inner.opts = opts;
-        Worker::from_inner(inner)
+    /// Add a shared resource to use within tasks
+    pub fn resource<R>(mut self, res: R) -> Self
+    where
+        R: Send + Sync + 'static,
+    {
+        self.inner.resources = self.inner.resources.with_res(res);
+        self
+    }
+
+    /// Set the maximum number of attempts to reach the target before giving up.
+    /// Defaults to infinite tries (0).
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.inner.opts.max_retries = max_retries;
+        self
+    }
+
+    /// Set the minimal time to wait between re-planning attempts.
+    /// Defaults to 1 second
+    pub fn with_min_wait_ms(mut self, min_wait_ms: u64) -> Self {
+        self.inner.opts.min_wait_ms = min_wait_ms;
+        self
+    }
+
+    /// Set the maximum time to wait between re-planning attempts.
+    /// Defaults to 5 minutes
+    pub fn with_max_wait_ms(mut self, max_wait_ms: u64) -> Self {
+        self.inner.opts.max_wait_ms = max_wait_ms;
+        self
     }
 
     /// Provide the initial worker state
     ///
     /// This moves the state of the worker to `ready`
-    pub fn initial_state(self, state: T) -> Result<Worker<T, Ready>, Unexpected>
+    pub fn initial_state(self, state: T) -> Result<Worker<T, Ready>, UnexpectedError>
     where
         T: Serialize + DeserializeOwned,
     {
-        let Uninitialized { domain, opts, .. } = self.inner;
+        let Uninitialized {
+            domain,
+            opts,
+            resources: env,
+            ..
+        } = self.inner;
 
-        // we want to panic early while setting up the worker
-        let system = System::try_from(state).context("could not serialize initial state")?;
+        let system = System::try_from(state)
+            .map(|s| s.with_resources(env))
+            .context("could not serialize initial state")?;
         Ok(Worker::from_inner(Ready {
             planner: Planner::new(domain),
             system,
@@ -241,9 +253,12 @@ impl<T> Worker<T, Uninitialized> {
 
 // -- Worker is ready to receive a target state
 
-impl<T: DeserializeOwned> Worker<T, Ready> {
+impl<T> Worker<T, Ready> {
     /// Read the current system state from the worker
-    pub fn state(&self) -> Result<T, Unexpected> {
+    pub fn state(&self) -> Result<T, UnexpectedError>
+    where
+        T: DeserializeOwned,
+    {
         let state = self
             .inner
             .system
@@ -251,22 +266,11 @@ impl<T: DeserializeOwned> Worker<T, Ready> {
             .context("could not deserialize state")?;
         Ok(state)
     }
-}
 
-impl<T: Serialize> SeekTarget<T> for Result<Worker<T, Ready>, Unexpected> {
-    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
-        self.map_err(Error::from)
-            .and_then(|worker| worker.seek_target(tgt))
-    }
-}
-
-#[derive(Debug, Clone)]
-
-struct UpdateEvent;
-
-impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
-    /// Run the worker and start looking for the given target
-    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
+    pub fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error>
+    where
+        T: Serialize + DeserializeOwned,
+    {
         let Ready {
             planner,
             system,
@@ -276,9 +280,10 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
 
         let tgt = serde_json::to_value(tgt)
             .context("could not serialize target")
-            .map_err(Unexpected::from)?;
+            .map_err(UnexpectedError::from)?;
 
         enum InternalError {
+            Serialization(SerializationError),
             Runtime,
             Planning(PlannerError),
         }
@@ -289,19 +294,31 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             Interrupted,
         }
 
-        async fn find_and_run_workflow(
+        async fn find_and_run_workflow<T: Serialize + DeserializeOwned>(
             planner: &Planner,
             sys: &Arc<RwLock<System>>,
             tgt: &Value,
             channel: &Sender<Patch>,
             sigint: &Arc<AtomicBool>,
         ) -> Result<InternalResult, InternalError> {
-            let workflow = {
+            let system = {
                 let system = sys.read().await;
-                planner
-                    .find_workflow(&system, tgt)
-                    .map_err(InternalError::Planning)?
+
+                // Fields in the type may be configured with skip_serialize,
+                // meaning these fields should not be considered when comparing
+                // the state with the target. Deserialiing and serialing the state
+                // again allows the comparison to work properly
+                // XXX: this may be a potential source of patching errors
+                system
+                    .state::<T>()
+                    .and_then(System::try_from)
+                    .map(|s| s.with_resources(system.resources().clone()))
+                    .map_err(InternalError::Serialization)?
             };
+
+            let workflow = planner
+                .find_workflow(&system, tgt)
+                .map_err(InternalError::Planning)?;
 
             if workflow.is_empty() {
                 return Ok(InternalResult::TargetReached);
@@ -327,7 +344,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
         let (tx, mut rx) = ack_channel::<Patch>(100);
 
         // Error signal channel (one-shot)
-        let (err_tx, mut err_rx) = tokio::sync::oneshot::channel::<Fatal>();
+        let (err_tx, mut err_rx) = tokio::sync::oneshot::channel::<FatalError>();
 
         // Broadcast channel for state updates
         let (updates, _) = tokio::sync::broadcast::channel::<UpdateEvent>(16);
@@ -348,7 +365,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
                             // internal state may have become inconsistent and we cannot continue
                             // applying changes
                             error!("system patch failed: {e}");
-                            let _ = err_tx.send(Fatal(anyhow!(e)));
+                            let _ = err_tx.send(FatalError(anyhow!(e)));
                             break;
                         }
 
@@ -397,7 +414,7 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
                         }
 
                         _ = tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)) => {
-                            match find_and_run_workflow(&planner, &sys_reader, &tgt, &tx, &sigint).await {
+                            match find_and_run_workflow::<T>(&planner, &sys_reader, &tgt, &tx, &sigint).await {
                                 Ok(InternalResult::TargetReached) => {
                                     cur_span.record("return", "success");
                                     let system = sys_reader.read().await.clone();
@@ -413,13 +430,20 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
                                     let system = sys_reader.read().await.clone();
                                     return (planner, system, Status::Interrupted);
                                 }
+                                Err(InternalError::Serialization(err)) => {
+                                    // There is an issue with the type definition
+                                    // best to abort in this case
+                                    cur_span.record("return", "aborted");
+                                    let system = sys_reader.read().await.clone();
+                                    return (planner, system, Status::Aborted(UnexpectedError(anyhow!(err))));
+                                }
                                 Err(InternalError::Planning(err)) => {
                                     // Abort if an unexpected error happens in planning while in
                                     // debug mode
                                     if !matches!(err, PlannerError::NotFound) && !cfg!(debug_assertions) {
                                         cur_span.record("return", "aborted");
                                         let system = sys_reader.read().await.clone();
-                                        return (planner, system, Status::Aborted(Unexpected(anyhow!(err))));
+                                        return (planner, system, Status::Aborted(UnexpectedError(anyhow!(err))));
                                     }
                                     tries += 1;
 
@@ -455,6 +479,13 @@ impl<T: Serialize> SeekTarget<T> for Worker<T, Ready> {
             sys_reader,
             updates,
         }))
+    }
+}
+
+impl<T: Serialize + DeserializeOwned> SeekTarget<T> for Result<Worker<T, Ready>, UnexpectedError> {
+    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
+        self.map_err(Error::from)
+            .and_then(|worker| worker.seek_target(tgt))
     }
 }
 
@@ -586,7 +617,7 @@ impl<T> Worker<T, Running> {
 
 impl<T> Worker<T, Idle> {
     /// Return the internal state of the worker
-    pub fn state(&self) -> Result<T, Unexpected>
+    pub fn state(&self) -> Result<T, UnexpectedError>
     where
         T: DeserializeOwned,
     {
@@ -602,10 +633,11 @@ impl<T> Worker<T, Idle> {
     pub fn status(&self) -> &Status {
         &self.inner.status
     }
-}
 
-impl<T: Serialize> SeekTarget<T> for Worker<T, Idle> {
-    fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
+    pub fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error>
+    where
+        T: Serialize + DeserializeOwned,
+    {
         // A dead worker may have an inconsistent state.
         // Do not allow seeking target in that case
         if let Status::Dead(err) = self.inner.status {
@@ -789,7 +821,7 @@ mod tests {
         init();
         let worker = Worker::new()
             .job("", update(buggy_plus_one))
-            .with_opts(WorkerOpts::default().with_max_retries(1))
+            .with_max_retries(1)
             .initial_state(0)
             .seek_target(2)
             .unwrap();
