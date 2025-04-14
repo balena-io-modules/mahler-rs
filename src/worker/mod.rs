@@ -30,13 +30,10 @@ pub use testing::*;
 #[cfg(feature = "logging")]
 pub use logging::init as init_logging;
 
+use crate::planner::{Domain, Error as PlannerError, Planner};
 use crate::system::{Resources, SerializationError, System};
-use crate::workflow::WorkflowStatus;
-use crate::{
-    ack_channel::ack_channel,
-    planner::{Domain, Error as PlannerError, Planner},
-};
-use crate::{ack_channel::Sender, task::Job};
+use crate::task::Job;
+use crate::workflow::{ack_channel, Sender, WorkflowStatus};
 
 pub mod prelude {
     pub use super::SeekTarget;

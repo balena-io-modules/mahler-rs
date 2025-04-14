@@ -9,10 +9,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::instrument;
 
-use crate::ack_channel::Sender;
-use crate::dag::{AggregateError, Dag, ExecutionStatus, Task};
 use crate::system::System;
 use crate::task::{Action, Error as TaskError};
+
+mod channel;
+mod dag;
+
+pub(crate) use channel::*;
+pub use dag::*;
 
 #[derive(Hash)]
 struct WorkUnitId<'s> {

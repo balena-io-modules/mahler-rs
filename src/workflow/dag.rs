@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
-use crate::ack_channel::Sender;
+use super::channel::Sender;
 
 type Link<T> = Option<Arc<RwLock<Node<T>>>>;
 
@@ -747,7 +747,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::ack_channel::ack_channel;
+    use crate::workflow::ack_channel;
 
     fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
         if let Node::Item { .. } = &*node.read().unwrap() {
