@@ -20,12 +20,11 @@ use tracing::warn;
 use crate::system::System;
 
 pub(crate) use context::*;
-pub(crate) use errors::*;
 pub(crate) use into_result::*;
 
 pub use description::*;
 pub use effect::*;
-pub use errors::InputError;
+pub use errors::*;
 pub use handler::*;
 pub use job::*;
 pub use with_io::*;

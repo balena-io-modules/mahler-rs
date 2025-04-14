@@ -82,13 +82,6 @@ impl System {
         })
     }
 
-    pub(crate) fn new(state: Value) -> Self {
-        Self {
-            state,
-            resources: Resources::new(),
-        }
-    }
-
     pub(crate) fn resources(&self) -> &Resources {
         &self.resources
     }

@@ -21,6 +21,12 @@ use tracing::{debug, error, field, span, Instrument, Level, Span};
 #[cfg(feature = "logging")]
 mod logging;
 
+#[cfg(debug_assertions)]
+mod testing;
+
+#[cfg(debug_assertions)]
+pub use testing::*;
+
 #[cfg(feature = "logging")]
 pub use logging::init as init_logging;
 
@@ -66,7 +72,7 @@ pub enum Error {
 }
 
 #[derive(Debug)]
-pub enum Status {
+pub enum SeekStatus {
     // Worker is still running
     Running,
     /// Worker has reached the target state
@@ -82,13 +88,13 @@ pub enum Status {
     Dead(FatalError),
 }
 
-impl PartialEq for Status {
+impl PartialEq for SeekStatus {
     fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (Status::Success, Status::Success)
-                | (Status::Failure, Status::Failure)
-                | (Status::Interrupted, Status::Interrupted)
+            (SeekStatus::Success, SeekStatus::Success)
+                | (SeekStatus::Failure, SeekStatus::Failure)
+                | (SeekStatus::Interrupted, SeekStatus::Interrupted)
         )
     }
 }
@@ -97,7 +103,7 @@ pub trait SeekTarget<T> {
     fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error>;
 }
 
-impl Eq for Status {}
+impl Eq for SeekStatus {}
 
 pub trait WorkerState {}
 
@@ -118,7 +124,7 @@ struct UpdateEvent;
 
 pub struct Running {
     opts: WorkerOpts,
-    handle: Pin<Box<JoinHandle<(Planner, System, Status)>>>,
+    handle: Pin<Box<JoinHandle<(Planner, System, SeekStatus)>>>,
     updates: broadcast::Sender<UpdateEvent>,
     sys_reader: Arc<RwLock<System>>,
     interrupt: Arc<AtomicBool>,
@@ -128,7 +134,7 @@ pub struct Idle {
     planner: Planner,
     system: System,
     opts: WorkerOpts,
-    status: Status,
+    status: SeekStatus,
 }
 
 impl WorkerState for Uninitialized {}
@@ -229,7 +235,7 @@ impl<T> Worker<T, Uninitialized> {
     /// Provide the initial worker state
     ///
     /// This moves the state of the worker to `ready`
-    pub fn initial_state(self, state: T) -> Result<Worker<T, Ready>, UnexpectedError>
+    pub fn initial_state(self, state: T) -> Result<Worker<T, Ready>, Error>
     where
         T: Serialize + DeserializeOwned,
     {
@@ -242,7 +248,9 @@ impl<T> Worker<T, Uninitialized> {
 
         let system = System::try_from(state)
             .map(|s| s.with_resources(env))
-            .context("could not serialize initial state")?;
+            .context("could not serialize initial state")
+            .map_err(UnexpectedError)?;
+
         Ok(Worker::from_inner(Ready {
             planner: Planner::new(domain),
             system,
@@ -255,7 +263,7 @@ impl<T> Worker<T, Uninitialized> {
 
 impl<T> Worker<T, Ready> {
     /// Read the current system state from the worker
-    pub fn state(&self) -> Result<T, UnexpectedError>
+    pub fn state(&self) -> Result<T, Error>
     where
         T: DeserializeOwned,
     {
@@ -263,7 +271,8 @@ impl<T> Worker<T, Ready> {
             .inner
             .system
             .state()
-            .context("could not deserialize state")?;
+            .context("could not deserialize state")
+            .map_err(UnexpectedError)?;
         Ok(state)
     }
 
@@ -280,7 +289,7 @@ impl<T> Worker<T, Ready> {
 
         let tgt = serde_json::to_value(tgt)
             .context("could not serialize target")
-            .map_err(UnexpectedError::from)?;
+            .map_err(UnexpectedError)?;
 
         enum InternalError {
             Serialization(SerializationError),
@@ -403,14 +412,14 @@ impl<T> Worker<T, Ready> {
                                 cur_span.record("error", format!("failed to update worker internal state: {err}"));
                                 cur_span.record("return", "aborted");
                                 let system = sys_reader.read().await.clone();
-                                return (planner, system, Status::Dead(err));
+                                return (planner, system, SeekStatus::Dead(err));
                             }
                         }
 
                         _ = async {}, if sigint.load(Ordering::Relaxed) => {
                             cur_span.record("return", "interrupted");
                             let system = sys_reader.read().await.clone();
-                            return (planner, system, Status::Interrupted);
+                            return (planner, system, SeekStatus::Interrupted);
                         }
 
                         _ = tokio::time::sleep(tokio::time::Duration::from_millis(wait_ms)) => {
@@ -418,7 +427,7 @@ impl<T> Worker<T, Ready> {
                                 Ok(InternalResult::TargetReached) => {
                                     cur_span.record("return", "success");
                                     let system = sys_reader.read().await.clone();
-                                    return (planner, system, Status::Success);
+                                    return (planner, system, SeekStatus::Success);
                                 }
                                 Ok(InternalResult::Completed) => {
                                     // made progress, reset backoff
@@ -428,14 +437,14 @@ impl<T> Worker<T, Ready> {
                                 Ok(InternalResult::Interrupted) => {
                                     cur_span.record("return", "interrupted");
                                     let system = sys_reader.read().await.clone();
-                                    return (planner, system, Status::Interrupted);
+                                    return (planner, system, SeekStatus::Interrupted);
                                 }
                                 Err(InternalError::Serialization(err)) => {
                                     // There is an issue with the type definition
                                     // best to abort in this case
                                     cur_span.record("return", "aborted");
                                     let system = sys_reader.read().await.clone();
-                                    return (planner, system, Status::Aborted(UnexpectedError(anyhow!(err))));
+                                    return (planner, system, SeekStatus::Aborted(UnexpectedError(anyhow!(err))));
                                 }
                                 Err(InternalError::Planning(err)) => {
                                     // Abort if an unexpected error happens in planning while in
@@ -443,7 +452,7 @@ impl<T> Worker<T, Ready> {
                                     if !matches!(err, PlannerError::NotFound) && !cfg!(debug_assertions) {
                                         cur_span.record("return", "aborted");
                                         let system = sys_reader.read().await.clone();
-                                        return (planner, system, Status::Aborted(UnexpectedError(anyhow!(err))));
+                                        return (planner, system, SeekStatus::Aborted(UnexpectedError(anyhow!(err))));
                                     }
                                     tries += 1;
 
@@ -452,7 +461,7 @@ impl<T> Worker<T, Ready> {
                                     if opts.max_retries != 0 && tries >= opts.max_retries {
                                         cur_span.record("return", "failure");
                                         let system = sys_reader.read().await.clone();
-                                        return (planner, system, Status::Failure);
+                                        return (planner, system, SeekStatus::Failure);
                                     }
 
                                     // Otherwise update the timeout
@@ -482,10 +491,9 @@ impl<T> Worker<T, Ready> {
     }
 }
 
-impl<T: Serialize + DeserializeOwned> SeekTarget<T> for Result<Worker<T, Ready>, UnexpectedError> {
+impl<T: Serialize + DeserializeOwned> SeekTarget<T> for Result<Worker<T, Ready>, Error> {
     fn seek_target(self, tgt: T) -> Result<Worker<T, Running>, Error> {
-        self.map_err(Error::from)
-            .and_then(|worker| worker.seek_target(tgt))
+        self.and_then(|worker| worker.seek_target(tgt))
     }
 }
 
@@ -617,7 +625,7 @@ impl<T> Worker<T, Running> {
 
 impl<T> Worker<T, Idle> {
     /// Return the internal state of the worker
-    pub fn state(&self) -> Result<T, UnexpectedError>
+    pub fn state(&self) -> Result<T, Error>
     where
         T: DeserializeOwned,
     {
@@ -625,12 +633,13 @@ impl<T> Worker<T, Idle> {
             .inner
             .system
             .state()
-            .context("could not deserialize state")?;
+            .context("could not deserialize state")
+            .map_err(UnexpectedError)?;
         Ok(state)
     }
 
     /// Return the result of the last worker run
-    pub fn status(&self) -> &Status {
+    pub fn status(&self) -> &SeekStatus {
         &self.inner.status
     }
 
@@ -640,7 +649,7 @@ impl<T> Worker<T, Idle> {
     {
         // A dead worker may have an inconsistent state.
         // Do not allow seeking target in that case
-        if let Status::Dead(err) = self.inner.status {
+        if let SeekStatus::Dead(err) = self.inner.status {
             return Err(err)?;
         }
 
@@ -662,7 +671,7 @@ impl<T> Worker<T, Idle> {
 
 // -- Worker is waiting for the target search to finish
 
-const RUNNING_STATUS: Status = Status::Running;
+const RUNNING_STATUS: SeekStatus = SeekStatus::Running;
 
 impl<T> Worker<T, Waiting> {
     /// Cancel the running worker
@@ -676,7 +685,7 @@ impl<T> Worker<T, Waiting> {
     }
 
     /// Return the worker runtime status
-    pub fn status(&self) -> &Status {
+    pub fn status(&self) -> &SeekStatus {
         match &self.inner {
             Waiting::Running(_) => &RUNNING_STATUS,
             Waiting::Idle(idle) => &idle.status,
@@ -805,7 +814,7 @@ mod tests {
             .unwrap();
 
         let worker = worker.wait(None).await;
-        assert_eq!(worker.status(), &Status::Success);
+        assert_eq!(worker.status(), &SeekStatus::Success);
         let state = worker.unwrap_idle().state().unwrap();
         assert_eq!(
             state,
@@ -904,7 +913,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         let worker = worker.cancel().await;
 
-        assert_eq!(worker.status(), &Status::Interrupted);
+        assert_eq!(worker.status(), &SeekStatus::Interrupted);
     }
 
     #[tokio::test]
@@ -944,6 +953,6 @@ mod tests {
         // Now wait without timeout (should finish)
         let worker = worker.wait(None).await;
 
-        assert_eq!(worker.status(), &Status::Success);
+        assert_eq!(worker.status(), &SeekStatus::Success);
     }
 }

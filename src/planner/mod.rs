@@ -1,6 +1,5 @@
 use anyhow::Context as AnyhowCtx;
 use json_patch::Patch;
-use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 use tracing::{error, field, instrument, trace_span, warn, Level, Span};
@@ -42,10 +41,6 @@ pub(crate) enum Error {
     #[error("unexpected error: {0}")]
     Unexpected(#[from] anyhow::Error),
 }
-
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct NotFound(#[from] anyhow::Error);
 
 impl Planner {
     pub fn new(domain: Domain) -> Self {
@@ -141,20 +136,6 @@ impl Planner {
                 Ok(cur_plan)
             }
         }
-    }
-
-    pub fn find_plan<S>(&self, cur: S, tgt: S) -> Result<Workflow, NotFound>
-    where
-        S: Serialize,
-    {
-        let cur = serde_json::to_value(cur).context("failed to serialize current state")?;
-        let tgt = serde_json::to_value(tgt).context("failed to serialize target state")?;
-
-        let system = System::new(cur);
-        let res = self
-            .find_workflow(&system, &tgt)
-            .context("Failed to find a plan")?;
-        Ok(res)
     }
 
     #[instrument(skip_all, fields(ini=%system.root(), tgt=%tgt), err, ret(Display))]
@@ -264,7 +245,7 @@ impl Planner {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
 
     use super::*;
@@ -313,6 +294,19 @@ mod tests {
         counter
     }
 
+    pub fn find_plan<S>(planner: Planner, cur: S, tgt: S) -> Result<Workflow, super::Error>
+    where
+        S: Serialize,
+    {
+        let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
+
+        let system =
+            crate::system::System::try_from(cur).expect("failed to serialize current state");
+
+        let res = planner.find_workflow(&system, &tgt)?;
+        Ok(res)
+    }
+
     #[test]
     fn it_calculates_a_linear_workflow() {
         let domain = Domain::new()
@@ -320,7 +314,7 @@ mod tests {
             .job("", update(minus_one));
 
         let planner = Planner::new(domain);
-        let workflow = planner.find_plan(0, 2).unwrap();
+        let workflow = find_plan(planner, 0, 2).unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -338,7 +332,7 @@ mod tests {
             .job("", update(minus_one));
 
         let planner = Planner::new(domain);
-        let workflow = planner.find_plan(0, 2);
+        let workflow = find_plan(planner, 0, 2);
         assert!(workflow.is_err());
     }
 
@@ -349,7 +343,7 @@ mod tests {
             .job("", none(plus_one));
 
         let planner = Planner::new(domain);
-        let workflow = planner.find_plan(0, 2).unwrap();
+        let workflow = find_plan(planner, 0, 2).unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -380,7 +374,7 @@ mod tests {
             .job("/counters/{counter}", update(plus_one));
 
         let planner = Planner::new(domain);
-        let workflow = planner.find_plan(initial, target).unwrap();
+        let workflow = find_plan(planner, initial, target).unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -413,7 +407,7 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let planner = Planner::new(domain);
-        let workflow = planner.find_plan(initial, target).unwrap();
+        let workflow = find_plan(planner, initial, target).unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -445,7 +439,7 @@ mod tests {
             .job("/counters/{counter}", update(plus_three));
 
         let planner = Planner::new(domain);
-        let workflow = planner.find_plan(initial, target).unwrap();
+        let workflow = find_plan(planner, initial, target).unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -673,7 +667,7 @@ mod tests {
             ]),
         };
 
-        let workflow = planner.find_plan(initial, target).unwrap();
+        let workflow = find_plan(planner, initial, target).unwrap();
 
         let expected: Dag<&str> = seq!(
             "gustav::planner::tests::test_stacking_problem::unstack(/blocks/C)",
