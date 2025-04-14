@@ -8,10 +8,7 @@ use json_patch::Patch;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::{select, sync::RwLock};
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -33,7 +30,7 @@ pub use logging::init as init_logging;
 use crate::planner::{Domain, Error as PlannerError, Planner};
 use crate::system::{Resources, SerializationError, System};
 use crate::task::Job;
-use crate::workflow::{ack_channel, Sender, WorkflowStatus};
+use crate::workflow::{channel, Interrupt, Sender, WorkflowStatus};
 
 pub mod prelude {
     pub use super::SeekTarget;
@@ -124,7 +121,7 @@ pub struct Running {
     handle: Pin<Box<JoinHandle<(Planner, System, SeekStatus)>>>,
     updates: broadcast::Sender<UpdateEvent>,
     sys_reader: Arc<RwLock<System>>,
-    interrupt: Arc<AtomicBool>,
+    interrupt: Interrupt,
 }
 
 pub struct Idle {
@@ -305,7 +302,7 @@ impl<T> Worker<T, Ready> {
             sys: &Arc<RwLock<System>>,
             tgt: &Value,
             channel: &Sender<Patch>,
-            sigint: &Arc<AtomicBool>,
+            sigint: &Interrupt,
         ) -> Result<InternalResult, InternalError> {
             let system = {
                 let system = sys.read().await;
@@ -332,7 +329,7 @@ impl<T> Worker<T, Ready> {
 
             if matches!(
                 workflow
-                    .execute(sys, channel.clone(), sigint)
+                    .execute(sys, channel.clone(), sigint.clone())
                     .await
                     .map_err(|_| InternalError::Runtime)?,
                 WorkflowStatus::Interrupted
@@ -347,7 +344,7 @@ impl<T> Worker<T, Ready> {
         let sys_reader = Arc::new(RwLock::new(system));
 
         // Create the messaging channel
-        let (tx, mut rx) = ack_channel::<Patch>(100);
+        let (tx, mut rx) = channel::<Patch>(100);
 
         // Error signal channel (one-shot)
         let (err_tx, mut err_rx) = tokio::sync::oneshot::channel::<FatalError>();
@@ -388,12 +385,13 @@ impl<T> Worker<T, Ready> {
 
         // Cancellation flag for external interrupts
         //
-        let interrupt = Arc::new(AtomicBool::new(false));
+        let interrupt = Interrupt::new();
         let sigint = interrupt.clone();
         let target = tgt.clone();
 
         // Main seek_target planning and execution loop
         let handle = {
+            let interrupt = interrupt.clone();
             let sys_reader = Arc::clone(&sys_reader);
             tokio::spawn(async move {
                 let mut tries = 0;
@@ -413,7 +411,7 @@ impl<T> Worker<T, Ready> {
                             }
                         }
 
-                        _ = async {}, if sigint.load(Ordering::Relaxed) => {
+                        _ = interrupt.wait() => {
                             cur_span.record("return", "interrupted");
                             let system = sys_reader.read().await.clone();
                             return (planner, system, SeekStatus::Interrupted);
@@ -559,7 +557,7 @@ impl<T> Worker<T, Running> {
         } = self.inner;
 
         // Cancel the task
-        interrupt.store(true, Ordering::Relaxed);
+        interrupt.set();
 
         // This should not happen
         let (planner, system, status) = task.await.expect("worker runtime panicked");

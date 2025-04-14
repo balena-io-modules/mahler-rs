@@ -4,7 +4,6 @@ use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::instrument;
@@ -14,9 +13,11 @@ use crate::task::{Action, Error as TaskError};
 
 mod channel;
 mod dag;
+mod interrupt;
 
 pub(crate) use channel::*;
 pub use dag::*;
+pub use interrupt::*;
 
 #[derive(Hash)]
 struct WorkUnitId<'s> {
@@ -147,10 +148,10 @@ impl Workflow {
         self,
         system: &Arc<RwLock<System>>,
         channel: Sender<Patch>,
-        sigint: &Arc<AtomicBool>,
+        interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
         self.dag
-            .execute(system, channel, sigint)
+            .execute(system, channel, interrupt)
             .await
             .map(|s| s.into())
     }

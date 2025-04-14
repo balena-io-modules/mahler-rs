@@ -65,7 +65,7 @@ impl<T> Sender<T> {
 pub struct SendError;
 
 /// Create a new acknowledged channel
-pub fn ack_channel<T>(capacity: usize) -> (Sender<T>, mpsc::Receiver<WithAck<T>>) {
+pub fn channel<T>(capacity: usize) -> (Sender<T>, mpsc::Receiver<WithAck<T>>) {
     let (tx, rx) = mpsc::channel(capacity);
     (Sender::new(tx), rx)
 }
