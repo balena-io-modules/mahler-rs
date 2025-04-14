@@ -28,9 +28,9 @@ pub use testing::*;
 pub use logging::init as init_logging;
 
 use crate::planner::{Domain, Error as PlannerError, Planner};
-use crate::system::{Resources, SerializationError, System};
-use crate::task::Job;
-use crate::workflow::{channel, Interrupt, Sender, WorkflowStatus};
+use crate::system::{Resources, System};
+use crate::task::{Error as TaskError, Job};
+use crate::workflow::{channel, AggregateError, Interrupt, Sender, WorkflowStatus};
 
 pub mod prelude {
     pub use super::SeekTarget;
@@ -49,8 +49,48 @@ struct WorkerOpts {
 }
 
 #[derive(Debug, Error)]
-#[error("unexpected error: {0}")]
+#[error("serialization error: {0}")]
+pub struct SerializationError(#[from] serde_json::Error);
+
+#[derive(Debug, Error)]
+#[error("state patch failed, tainted worker state: {0}")]
+pub struct PatchError(#[from] json_patch::PatchError);
+
+#[derive(Debug, Error)]
+#[error("panicked: {0}")]
+pub struct Panicked(#[from] tokio::task::JoinError);
+
+#[derive(Debug, Error)]
+#[error("unexpected error (this might be a bug): {0}")]
 pub struct UnexpectedError(#[from] anyhow::Error);
+
+#[derive(Debug, Error)]
+pub enum Fatal {
+    #[error(transparent)]
+    Serialization(SerializationError),
+
+    #[error(transparent)]
+    Patch(PatchError),
+
+    #[error(transparent)]
+    Panic(Panicked),
+
+    #[error(transparent)]
+    Unexpected(UnexpectedError),
+}
+
+#[derive(Debug, Error)]
+#[error("planning error: {0}")]
+pub struct PlanningError(#[from] PlannerError);
+
+#[derive(Debug, Error)]
+pub enum Recoverable {
+    #[error("planning failure: {0}")]
+    Planning(PlanningError),
+
+    #[error("running workflow failure: {0}")]
+    Runtime(AggregateError<TaskError>),
+}
 
 #[derive(Debug, Error)]
 #[error("fatal error: {0}")]
@@ -274,6 +314,10 @@ impl<T> Worker<T, Ready> {
     where
         T: Serialize + DeserializeOwned,
     {
+        let tgt = serde_json::to_value(tgt)
+            .context("could not serialize target")
+            .map_err(UnexpectedError)?;
+
         let Ready {
             planner,
             system,
@@ -281,12 +325,51 @@ impl<T> Worker<T, Ready> {
             ..
         } = self.inner;
 
-        let tgt = serde_json::to_value(tgt)
-            .context("could not serialize target")
-            .map_err(UnexpectedError)?;
+        // Shared system protected by RwLock
+        let sys_reader = Arc::new(RwLock::new(system));
+
+        // Create the messaging channel
+        let (tx, mut rx) = channel::<Patch>(100);
+
+        // Error signal channel (one-shot)
+        let (err_tx, mut err_rx) = tokio::sync::oneshot::channel::<FatalError>();
+
+        // Broadcast channel for state updates
+        let (updates, _) = tokio::sync::broadcast::channel::<UpdateEvent>(16);
+
+        // Spawn system writer task
+        {
+            let sys_writer = Arc::clone(&sys_reader);
+            let broadcast = updates.clone();
+            tokio::spawn(
+                async move {
+                    while let Some(mut msg) = rx.recv().await {
+                        let changes = std::mem::take(&mut msg.data);
+                        debug!("received changes: {:?}", changes);
+
+                        let mut system = sys_writer.write().await;
+                        if let Err(e) = system.patch(changes) {
+                            // we need to abort on patch failure a this means the
+                            // internal state may have become inconsistent and we cannot continue
+                            // applying changes
+                            error!("system patch failed: {e}");
+                            let _ = err_tx.send(FatalError(anyhow!(e)));
+                            break;
+                        }
+
+                        // Notify the change over the broadcast channel
+                        let _ = broadcast.send(UpdateEvent);
+
+                        // yield back to the workflow
+                        msg.ack();
+                    }
+                }
+                .instrument(span!(Level::DEBUG, "system_writer")),
+            );
+        }
 
         enum InternalError {
-            Serialization(SerializationError),
+            Serialization(serde_json::Error),
             Runtime,
             Planning(PlannerError),
         }
@@ -338,49 +421,6 @@ impl<T> Worker<T, Ready> {
             }
 
             Ok(InternalResult::Completed)
-        }
-
-        // Shared system protected by RwLock
-        let sys_reader = Arc::new(RwLock::new(system));
-
-        // Create the messaging channel
-        let (tx, mut rx) = channel::<Patch>(100);
-
-        // Error signal channel (one-shot)
-        let (err_tx, mut err_rx) = tokio::sync::oneshot::channel::<FatalError>();
-
-        // Broadcast channel for state updates
-        let (updates, _) = tokio::sync::broadcast::channel::<UpdateEvent>(16);
-
-        // Spawn system writer task
-        {
-            let sys_writer = Arc::clone(&sys_reader);
-            let broadcast = updates.clone();
-            tokio::spawn(
-                async move {
-                    while let Some(mut msg) = rx.recv().await {
-                        let changes = std::mem::take(&mut msg.data);
-                        debug!("received changes: {:?}", changes);
-
-                        let mut system = sys_writer.write().await;
-                        if let Err(e) = system.patch(changes) {
-                            // we need to abort on patch failure a this means the
-                            // internal state may have become inconsistent and we cannot continue
-                            // applying changes
-                            error!("system patch failed: {e}");
-                            let _ = err_tx.send(FatalError(anyhow!(e)));
-                            break;
-                        }
-
-                        // Notify the change over the broadcast channel
-                        let _ = broadcast.send(UpdateEvent);
-
-                        // yield back to the workflow
-                        msg.ack();
-                    }
-                }
-                .instrument(span!(Level::DEBUG, "system_writer")),
-            );
         }
 
         // Cancellation flag for external interrupts

@@ -1,4 +1,4 @@
-use anyhow::Context as AnyhowCtx;
+use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::Patch;
 use serde_json::Value;
 use thiserror::Error;
@@ -19,26 +19,39 @@ pub use domain::*;
 pub struct Planner(Domain);
 
 #[derive(Debug, Error)]
-pub(crate) enum Error {
-    #[error("failed to expand compound task: {0}")]
-    ExpansionFailed(#[source] PathSearchError),
+enum SearchError {
+    #[error("method error: {0}")]
+    CannotExpand(#[source] PathSearchError),
 
-    #[error("task {id} failed during planning: {source}")]
-    TaskFailure { id: String, source: task::Error },
+    #[error("task error: {0}")]
+    Task(#[from] task::Error),
 
-    #[error("condition failed")]
+    #[error("task condition failed")]
     ConditionFailed,
 
     #[error("loop detected")]
     LoopDetected,
 
-    #[error("plan not found")]
+    #[error("unexpected error (this is probably a bug): {0}")]
+    Unexpected(#[from] anyhow::Error),
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct TaskError(#[from] anyhow::Error);
+
+#[derive(Debug, Error)]
+pub(crate) enum Error {
+    #[error(transparent)]
+    Task(#[from] TaskError),
+
+    #[error("workflow not found")]
     NotFound,
 
     #[error("max search depth reached")]
     MaxDepthReached,
 
-    #[error("unexpected error: {0}")]
+    #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }
 
@@ -54,7 +67,7 @@ impl Planner {
         cur_state: &System,
         cur_plan: Workflow,
         stack_len: u32,
-    ) -> Result<Workflow, Error> {
+    ) -> Result<Workflow, SearchError> {
         let task_id = task.id().to_string();
         match task {
             Task::Action(action) => {
@@ -68,19 +81,16 @@ impl Planner {
 
                 // Detect loops in the plan
                 if cur_plan.as_dag().some(|a| a.id == work_id) {
-                    return Err(Error::LoopDetected)?;
+                    return Err(SearchError::LoopDetected)?;
                 }
 
                 // Test the task
-                let Patch(changes) = action.dry_run(cur_state).map_err(|e| Error::TaskFailure {
-                    id: task_id,
-                    source: e,
-                })?;
+                let Patch(changes) = action.dry_run(cur_state).map_err(SearchError::Task)?;
 
                 // if we are at the top of the stack and no changes are introduced
                 // then assume the condition has failed
                 if stack_len == 0 && changes.is_empty() {
-                    return Err(Error::ConditionFailed)?;
+                    return Err(SearchError::ConditionFailed);
                 }
 
                 // Otherwise add the task to the plan
@@ -92,10 +102,7 @@ impl Planner {
                 Ok(Workflow { dag, pending })
             }
             Task::Method(method) => {
-                let tasks = method.expand(cur_state).map_err(|e| Error::TaskFailure {
-                    id: task_id,
-                    source: e,
-                })?;
+                let tasks = method.expand(cur_state).map_err(SearchError::Task)?;
 
                 let mut cur_state = cur_state.clone();
                 let mut cur_plan = cur_plan;
@@ -114,7 +121,7 @@ impl Planner {
                         // The user may have not have put the child task in the
                         // domain, or failed to account for all args in the path
                         // in which case we need to return an error
-                        .map_err(Error::ExpansionFailed)?;
+                        .map_err(SearchError::CannotExpand)?;
 
                     let task = t.with_path(path);
                     let Workflow { dag, pending } =
@@ -130,7 +137,7 @@ impl Planner {
                 // if we are at the top of the stack and no changes are introduced
                 // then assume the condition has failed
                 if stack_len == 0 && cur_plan.pending.is_empty() {
-                    return Err(Error::ConditionFailed)?;
+                    return Err(SearchError::ConditionFailed)?;
                 }
                 Span::current().record("selected", true);
                 Ok(cur_plan)
@@ -189,6 +196,7 @@ impl Planner {
                         // If the job is applicable to the operation
                         if op.matches(job.operation()) || job.operation() != &Operation::Any {
                             let task = job.clone_task(context.clone());
+                            let task_id = task.id().to_string();
 
                             // apply the task to the state, if it progresses the plan, then select
                             // it and put the new state with the new plan on the stack
@@ -217,18 +225,18 @@ impl Planner {
                                     stack.push((new_sys, new_plan, depth + 1));
                                 }
                                 // Ignore harmless errors
-                                Err(Error::TaskFailure {
-                                    source: task::Error::ConditionFailed,
-                                    ..
-                                }) => {}
-                                Err(Error::LoopDetected) => {}
-                                Err(Error::ConditionFailed) => {}
-                                Err(Error::NotFound) => {}
+                                Err(SearchError::Task(task::Error::ConditionFailed)) => {}
+                                Err(SearchError::LoopDetected) => {}
+                                Err(SearchError::ConditionFailed) => {}
+                                // this is probably a bug so we terminate the search
+                                Err(SearchError::Unexpected(err)) => {
+                                    return Err(Error::Unexpected(err))
+                                }
                                 Err(err) => {
                                     if cfg!(debug_assertions) {
-                                        return Err(err);
+                                        return Err(TaskError(anyhow!(err)))?;
                                     }
-                                    warn!(parent: &parent_span, "{} ... ignoring", err);
+                                    warn!(parent: &parent_span, "task {} failed during planning: {} ... ignoring", task_id, err);
                                 }
                             }
                         }

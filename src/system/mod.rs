@@ -7,18 +7,9 @@ use std::{
     ops::Deref,
     sync::Arc,
 };
-use thiserror::Error;
 
 mod from_system;
 pub(crate) use from_system::*;
-
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct SerializationError(#[from] serde_json::error::Error);
-
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct PatchError(#[from] json_patch::PatchError);
 
 #[derive(Clone)]
 pub struct Resources(HashMap<TypeId, Arc<dyn Any + Send + Sync>>);
@@ -74,7 +65,7 @@ impl std::fmt::Debug for System {
 }
 
 impl System {
-    pub fn try_from<S: Serialize>(state: S) -> Result<Self, SerializationError> {
+    pub fn try_from<S: Serialize>(state: S) -> Result<Self, serde_json::Error> {
         let state = serde_json::to_value(state)?;
         Ok(Self {
             state,
@@ -90,12 +81,12 @@ impl System {
         &self.state
     }
 
-    pub(crate) fn patch(&mut self, changes: Patch) -> Result<(), PatchError> {
+    pub(crate) fn patch(&mut self, changes: Patch) -> Result<(), json_patch::PatchError> {
         patch(&mut self.state, &changes)?;
         Ok(())
     }
 
-    pub fn state<S: DeserializeOwned>(&self) -> Result<S, SerializationError> {
+    pub fn state<S: DeserializeOwned>(&self) -> Result<S, serde_json::Error> {
         let s = serde_json::from_value(self.state.clone())?;
         Ok(s)
     }

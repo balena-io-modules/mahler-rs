@@ -11,10 +11,12 @@ use tracing::instrument;
 use crate::system::System;
 use crate::task::{Action, Error as TaskError};
 
+mod aggregate_error;
 mod channel;
 mod dag;
 mod interrupt;
 
+pub use aggregate_error::*;
 pub(crate) use channel::*;
 pub use dag::*;
 pub use interrupt::*;

@@ -1,11 +1,10 @@
 use async_trait::async_trait;
-use std::fmt::{self, Display};
+use std::fmt;
 use std::ops::Add;
 use std::sync::{Arc, RwLock};
-use thiserror::Error;
 
 use super::channel::Sender;
-use super::Interrupt;
+use super::{AggregateError, Interrupt};
 
 type Link<T> = Option<Arc<RwLock<Node<T>>>>;
 
@@ -576,24 +575,9 @@ macro_rules! dag {
     };
 }
 
-pub enum ExecutionStatus {
+pub(crate) enum ExecutionStatus {
     Completed,
     Interrupted,
-}
-
-#[derive(Error, Debug)]
-pub struct AggregateError<E>(#[from] pub Vec<E>);
-
-impl<E> Display for AggregateError<E>
-where
-    E: Display,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for e in &self.0 {
-            writeln!(f, "- {}", e)?;
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -637,6 +621,7 @@ where
             // XXX: this assumes tasks are cancel-safe which might be a source
             // of problems in the future
             // See: https://docs.rs/tokio/latest/tokio/macro.select.html#cancellation-safety
+            // alternatively we might want to let tasks check the interrupt directly?
             tokio::select! {
                 _ = interrupt.wait() => {
                     Err(InnerError::Interrupted)
