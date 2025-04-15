@@ -1,108 +1,11 @@
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
-use super::{Ready, Uninitialized, Worker};
+use super::{Ready, Worker};
 use crate::planner::Error as PlannerError;
 use crate::system::System;
 use crate::task;
 use crate::{task::Task, workflow::Workflow};
-
-impl<T> Worker<T, Uninitialized> {
-    async fn run_task_with_system(
-        &self,
-        task: Task,
-        system: &mut System,
-    ) -> Result<(), task::Error> {
-        let path = self
-            .inner
-            .domain
-            .find_path_for_job(task.id(), &task.context().args)
-            .expect("could not find path for task");
-
-        let task = task.with_path(path);
-        match &task {
-            Task::Action(action) => {
-                let changes = action.run(system).await?;
-                system
-                    .patch(changes)
-                    .expect("failed to patch the system state");
-            }
-            Task::Method(method) => {
-                let tasks = method.expand(system)?;
-                for mut task in tasks {
-                    // Propagate the parent args to the child task
-                    for (k, v) in method.context().args.iter() {
-                        task = task.with_arg(k, v)
-                    }
-                    Box::pin(self.run_task_with_system(task, system)).await?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Test a task within the context of the worker domain
-    ///
-    /// This function is only meant for testing and is not available
-    /// if debug_assertions is disabled.
-    ///
-    /// # Example
-    /// ```rust
-    /// use std::time::Duration;
-    /// use tokio::time::sleep;
-    ///
-    /// use gustav::task::{self, prelude::*};
-    /// use gustav::extract::{View, Target};
-    /// use gustav::worker::Worker;
-    ///
-    /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
-    ///    if *counter < tgt {
-    ///        // Modify the counter if we are below target
-    ///        *counter += 1;
-    ///    }
-    ///
-    ///    // Return the updated counter
-    ///    with_io(counter, |counter| async {
-    ///        sleep(Duration::from_millis(10)).await;
-    ///        Ok(counter)
-    ///    })
-    /// }
-    ///
-    /// // Setup the worker domain and resources
-    /// let worker = Worker::new().job("", update(plus_one));
-    ///
-    /// # tokio_test::block_on(async {
-    /// // Run task emulating a target of 2 and initial state of 0
-    /// assert_eq!(worker.run_task(plus_one.with_target(2), 0).await, Ok(1));
-    ///
-    /// // Run task emulating a target of 2 and initial state of 2 (no changes)
-    /// assert_eq!(worker.run_task(plus_one.with_target(2), 2).await, Ok(2));
-    /// # })
-    /// ```
-    pub async fn run_task(&self, task: Task, state: T) -> Result<T, task::Error>
-    where
-        T: Serialize + DeserializeOwned,
-    {
-        // Create a system from the internal
-        let mut system = System::try_from(state)
-            .expect("failed to serialize input state")
-            .with_resources(self.inner.resources.clone());
-
-        let path = self
-            .inner
-            .domain
-            .find_path_for_job(task.id(), &task.context().args)
-            .expect("could not find path for task");
-
-        let task = task.with_path(path);
-        self.run_task_with_system(task, &mut system).await?;
-
-        let new_state = system.state().expect("failed to serialize output state");
-
-        Ok(new_state)
-    }
-}
 
 #[derive(Debug, Error)]
 #[error("workflow not found")]
@@ -163,6 +66,100 @@ impl<T> Worker<T, Ready> {
             Err(e) => panic!("unexpected planning error: {e}"),
         }
     }
+
+    async fn run_task_with_system(
+        &self,
+        task: Task,
+        system: &mut System,
+    ) -> Result<(), task::Error> {
+        let path = self
+            .inner
+            .planner
+            .domain()
+            .find_path_for_job(task.id(), &task.context().args)
+            .expect("could not find path for task");
+
+        let task = task.with_path(path);
+        match &task {
+            Task::Action(action) => {
+                let changes = action.run(system).await?;
+                system
+                    .patch(changes)
+                    .expect("failed to patch the system state");
+            }
+            Task::Method(method) => {
+                let tasks = method.expand(system)?;
+                for mut task in tasks {
+                    // Propagate the parent args to the child task
+                    for (k, v) in method.context().args.iter() {
+                        task = task.with_arg(k, v)
+                    }
+                    Box::pin(self.run_task_with_system(task, system)).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Test a task within the context of the worker domain
+    ///
+    /// This function is only meant for testing and is not available
+    /// if debug_assertions is disabled.
+    ///
+    /// # Example
+    /// ```rust
+    /// use std::time::Duration;
+    /// use tokio::time::sleep;
+    ///
+    /// use gustav::task::{self, prelude::*};
+    /// use gustav::extract::{View, Target};
+    /// use gustav::worker::Worker;
+    ///
+    /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
+    ///    if *counter < tgt {
+    ///        // Modify the counter if we are below target
+    ///        *counter += 1;
+    ///    }
+    ///
+    ///    // Return the updated counter
+    ///    with_io(counter, |counter| async {
+    ///        sleep(Duration::from_millis(10)).await;
+    ///        Ok(counter)
+    ///    })
+    /// }
+    ///
+    /// # tokio_test::block_on(async {
+    /// // Setup the worker domain and resources
+    /// let worker = Worker::new().job("", update(plus_one)).initial_state(0).unwrap();
+    ///
+    /// // Run task emulating a target of 2 and initial state of 0
+    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await, Ok(1));
+    ///
+    /// // Run task emulating a target of 2 and initial state of 2 (no changes)
+    /// let worker = Worker::new().job("", update(plus_one)).initial_state(2).unwrap();
+    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await, Ok(2));
+    /// # })
+    /// ```
+    pub async fn run_task(&self, task: Task) -> Result<T, task::Error>
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let mut system = self.inner.system.read().await.clone();
+        let path = self
+            .inner
+            .planner
+            .domain()
+            .find_path_for_job(task.id(), &task.context().args)
+            .expect("could not find path for task");
+
+        let task = task.with_path(path);
+        self.run_task_with_system(task, &mut system).await?;
+
+        let new_state = system.state().expect("failed to serialize output state");
+
+        Ok(new_state)
+    }
 }
 
 #[cfg(test)]
@@ -201,20 +198,15 @@ mod tests {
 
         let worker = Worker::new()
             .job("/{counter}", update(plus_one))
-            .job("/{counter}", update(plus_two));
+            .job("/{counter}", update(plus_two))
+            .initial_state(Counters(HashMap::from([
+                ("one".to_string(), 1),
+                ("two".to_string(), 0),
+            ])))
+            .unwrap();
 
         let task = plus_one.with_target(3).with_arg("counter", "one");
-
-        let res = worker
-            .run_task(
-                task,
-                Counters(HashMap::from([
-                    ("one".to_string(), 1),
-                    ("two".to_string(), 0),
-                ])),
-            )
-            .await
-            .unwrap();
+        let res = worker.run_task(task).await.unwrap();
 
         assert_eq!(
             res,
@@ -232,20 +224,16 @@ mod tests {
 
         let worker = Worker::new()
             .job("/{counter}", update(plus_one))
-            .job("/{counter}", update(plus_two));
+            .job("/{counter}", update(plus_two))
+            .initial_state(Counters(HashMap::from([
+                ("one".to_string(), 0),
+                ("two".to_string(), 0),
+            ])))
+            .unwrap();
 
         let task = plus_two.with_target(3).with_arg("counter", "one");
 
-        let res = worker
-            .run_task(
-                task,
-                Counters(HashMap::from([
-                    ("one".to_string(), 0),
-                    ("two".to_string(), 0),
-                ])),
-            )
-            .await
-            .unwrap();
+        let res = worker.run_task(task).await.unwrap();
 
         assert_eq!(
             res,

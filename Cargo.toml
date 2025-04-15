@@ -18,21 +18,21 @@ serde = { version = "1.0.197" }
 serde_json = "1.0.120"
 thiserror = "2"
 tokio = { version = "1.43.0", default-features = false, features = [
-  "rt",
-  "time",
   "sync",
   "macros",
 ] }
 tracing = "0.1.41"
-tokio-stream = { version = "0.1.17", features = ["sync"] }
+tokio-stream = { version = "0.1.17", default-features = false, features = [
+  "sync",
+] }
 async-trait = "0.1.88"
+futures = "0.3.31"
 
 # only required by the `logging` feature
 log = { version = "0.4.25", optional = true }
 tracing-subscriber = { version = "0.3.19", default-features = false, optional = true, features = [
   "registry",
 ] }
-futures = "0.3.31"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.19", default-features = false, features = [
@@ -44,6 +44,6 @@ tracing-subscriber = { version = "0.3.19", default-features = false, features = 
 dedent = "0.1.1"
 env_logger = "0.11.8"
 log = "0.4.25"
-tokio = { version = "1.36.0", features = ["rt", "macros", "time"] }
+tokio = { version = "1.36.0", features = ["rt", "time"] }
 pretty_assertions = "1.4.1"
 tokio-test = "0.4.4"

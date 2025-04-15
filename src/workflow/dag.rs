@@ -752,6 +752,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
         time::Instant,
     };
+    use tracing::debug;
 
     use super::*;
     use crate::workflow::channel;
@@ -1154,7 +1155,7 @@ mod tests {
 
         let exec_result = dag.execute(&input, tx, sigint).await;
         let elapsed = start.elapsed();
-        println!("Execution time: {:?}", elapsed);
+        debug!("Execution time: {:?}", elapsed);
         assert!(matches!(exec_result, Ok(ExecutionStatus::Completed)));
 
         let results = results.read().await;
