@@ -10,7 +10,7 @@ use crate::task::{Job, Operation};
 #[error(transparent)]
 pub struct PathSearchError(#[from] anyhow::Error);
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Domain {
     // The router stores a list of jobs matching a route
     router: Router<BTreeSet<Job>>,

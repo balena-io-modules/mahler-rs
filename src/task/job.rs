@@ -13,10 +13,10 @@ pub enum Operation {
     None,
 }
 
-#[derive(Debug)]
 /// Jobs are generic work definitions.
 ///
 /// They are assignable to an operation and can be given a priority
+#[derive(Debug, Clone)]
 pub struct Job {
     operation: Operation,
     task: Task,

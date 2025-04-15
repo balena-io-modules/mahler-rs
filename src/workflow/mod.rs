@@ -19,7 +19,7 @@ mod interrupt;
 pub use aggregate_error::*;
 pub(crate) use channel::*;
 pub use dag::*;
-pub use interrupt::*;
+pub(crate) use interrupt::*;
 
 #[derive(Hash)]
 struct WorkUnitId<'s> {

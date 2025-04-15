@@ -133,22 +133,31 @@ impl<T> Worker<T, Ready> {
     ///    })
     /// }
     ///
+    /// # tokio_test::block_on(async {
     /// // Setup the worker domain and resources
-    /// let worker = Worker::new().job("", update(plus_one).with_description(|| "+1")).initial_state(0).unwrap();
-    /// let workflow = worker.find_workflow(2).unwrap();
+    /// let worker = Worker::new()
+    ///                 .job("", update(plus_one).with_description(|| "+1"))
+    ///                 .initial_state(0)
+    ///                 .unwrap();
+    /// let workflow = worker.find_workflow(2).await.unwrap();
     ///
     /// // We expect a linear DAG with two tasks
     /// let expected: Dag<&str> = seq!("+1", "+1");
     /// assert_eq!(workflow.to_string(), expected.to_string());
+    /// # })
     /// ```
-    pub fn find_workflow<S>(&self, tgt: S) -> Result<Workflow, NotFound>
+    pub async fn find_workflow<S>(&self, tgt: S) -> Result<Workflow, NotFound>
     where
         S: Serialize,
     {
-        let cur = &self.inner.system;
+        let cur = {
+            let sys = self.inner.system.read().await;
+            sys.clone()
+        };
+
         let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
-        match self.inner.planner.find_workflow(cur, &tgt) {
+        match self.inner.planner.find_workflow(&cur, &tgt) {
             Ok(workflow) => Ok(workflow),
             Err(PlannerError::NotFound) => Err(NotFound),
             Err(e) => panic!("unexpected planning error: {e}"),
@@ -247,8 +256,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn it_allows_searching_for_workflow() {
+    #[tokio::test]
+    async fn it_allows_searching_for_workflow() {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
         struct Counters(HashMap<String, i32>);
 
@@ -266,6 +275,7 @@ mod tests {
                 ("one".to_string(), 2),
                 ("two".to_string(), 1),
             ])))
+            .await
             .unwrap();
 
         // We expect a linear DAG with three tasks

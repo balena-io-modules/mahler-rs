@@ -5,7 +5,7 @@ use std::sync::{
 use tokio::sync::Notify;
 
 #[derive(Clone)]
-pub struct Interrupt {
+pub(crate) struct Interrupt {
     flag: Arc<AtomicBool>,
     notify: Arc<Notify>,
 }

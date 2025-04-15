@@ -54,11 +54,11 @@ async fn test_worker() {
             ("a".to_string(), 2),
             ("b".to_string(), 0),
         ])))
+        .await
         .unwrap();
 
-    let worker = worker.wait(None).await.unwrap_idle();
-    let state = worker.state().unwrap();
-    assert_eq!(worker.status(), &SeekStatus::Success);
+    let state = worker.state().await.unwrap();
+    assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
     assert_eq!(
         state,
         Counters(HashMap::from([("a".to_string(), 2), ("b".to_string(), 0),]))
