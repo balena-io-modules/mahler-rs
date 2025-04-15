@@ -345,7 +345,7 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     #[derive(Error, Debug)]
-    #[error("and error happened")]
+    #[error("some error happened")]
     struct SomeError;
 
     fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
@@ -488,10 +488,7 @@ mod tests {
         if let Task::Action(action) = task {
             let res = action.run(&system).await;
             assert!(res.is_err());
-            assert_eq!(
-                res.unwrap_err().to_string(),
-                "task runtime error: and error happened"
-            );
+            assert_eq!(res.unwrap_err().to_string(), "some error happened");
         } else {
             panic!("Expected an Action task");
         }

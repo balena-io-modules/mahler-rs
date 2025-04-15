@@ -32,7 +32,9 @@ enum SearchError {
     #[error("loop detected")]
     LoopDetected,
 
-    #[error("unexpected error (this is probably a bug): {0}")]
+    // this is probably a bug if this error
+    // happens
+    #[error("unexpected error: {0}")]
     Unexpected(#[from] anyhow::Error),
 }
 

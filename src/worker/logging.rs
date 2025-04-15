@@ -94,17 +94,19 @@ where
                                     log!(target: meta.target(), Level::Info, "failed to apply target state")
                                 }
                                 "interrupted" => {
-                                    log!(target: meta.target(), Level::Warn, "workflow interrupted by user request")
+                                    log!(target: meta.target(), Level::Warn, "target state apply interrupted by user request")
                                 }
                                 "aborted" => {
                                     if let Some(err) = map.get("error") {
-                                        log!(target: meta.target(), Level::Error, "workflow aborted due to fatal error: {err}")
+                                        log!(target: meta.target(), Level::Warn, "target state apply interrupted due to error: {err}")
                                     } else {
-                                        log!(target: meta.target(), Level::Error, "workflow aborted due to fatal error")
+                                        log!(target: meta.target(), Level::Warn, "target state apply interrupted due to error")
                                     }
                                 }
                                 _ => {}
                             }
+                        } else if let Some(err) = map.get("error") {
+                            log!(target: meta.target(), Level::Error, "target state apply failed: {err}");
                         }
                     }
                 }
@@ -136,7 +138,7 @@ where
                                 log!(target: meta.target(), Level::Warn, "{}: failed - {}", task, error)
                             }
                             (Some(task), None) => {
-                                log!(target: meta.target(), Level::Info, "{}: found", task)
+                                log!(target: meta.target(), Level::Info, "{}: success", task)
                             }
                             _ => {}
                         }

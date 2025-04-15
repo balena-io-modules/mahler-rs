@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use tokio::{select, sync::RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
-use tracing::{debug, error, field, span, Instrument, Level, Span};
+use tracing::{debug, error, field, instrument, span, Instrument, Level, Span};
 
 #[cfg(feature = "logging")]
 mod logging;
@@ -44,11 +44,11 @@ pub mod prelude {
 pub struct SerializationError(#[from] serde_json::Error);
 
 #[derive(Debug, Error)]
-#[error("panicked: {0}")]
+#[error(transparent)]
 pub struct Panicked(#[from] tokio::task::JoinError);
 
 #[derive(Debug, Error)]
-#[error("unexpected error (this might be a bug): {0}")]
+#[error("unexpected error: {0}")]
 pub struct UnexpectedError(#[from] anyhow::Error);
 
 #[derive(Debug, Error)]
@@ -227,7 +227,7 @@ impl<T> Worker<T, Uninitialized> {
 
         // Patch error signal (notify)
         let notify = Arc::new(Notify::new());
-        let patches = notify.clone();
+        let writer_closed = notify.clone();
 
         // Broadcast channel for state updates
         let (updates, _) = broadcast::channel(1);
@@ -268,7 +268,7 @@ impl<T> Worker<T, Uninitialized> {
             system,
             updates,
             patches: tx,
-            writer_closed: patches,
+            writer_closed,
             interrupt: AutoInterrupt::default(),
         }))
     }
@@ -354,10 +354,12 @@ impl<T> Worker<T, Ready> {
         follow_worker(self.inner.updates.clone(), Arc::clone(&self.inner.system))
     }
 
+    #[instrument(skip_all, fields(return=field::Empty), err)]
     pub async fn seek_target(self, tgt: T) -> Result<Worker<T, Idle>, FatalError>
     where
         T: Serialize + DeserializeOwned,
     {
+        let cur_span = Span::current();
         let tgt = serde_json::to_value(tgt).map_err(SerializationError)?;
 
         let Ready {
@@ -425,7 +427,6 @@ impl<T> Worker<T, Ready> {
         }
 
         let err_rx = writer_closed.clone();
-        let target = tgt.clone();
 
         // Main seek_target planning and execution loop
         let handle: JoinHandle<Result<(Planner, SeekStatus), FatalError>> = {
@@ -434,8 +435,6 @@ impl<T> Worker<T, Ready> {
             let sys_reader = Arc::clone(&system);
             let changes = patches.clone();
             tokio::spawn(async move {
-                let cur_span = Span::current();
-
                 loop {
                     select! {
                         biased;
@@ -465,7 +464,6 @@ impl<T> Worker<T, Ready> {
                                 Err(InternalError::Serialization(err)) => {
                                     // There is an issue with the type definition
                                     // best to abort in this case
-                                    cur_span.record("return", "aborted");
                                     return Err(SerializationError(err))?;
                                 }
                                 Err(InternalError::Planning(err)) => {
@@ -479,14 +477,14 @@ impl<T> Worker<T, Ready> {
                                     };
                                 }
                                 Err(InternalError::Runtime(err)) => {
+                                    cur_span.record("return", "aborted");
                                     return Ok((planner, SeekStatus::Aborted(RecoverableError::Runtime(err))));
                                 }
                             }
                         }
                     }
                 }
-            }
-            .instrument(span!(Level::INFO, "seek_target", target = %target, return = field::Empty)))
+            })
         };
 
         let (planner, status) = match handle.await {
