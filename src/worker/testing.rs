@@ -11,7 +11,7 @@ use crate::{task::Task, workflow::Workflow};
 #[error("workflow not found")]
 pub struct NotFound;
 
-impl<T> Worker<T, Ready> {
+impl<O, I> Worker<O, Ready, I> {
     /// Find a workflow within the context of the worker
     ///
     /// This function is only meant for testing and is not available
@@ -49,9 +49,9 @@ impl<T> Worker<T, Ready> {
     /// assert_eq!(workflow.to_string(), expected.to_string());
     /// # })
     /// ```
-    pub async fn find_workflow<S>(&self, tgt: S) -> Result<Workflow, NotFound>
+    pub async fn find_workflow(&self, tgt: I) -> Result<Workflow, NotFound>
     where
-        S: Serialize,
+        I: Serialize,
     {
         let cur = {
             let sys = self.inner.system.read().await;
@@ -141,9 +141,9 @@ impl<T> Worker<T, Ready> {
     /// assert_eq!(worker.run_task(plus_one.with_target(2)).await, Ok(2));
     /// # })
     /// ```
-    pub async fn run_task(&self, task: Task) -> Result<T, task::Error>
+    pub async fn run_task(&self, task: Task) -> Result<O, task::Error>
     where
-        T: Serialize + DeserializeOwned,
+        O: Serialize + DeserializeOwned,
     {
         let mut system = self.inner.system.read().await.clone();
         let path = self

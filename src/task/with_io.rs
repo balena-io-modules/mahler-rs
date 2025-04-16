@@ -16,7 +16,7 @@ where
     Effect::of(pure).with_io(io)
 }
 
-/// Convenience aliases for the most common return type from effectful
+/// Convenience aliases for the most common return types from effectful
 /// tasks
 pub type IO<T, E = Infallible> = Effect<View<T>, E>;
 
