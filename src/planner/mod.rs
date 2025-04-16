@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::Patch;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 use tracing::{error, field, instrument, trace_span, warn, Level, Span};
@@ -74,16 +76,9 @@ impl Planner {
         cur_plan: Workflow,
         stack_len: u32,
     ) -> Result<Workflow, SearchError> {
-        let task_id = task.id().to_string();
         match task {
             Task::Action(action) => {
-                let work_id = WorkUnit::new_id(&action, cur_state.root()).with_context(|| {
-                    format!(
-                        "failed to resolve path {} for task {}",
-                        action.context().path,
-                        task_id
-                    )
-                })?;
+                let work_id = WorkUnit::new_id(&action, cur_state.root());
 
                 // Detect loops in the plan
                 if cur_plan.as_dag().some(|a| a.id == work_id) {
@@ -152,7 +147,10 @@ impl Planner {
     }
 
     #[instrument(skip_all, fields(ini=%system.root(), tgt=%tgt), err, ret(Display))]
-    pub(crate) fn find_workflow(&self, system: &System, tgt: &Value) -> Result<Workflow, Error> {
+    pub(crate) fn find_workflow<T>(&self, system: &System, tgt: &Value) -> Result<Workflow, Error>
+    where
+        T: Serialize + DeserializeOwned,
+    {
         // Store the initial state and an empty plan on the stack
         let mut stack = vec![(system.clone(), Workflow::default(), 0)];
         let parent_span = Span::current();
@@ -167,7 +165,17 @@ impl Planner {
                 return Err(Error::MaxDepthReached)?;
             }
 
-            let distance = Distance::new(&cur_state, tgt);
+            // There may be fields in internal state that we don't want
+            // to use when comparing with the target. For this reason, we
+            // deserialize the state into the input type T and then re-serialize
+            // to Value it before comparing
+            let cur = cur_state
+                .state::<T>()
+                .and_then(System::try_from)
+                // TODO: return seriaization error
+                .with_context(|| "failed to serialize state")?;
+
+            let distance = Distance::new(&cur, tgt);
 
             // we reached the target
             if distance.is_empty() {
@@ -176,8 +184,7 @@ impl Planner {
             }
 
             let stack_len = stack.len();
-            let next_span =
-                trace_span!("find_next", cur = %&cur_state.root(), found = field::Empty);
+            let next_span = trace_span!("find_next", cur = %&cur_state.root(), ops = %distance, found = field::Empty);
             let _enter = next_span.enter();
             for op in distance.iter() {
                 // Find applicable tasks
@@ -221,7 +228,7 @@ impl Planner {
                                     // Update the state and the workflow
                                     new_sys
                                         .patch(Patch(pending))
-                                        .expect("failed to patch system state");
+                                        .with_context(|| "failed to patch system state")?;
                                     let new_plan = Workflow {
                                         dag,
                                         pending: vec![],
@@ -310,14 +317,14 @@ mod tests {
 
     pub fn find_plan<S>(planner: Planner, cur: S, tgt: S) -> Result<Workflow, super::Error>
     where
-        S: Serialize,
+        S: Serialize + DeserializeOwned,
     {
         let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
         let system =
             crate::system::System::try_from(cur).expect("failed to serialize current state");
 
-        let res = planner.find_workflow(&system, &tgt)?;
+        let res = planner.find_workflow::<S>(&system, &tgt)?;
         Ok(res)
     }
 
@@ -370,7 +377,7 @@ mod tests {
 
     #[test]
     fn it_calculates_a_linear_workflow_on_a_complex_state() {
-        #[derive(Serialize)]
+        #[derive(Serialize, Deserialize)]
         struct MyState {
             counters: HashMap<String, i32>,
         }
@@ -403,7 +410,7 @@ mod tests {
 
     #[test]
     fn it_calculates_a_linear_workflow_on_a_complex_state_with_compound_tasks() {
-        #[derive(Serialize)]
+        #[derive(Serialize, Deserialize)]
         struct MyState {
             counters: HashMap<String, i32>,
         }
@@ -434,7 +441,7 @@ mod tests {
 
     #[test]
     fn it_calculates_a_linear_workflow_on_a_complex_state_with_deep_compound_tasks() {
-        #[derive(Serialize)]
+        #[derive(Serialize, Deserialize)]
         struct MyState {
             counters: HashMap<String, i32>,
         }

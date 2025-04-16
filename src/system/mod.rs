@@ -73,10 +73,6 @@ impl System {
         })
     }
 
-    pub(crate) fn resources(&self) -> &Resources {
-        &self.resources
-    }
-
     pub fn root(&self) -> &Value {
         &self.state
     }

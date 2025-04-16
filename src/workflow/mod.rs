@@ -57,12 +57,12 @@ impl WorkUnit {
         Self { id, action, output }
     }
 
-    pub fn new_id(task: &Action, state: &Value) -> Result<u64, jsonptr::resolve::ResolveError> {
+    pub fn new_id(task: &Action, state: &Value) -> u64 {
         let pointer = task.context().path.as_ref();
 
         // Resolve the value that will be modified by
-        // the task
-        let state = pointer.resolve(state)?;
+        // the task. If the value does not exist yet, we use Null
+        let state = pointer.resolve(state).unwrap_or(&Value::Null);
 
         let action_id = WorkUnitId {
             task_id: String::from(task.id()),
@@ -77,7 +77,7 @@ impl WorkUnit {
         action_id.hash(&mut hasher);
 
         // Retrieve the hash value
-        Ok(hasher.finish())
+        hasher.finish()
     }
 }
 

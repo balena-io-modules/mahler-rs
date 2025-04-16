@@ -51,7 +51,7 @@ impl<O, I> Worker<O, Ready, I> {
     /// ```
     pub async fn find_workflow(&self, tgt: I) -> Result<Workflow, NotFound>
     where
-        I: Serialize,
+        I: Serialize + DeserializeOwned,
     {
         let cur = {
             let sys = self.inner.system.read().await;
@@ -60,7 +60,7 @@ impl<O, I> Worker<O, Ready, I> {
 
         let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
-        match self.inner.planner.find_workflow(&cur, &tgt) {
+        match self.inner.planner.find_workflow::<I>(&cur, &tgt) {
             Ok(workflow) => Ok(workflow),
             Err(PlannerError::NotFound) => Err(NotFound),
             Err(e) => panic!("unexpected planning error: {e}"),
@@ -131,13 +131,13 @@ impl<O, I> Worker<O, Ready, I> {
     ///
     /// # tokio_test::block_on(async {
     /// // Setup the worker domain and resources
-    /// let worker = Worker::new().job("", update(plus_one)).initial_state(0).unwrap();
+    /// let worker = Worker::new().job("", update(plus_one)).initial_state::<i32>(0).unwrap();
     ///
     /// // Run task emulating a target of 2 and initial state of 0
     /// assert_eq!(worker.run_task(plus_one.with_target(2)).await, Ok(1));
     ///
     /// // Run task emulating a target of 2 and initial state of 2 (no changes)
-    /// let worker = Worker::new().job("", update(plus_one)).initial_state(2).unwrap();
+    /// let worker = Worker::new().job("", update(plus_one)).initial_state::<i32>(2).unwrap();
     /// assert_eq!(worker.run_task(plus_one.with_target(2)).await, Ok(2));
     /// # })
     /// ```
@@ -199,7 +199,7 @@ mod tests {
         let worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .job("/{counter}", update(plus_two))
-            .initial_state(Counters(HashMap::from([
+            .initial_state::<Counters>(Counters(HashMap::from([
                 ("one".to_string(), 1),
                 ("two".to_string(), 0),
             ])))
@@ -225,7 +225,7 @@ mod tests {
         let worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .job("/{counter}", update(plus_two))
-            .initial_state(Counters(HashMap::from([
+            .initial_state::<Counters>(Counters(HashMap::from([
                 ("one".to_string(), 0),
                 ("two".to_string(), 0),
             ])))

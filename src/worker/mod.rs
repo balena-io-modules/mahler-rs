@@ -171,8 +171,14 @@ impl<O, S: WorkerState, I> Worker<O, S, I> {
 
 // -- Worker initialization
 
-impl<O, I> Default for Worker<O, Uninitialized, I> {
+impl<O> Default for Worker<O, Uninitialized> {
     fn default() -> Self {
+        Worker::new()
+    }
+}
+
+impl<O> Worker<O, Uninitialized> {
+    pub fn new() -> Self {
         Worker::from_inner(Uninitialized {
             domain: Domain::new(),
             resources: Resources::new(),
@@ -180,11 +186,7 @@ impl<O, I> Default for Worker<O, Uninitialized, I> {
     }
 }
 
-impl<O, I> Worker<O, Uninitialized, I> {
-    pub fn new() -> Self {
-        Worker::default()
-    }
-
+impl<O> Worker<O, Uninitialized> {
     /// Add a job to the worker domain
     pub fn job(mut self, route: &'static str, job: Job) -> Self {
         self.inner.domain = self.inner.domain.job(route, job);
@@ -209,9 +211,9 @@ impl<O, I> Worker<O, Uninitialized, I> {
     /// Provide the initial worker state
     ///
     /// This moves the state of the worker to `ready`
-    pub fn initial_state(self, state: O) -> Result<Worker<O, Ready, I>, SerializationError>
+    pub fn initial_state<I>(self, state: O) -> Result<Worker<O, Ready, I>, SerializationError>
     where
-        O: Serialize + DeserializeOwned,
+        O: Serialize,
     {
         let Uninitialized {
             domain,
@@ -393,7 +395,6 @@ impl<O, I> Worker<O, Ready, I> {
         }
 
         enum InternalError {
-            Serialization(serde_json::Error),
             Runtime(AggregateError<TaskError>),
             Planning(PlannerError),
         }
@@ -405,24 +406,12 @@ impl<O, I> Worker<O, Ready, I> {
             channel: &Sender<Patch>,
             sigint: &Interrupt,
         ) -> Result<InternalResult, InternalError> {
-            let system = {
+            let workflow = {
                 let system = sys.read().await;
-
-                // Fields in the type may be configured with skip_serialize,
-                // or there may be fields in internal state that we don't want
-                // to use when comparing with the target. For this reason, we
-                // deserialize the state into the input type I and then re-serialize
-                // to Value it before the conversion%
-                system
-                    .state::<I>()
-                    .and_then(|s| System::try_from(s))
-                    .map(|s| s.with_resources(system.resources().clone()))
-                    .map_err(InternalError::Serialization)?
+                planner
+                    .find_workflow::<I>(&system, tgt)
+                    .map_err(InternalError::Planning)?
             };
-
-            let workflow = planner
-                .find_workflow(&system, tgt)
-                .map_err(InternalError::Planning)?;
 
             if workflow.is_empty() {
                 return Ok(InternalResult::TargetReached);
@@ -474,11 +463,6 @@ impl<O, I> Worker<O, Ready, I> {
                                 Ok(InternalResult::Interrupted) => {
                                     cur_span.record("return", "interrupted");
                                     return Ok((planner, SeekStatus::Interrupted));
-                                }
-                                Err(InternalError::Serialization(err)) => {
-                                    // There is an issue with the type definition
-                                    // best to abort in this case
-                                    return Err(SerializationError(err))?;
                                 }
                                 Err(InternalError::Planning(err)) => {
                                     return match err {
