@@ -475,6 +475,13 @@ impl<O, I> Worker<O, Ready, I> {
                                     };
                                 }
                                 Err(InternalError::Runtime(err)) => {
+                                    if err.iter().all(|e| matches!(e, TaskError::ConditionFailed)) {
+                                        // Re-plan if the only type of error is condition failed as
+                                        // the state may have changed outside the worker
+                                        continue;
+                                    }
+                                    // TODO: maybe terminate the search if any UnexpectedError
+                                    // happen while running the workflow
                                     cur_span.record("return", "aborted");
                                     return Ok((planner, SeekStatus::Aborted(RecoverableError::Runtime(err))));
                                 }

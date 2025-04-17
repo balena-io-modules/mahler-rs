@@ -1,4 +1,7 @@
-use std::fmt::{self, Display};
+use std::{
+    fmt::{self, Display},
+    ops::Deref,
+};
 use thiserror::Error;
 
 /// A workflow error aggregating multiple errors
@@ -16,5 +19,13 @@ where
             writeln!(f, "- {}", e)?;
         }
         Ok(())
+    }
+}
+
+impl<E> Deref for AggregateError<E> {
+    type Target = Vec<E>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }

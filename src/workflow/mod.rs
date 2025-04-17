@@ -93,7 +93,7 @@ impl Task for WorkUnit {
     type Changes = Patch;
     type Error = TaskError;
 
-    #[instrument(name="run_task", skip_all, fields(task=%self.action, state=%system.root()), err)]
+    #[instrument(name="run_task", skip_all, fields(id=%self.action.id(), task=%self.action, state=%system.root()), err)]
     async fn run(&self, system: &System) -> Result<Patch, TaskError> {
         // dry-run the task to test that conditions hold
         // before executing the action should not really fail at this point

@@ -42,11 +42,18 @@ impl From<Vec<Task>> for Effect<Vec<Task>, Error> {
     }
 }
 
-// Allow tasks to return a task slice
+// Allow methods to return a task slice
 // and this will convert them into an effect
 impl<const N: usize> From<[Task; N]> for Effect<Vec<Task>, Error> {
     fn from(slice: [Task; N]) -> Effect<Vec<Task>, Error> {
         Effect::of(slice.into())
+    }
+}
+
+// Allow methods to return a single task
+impl From<Task> for Effect<Vec<Task>, Error> {
+    fn from(task: Task) -> Effect<Vec<Task>, Error> {
+        Effect::of(vec![task])
     }
 }
 

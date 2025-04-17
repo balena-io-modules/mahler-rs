@@ -142,9 +142,6 @@ pub struct Image {
     pub id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct TargetImage {}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Project {
     /// Project name
@@ -172,7 +169,7 @@ pub struct TargetProject {
     /// Project name
     pub name: String,
 
-    /// List of project services
+    /// List of target services
     pub services: HashMap<String, TargetService>,
 }
 
@@ -273,6 +270,8 @@ fn install_service(
     let tgt_img = tgt.image.clone();
     let local_img = project.images.get(tgt_img.as_str());
 
+    // If the image has already been downloaded then
+    // simulate the service install
     if local_img.is_some() {
         svc.assign(Service {
             // The status should be 'Created' after install
@@ -406,6 +405,8 @@ mod tests {
             .unwrap_or(());
     }
 
+    const PROJECT_NAME: &str = "my-project";
+
     async fn after() {
         let docker = Docker::connect_with_local_defaults().unwrap();
         let containers = docker
@@ -420,7 +421,7 @@ mod tests {
                     .filter(|c| {
                         c.names
                             .iter()
-                            .any(|names| names.iter().any(|name| name.starts_with("/my-project_")))
+                            .any(|names| names.iter().any(|name| name.starts_with(PROJECT_NAME)))
                     })
                     .collect()
             })
@@ -445,7 +446,7 @@ mod tests {
     async fn test_fetch_image() {
         before();
 
-        let worker = create_worker(Project::new("my_project"));
+        let worker = create_worker(Project::new(PROJECT_NAME));
         let state = worker
             .run_task(fetch_image.with_arg("image_name", "alpine:3.18"))
             .await
@@ -464,9 +465,9 @@ mod tests {
     async fn test_create_container() {
         before();
 
-        let worker = create_worker(Project::new("my_project"));
+        let worker = create_worker(Project::new(PROJECT_NAME));
         let target = serde_json::from_value::<TargetProject>(json!({
-            "name": "my_project",
+            "name": "my-project",
             "services": {
                 "my-service": {
                     "image": "alpine:3.18",
@@ -490,7 +491,7 @@ mod tests {
         assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
 
         let container = docker
-            .inspect_container("my_project_my-service", None)
+            .inspect_container(format!("{}_my-service", PROJECT_NAME).as_str(), None)
             .await
             .unwrap();
         assert_eq!(container.id, state.services.get("my-service").unwrap().id);

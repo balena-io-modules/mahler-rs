@@ -86,15 +86,18 @@ impl Domain {
 
     // This allows to find the path that a task relates to from the
     // job it belongs to and the arguments given by the user as part
-    // of the context.
+    // of the context. It will also remove any unused args from the
+    // PathArgs passed as argument. This is not a great interface, but
+    // it allows to parse only once
     pub(crate) fn find_path_for_job(
         &self,
         job_id: &str,
-        args: &PathArgs,
+        args: &mut PathArgs,
     ) -> Result<String, PathSearchError> {
         if let Some(route) = self.index.get(job_id) {
             let mut route = route.clone();
             let mut replacements = Vec::new();
+            let mut used_keys = Vec::new();
 
             // Step 1: Replace `{param}` and `{*param}` placeholders
             for (k, v) in args.iter() {
@@ -102,16 +105,19 @@ impl Domain {
                 let wildcard_param = format!("{{*{}}}", k);
                 let escaped_param = format!("{{{{{}}}}}", k);
 
-                // Collect replacements
-                replacements.push((param, v.clone()));
-                replacements.push((wildcard_param, v.clone()));
-
-                // Temporarily replace escaped parameters with a placeholder
+                // Replace escaped parameters with a temp placeholder, but do not mark as used
                 let placeholder = format!("__ESCAPED_{}__", k);
                 route = route.replace(&escaped_param, &placeholder);
+
+                // Only mark as used if actual replacement occurs
+                if route.contains(&param) || route.contains(&wildcard_param) {
+                    used_keys.push(k.clone());
+                    replacements.push((param, v.clone()));
+                    replacements.push((wildcard_param, v.clone()));
+                }
             }
 
-            // Apply `{param}` and `{*param}` replacements
+            // Apply replacements
             for (param, value) in replacements {
                 route = route.replace(&param, &value);
             }
@@ -123,16 +129,13 @@ impl Domain {
 
             while let Some(c) = chars.next() {
                 if c == '{' && chars.peek() == Some(&'{') {
-                    // Handle escaped placeholders `{{param}}`
                     chars.next(); // Skip second '{'
                     final_route.push('{');
                 } else if c == '}' && chars.peek() == Some(&'}') {
                     chars.next(); // Skip second '}'
                     final_route.push('}');
                 } else if c == '{' {
-                    // Detect `{param}` placeholders
                     let mut placeholder = String::from("{");
-
                     while let Some(&next) = chars.peek() {
                         placeholder.push(next);
                         chars.next();
@@ -141,7 +144,6 @@ impl Domain {
                         }
                     }
 
-                    // If still contains `{param}`, add to missing list
                     if placeholder.ends_with('}') {
                         missing_args.push(placeholder.clone());
                     }
@@ -152,7 +154,6 @@ impl Domain {
                 }
             }
 
-            // If there are missing placeholders, return an error
             if !missing_args.is_empty() {
                 return Err(anyhow!(
                     "missing arguments for task {job_id}: {:?}",
@@ -160,12 +161,15 @@ impl Domain {
                 ))?;
             }
 
-            // Restore escaped parameters `{{param}}` → `{param}`
+            // Restore escaped parameters
             for (k, _) in args.iter() {
                 let placeholder = format!("__ESCAPED_{}__", k);
                 let param = format!("{{{}}}", k);
                 final_route = final_route.replace(&placeholder, &param);
             }
+
+            // Retain only the used keys (excluding those used only as escaped)
+            args.retain(|(k, _)| used_keys.contains(k));
 
             Ok(final_route)
         } else {
@@ -277,8 +281,8 @@ mod tests {
             .job("/counters/{counter}", none(plus_one))
             .job("/counters/{counter}", update(plus_two));
 
-        let args = PathArgs(vec![(Arc::from("counter"), String::from("one"))]);
-        let path = domain.find_path_for_job(plus_one.id(), &args).unwrap();
+        let mut args = PathArgs(vec![(Arc::from("counter"), String::from("one"))]);
+        let path = domain.find_path_for_job(plus_one.id(), &mut args).unwrap();
         assert_eq!(path, String::from("/counters/one"))
     }
 
@@ -287,11 +291,11 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new().job("/files/{*path}", update(func));
 
-        let args = PathArgs(vec![(
+        let mut args = PathArgs(vec![(
             Arc::from("path"),
             "documents/report.pdf".to_string(),
         )]);
-        let result = domain.find_path_for_job(func.id(), &args).unwrap();
+        let result = domain.find_path_for_job(func.id(), &mut args).unwrap();
 
         assert_eq!(result, "/files/documents/report.pdf".to_string());
     }
@@ -301,10 +305,11 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new().job("/data/{{counter}}/edit", update(func));
 
-        let args = PathArgs(vec![(Arc::from("counter"), "456".to_string())]);
-        let result = domain.find_path_for_job(func.id(), &args).unwrap();
+        let mut args = PathArgs(vec![(Arc::from("counter"), "456".to_string())]);
+        let result = domain.find_path_for_job(func.id(), &mut args).unwrap();
 
         assert_eq!(result, "/data/{counter}/edit".to_string()); // Escaped `{counter}` remains unchanged
+        assert_eq!(args, PathArgs(vec![])); // counter was never used so it should have been removed
     }
 
     #[test]
@@ -312,15 +317,24 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new().job("/users/{id}/files/{{file}}/{*path}", update(func));
 
-        let args = PathArgs(vec![
+        let mut args = PathArgs(vec![
             (Arc::from("id"), "42".to_string()),
             (Arc::from("path"), "reports/january.csv".to_string()),
+            (Arc::from("unused"), "some-value".to_string()),
         ]);
-        let result = domain.find_path_for_job(func.id(), &args).unwrap();
+        let result = domain.find_path_for_job(func.id(), &mut args).unwrap();
 
         assert_eq!(
             result,
             "/users/42/files/{file}/reports/january.csv".to_string()
+        );
+
+        assert_eq!(
+            args,
+            PathArgs(vec![
+                (Arc::from("id"), "42".to_string()),
+                (Arc::from("path"), "reports/january.csv".to_string()),
+            ])
         );
     }
 
@@ -329,9 +343,9 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new();
 
-        let args = PathArgs(vec![(Arc::from("counter"), "999".to_string())]);
+        let mut args = PathArgs(vec![(Arc::from("counter"), "999".to_string())]);
 
-        let result = domain.find_path_for_job(func.id(), &args);
+        let result = domain.find_path_for_job(func.id(), &mut args);
         assert!(result.is_err());
     }
 
@@ -340,8 +354,8 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new().job("/tasks/{task_id}/check", update(func));
 
-        let args = PathArgs(vec![]); // No arguments provided
-        let result = domain.find_path_for_job(func.id(), &args);
+        let mut args = PathArgs(vec![]); // No arguments provided
+        let result = domain.find_path_for_job(func.id(), &mut args);
         assert!(result.is_err());
     }
 }

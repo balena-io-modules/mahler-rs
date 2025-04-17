@@ -1,15 +1,40 @@
+use std::sync::Arc;
+
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
+use tokio::sync::RwLock;
 
-use super::{Ready, Worker};
-use crate::planner::Error as PlannerError;
+use super::{Idle, Ready, Worker};
+use crate::planner::{Error as PlannerError, Planner};
 use crate::system::System;
-use crate::task;
+use crate::task::{self, Context};
 use crate::{task::Task, workflow::Workflow};
 
 #[derive(Debug, Error)]
 #[error("workflow not found")]
 pub struct NotFound;
+
+pub async fn find_workflow<I>(
+    system: &Arc<RwLock<System>>,
+    planner: &Planner,
+    tgt: I,
+) -> Result<Workflow, NotFound>
+where
+    I: Serialize + DeserializeOwned,
+{
+    let cur = {
+        let sys = system.read().await;
+        sys.clone()
+    };
+
+    let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
+
+    match planner.find_workflow::<I>(&cur, &tgt) {
+        Ok(workflow) => Ok(workflow),
+        Err(PlannerError::NotFound) => Err(NotFound),
+        Err(e) => panic!("unexpected planning error: {e}"),
+    }
+}
 
 impl<O, I> Worker<O, Ready, I> {
     /// Find a workflow within the context of the worker
@@ -53,30 +78,21 @@ impl<O, I> Worker<O, Ready, I> {
     where
         I: Serialize + DeserializeOwned,
     {
-        let cur = {
-            let sys = self.inner.system.read().await;
-            sys.clone()
-        };
-
-        let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
-
-        match self.inner.planner.find_workflow::<I>(&cur, &tgt) {
-            Ok(workflow) => Ok(workflow),
-            Err(PlannerError::NotFound) => Err(NotFound),
-            Err(e) => panic!("unexpected planning error: {e}"),
-        }
+        find_workflow::<I>(&self.inner.system, &self.inner.planner, tgt).await
     }
 
     async fn run_task_with_system(
         &self,
-        task: Task,
+        mut task: Task,
         system: &mut System,
     ) -> Result<(), task::Error> {
+        let task_id = task.id().to_string();
+        let Context { args, .. } = task.context_mut();
         let path = self
             .inner
             .planner
             .domain()
-            .find_path_for_job(task.id(), &task.context().args)
+            .find_path_for_job(task_id.as_str(), args)
             .expect("could not find path for task");
 
         let task = task.with_path(path);
@@ -141,16 +157,18 @@ impl<O, I> Worker<O, Ready, I> {
     /// assert_eq!(worker.run_task(plus_one.with_target(2)).await, Ok(2));
     /// # })
     /// ```
-    pub async fn run_task(&self, task: Task) -> Result<O, task::Error>
+    pub async fn run_task(&self, mut task: Task) -> Result<O, task::Error>
     where
         O: Serialize + DeserializeOwned,
     {
         let mut system = self.inner.system.read().await.clone();
+        let task_id = task.id().to_string();
+        let Context { args, .. } = task.context_mut();
         let path = self
             .inner
             .planner
             .domain()
-            .find_path_for_job(task.id(), &task.context().args)
+            .find_path_for_job(task_id.as_str(), args)
             .expect("could not find path for task");
 
         let task = task.with_path(path);
@@ -159,6 +177,15 @@ impl<O, I> Worker<O, Ready, I> {
         let new_state = system.state().expect("failed to serialize output state");
 
         Ok(new_state)
+    }
+}
+
+impl<O, I> Worker<O, Idle, I> {
+    pub async fn find_workflow(&self, tgt: I) -> Result<Workflow, NotFound>
+    where
+        I: Serialize + DeserializeOwned,
+    {
+        find_workflow::<I>(&self.inner.system, &self.inner.planner, tgt).await
     }
 }
 

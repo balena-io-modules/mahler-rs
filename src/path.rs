@@ -1,6 +1,6 @@
 use jsonptr::{Pointer, PointerBuf};
 use std::fmt::Display;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -51,7 +51,7 @@ impl AsRef<Pointer> for Path {
 
 // Structure to store path arguments when matching
 // against a lens
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub(crate) struct PathArgs(pub Vec<(Arc<str>, String)>);
 
 impl PathArgs {
@@ -90,6 +90,12 @@ impl Deref for PathArgs {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for PathArgs {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 

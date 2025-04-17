@@ -107,6 +107,7 @@ impl Planner {
 
                 let mut cur_state = cur_state.clone();
                 let mut cur_plan = cur_plan;
+                let mut changes = Vec::new();
                 for mut t in tasks.into_iter() {
                     // A task cannot override the context set by the
                     // parent task. For instance a method for `/a/b` cannot
@@ -116,9 +117,11 @@ impl Planner {
                     for (k, v) in method.context().args.iter() {
                         t = t.with_arg(k, v)
                     }
+                    let task_id = t.id().to_string();
+                    let Context { args, .. } = t.context_mut();
                     let path = self
                         .0
-                        .find_path_for_job(t.id(), &t.context().args)
+                        .find_path_for_job(task_id.as_str(), args)
                         // The user may have not have put the child task in the
                         // domain, or failed to account for all args in the path
                         // in which case we need to return an error
@@ -128,18 +131,31 @@ impl Planner {
                     let Workflow { dag, pending } =
                         self.try_task(task, &cur_state, cur_plan, stack_len + 1)?;
 
-                    // patch the state before passing it to the next task
+                    // Apply changes to the local copy of the state
                     cur_state
                         .patch(Patch(pending.clone()))
-                        .context("failed to patch system state")?;
-                    cur_plan = Workflow { dag, pending };
+                        // if this error happens it is likely to be an issue with the method
+                        // definition. We might want to just warn here?
+                        .context(format!("failed to apply patch {pending:?}"))?;
+
+                    // But accumulate the changes separately to avoid
+                    // applying them twice
+                    changes = [changes, pending].concat();
+                    cur_plan = Workflow {
+                        dag,
+                        pending: vec![],
+                    };
                 }
 
                 // if we are at the top of the stack and no changes are introduced
                 // then assume the condition has failed
-                if stack_len == 0 && cur_plan.pending.is_empty() {
+                if stack_len == 0 && changes.is_empty() {
                     return Err(SearchError::ConditionFailed)?;
                 }
+
+                let mut cur_plan = cur_plan;
+                cur_plan.pending = changes;
+
                 Span::current().record("selected", true);
                 Ok(cur_plan)
             }
@@ -194,10 +210,11 @@ impl Planner {
                     // Calculate the target for the job path
                     let pointer = path.as_ref();
 
-                    // This should technically never happen
-                    let target = pointer.resolve(tgt).with_context(|| {
-                        format!("failed to resolve path {path} on system state")
-                    })?;
+                    // The target will not be resolvable on `delete` operations
+                    // in which case we need to assign it to null, this will
+                    // cause tasks trying to extract a Target to fail, which is
+                    // the right behavior
+                    let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
 
                     // Create the calling context for the job
                     let context = Context {
@@ -207,7 +224,7 @@ impl Planner {
                     };
                     for job in jobs {
                         // If the job is applicable to the operation
-                        if op.matches(job.operation()) || job.operation() != &Operation::Any {
+                        if op.matches(job.operation()) || job.operation() == &Operation::Any {
                             let task = job.clone_task(context.clone());
                             let task_id = task.id().to_string();
 
@@ -228,7 +245,7 @@ impl Planner {
                                     // Update the state and the workflow
                                     new_sys
                                         .patch(Patch(pending))
-                                        .with_context(|| "failed to patch system state")?;
+                                        .with_context(|| "failed to apply system patch")?;
                                     let new_plan = Workflow {
                                         dag,
                                         pending: vec![],

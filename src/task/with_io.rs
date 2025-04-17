@@ -23,4 +23,4 @@ pub type IO<T, E = Infallible> = Effect<View<T>, E>;
 pub type Update<T, E = Infallible> = Effect<View<T>, E>;
 pub type Delete<T, E = Infallible> = Effect<Pointer<T>, E>;
 pub type Create<T, E = Infallible> = Effect<Pointer<T>, E>;
-pub type New<T, E = Infallible> = Effect<Pointer<T>, E>;
+pub type Any<T, E = Infallible> = Effect<Pointer<T>, E>;

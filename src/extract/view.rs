@@ -39,15 +39,18 @@ impl<T> Pointer<T> {
         }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Assign a value to location indicated by
     /// the path.
     pub fn assign(&mut self, value: impl Into<T>) -> &mut T {
         self.state = Some(value.into());
         self.state.as_mut().unwrap()
+    }
+
+    /// Apply a function to the internal value of the pointer
+    /// if it exists
+    pub fn update<F: FnOnce(T) -> T>(mut self, f: F) -> Self {
+        self.state = self.state.map(f);
+        self
     }
 
     /// Clear the value at the location indicated by
@@ -195,6 +198,13 @@ impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
     }
 }
 
+/// Convert a simple pointer into an effect
+impl<T, E> From<Pointer<T>> for Effect<Pointer<T>, E> {
+    fn from(ptr: Pointer<T>) -> Effect<Pointer<T>, E> {
+        Effect::from_result(Ok(ptr))
+    }
+}
+
 // Allow tasks to return a pointer
 // This converts the pointer into a pure effect
 impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
@@ -212,8 +222,26 @@ impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
 pub struct View<T>(Pointer<T>);
 
 impl<T> View<T> {
-    pub fn path(&self) -> &Path {
-        self.0.path()
+    /// Assign a value to location indicated by
+    /// the path.
+    pub fn assign(&mut self, value: impl Into<T>) -> &mut T {
+        self.0.assign(value)
+    }
+
+    /// Apply a function to the internal value of the pointer
+    /// if it exists
+    pub fn update<F: FnOnce(T) -> T>(mut self, f: F) -> Self {
+        self.0 = self.0.update(f);
+        self
+    }
+
+    /// Initialize the location pointed by the path
+    /// with the defaut value of the type T.
+    pub fn zero(&mut self) -> &mut T
+    where
+        T: Default,
+    {
+        self.0.assign(T::default())
     }
 }
 
@@ -250,6 +278,13 @@ impl<T> DerefMut for View<T> {
 impl<T: Serialize> IntoResult<Patch> for View<T> {
     fn into_result(self) -> Result<Patch, Error> {
         self.0.into_result()
+    }
+}
+
+/// Convert a simple view into an effect
+impl<T, E> From<View<T>> for Effect<View<T>, E> {
+    fn from(view: View<T>) -> Effect<View<T>, E> {
+        Effect::from_result(Ok(view))
     }
 }
 

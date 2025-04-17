@@ -15,6 +15,7 @@ pub fn init() {
     INIT.call_once(|| tracing_subscriber::registry().with(ToLogLayer).init());
 }
 
+#[derive(Default)]
 pub struct ToLogLayer;
 
 impl<S> Layer<S> for ToLogLayer
@@ -175,6 +176,31 @@ where
                 if let Some(message) = fields.get("message") {
                     if span.name() == "find_workflow" {
                         log!(target: meta.target(), level, "searching workflow: {} ", message)
+                    }
+
+                    if span.name() == "run_task" {
+                        return;
+                    }
+
+                    // If the current event is below the `run_task` scope, look for the
+                    // task id in the run_task scope and if found, convert it to a log
+                    if let Some(run_task) = ctx
+                        .event_scope(event)
+                        .into_iter()
+                        .flat_map(Scope::from_root)
+                        .find(|s| s.name() == "run_task")
+                    {
+                        let ext = run_task.extensions();
+                        if let Some(task_fields) = ext.get::<HashMap<String, String>>() {
+                            if let (Some(id), Some(task)) =
+                                (task_fields.get("id"), task_fields.get("task"))
+                            {
+                                let task_id = format!("{}::{}", meta.target(), span.name());
+                                if &task_id == id {
+                                    log!(target: meta.target(), level, "{}: {} ", task, message)
+                                }
+                            }
+                        }
                     }
                 }
             }

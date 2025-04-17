@@ -33,6 +33,7 @@ pub mod prelude {
     pub use super::handler::*;
     pub use super::job::{any, create, delete, none, update};
     pub use super::with_io::*;
+    pub use super::Task;
 }
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
@@ -238,7 +239,7 @@ impl Task {
         }
     }
 
-    pub(crate) fn context(&self) -> &Context {
+    pub(crate) fn context_mut(&mut self) -> &mut Context {
         match self {
             Self::Action(Action { context, .. }) => context,
             Self::Method(Method { context, .. }) => context,
