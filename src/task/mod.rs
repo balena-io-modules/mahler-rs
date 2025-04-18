@@ -246,6 +246,13 @@ impl Task {
         }
     }
 
+    pub(crate) fn context(&mut self) -> &Context {
+        match self {
+            Self::Action(Action { context, .. }) => context,
+            Self::Method(Method { context, .. }) => context,
+        }
+    }
+
     /// Return true if the task can be parallelized
     pub fn is_scoped(&self) -> bool {
         match self {

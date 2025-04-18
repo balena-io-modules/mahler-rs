@@ -1,4 +1,4 @@
-use anyhow::{Context as AnyhowCtx, anyhow};
+use anyhow::{anyhow, Context as AnyhowCtx};
 use bollard::container::{CreateContainerOptions, StartContainerOptions};
 use bollard::secret::{ContainerInspectResponse, ContainerState, ContainerStateStatusEnum};
 use futures_util::stream::StreamExt;
@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
-use bollard::Docker;
 use bollard::image::CreateImageOptions;
+use bollard::Docker;
 
 use gustav::extract::{Args, Pointer, Res, System, Target, View};
 use gustav::task::prelude::*;
@@ -240,7 +240,7 @@ fn fetch_image(
                 if let Some(id) = img_info.id {
                     // If the image exists and has an id, skip
                     // download
-                    image.assign(Image { id: Some(id) });
+                    image.replace(Image { id: Some(id) });
                     return Ok(image);
                 }
             }
@@ -293,28 +293,28 @@ pub struct RemoveImageError(#[from] anyhow::Error);
 /// Effect: remove the image from the state
 /// Action: remove the image from the engine
 fn remove_image(
-    mut img_ptr: Pointer<Image>,
+    img_ptr: Pointer<Image>,
     Args(image_name): Args<String>,
     docker: Res<Docker>,
 ) -> Delete<Image, RemoveImageError> {
-    // Delete the service if it is not running
-    let img_id = img_ptr.as_ref().and_then(|img| img.id.clone());
-    img_ptr.unassign();
-
     with_io(img_ptr, |mut img_ptr| async move {
-        if let Some(id) = img_id {
+        if let Some(id) = img_ptr.as_ref().and_then(|img| img.id.as_ref()) {
             docker
-                .remove_image(&id, None, None)
+                .remove_image(id, None, None)
                 .await
                 .with_context(|| format!("failed to remove image {image_name}"))?;
 
-            img_ptr.unassign();
+            img_ptr.take();
         } else {
             // can this actually happen?
-            Err(anyhow!("no image Id for {image_name}"))?;
+            Err(anyhow!("image not found: {image_name}"))?;
         }
 
         Ok(img_ptr)
+    })
+    .map(|img_ptr| {
+        // Delete the service if it is not running
+        img_ptr.unassign()
     })
 }
 
@@ -524,9 +524,10 @@ fn stop_service(
             if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
                 svc.image = tgt_img;
             }
-            svc_view.assign(svc);
+            *svc_view = svc;
         } else {
-            Err(anyhow!("no container Id for {service_name}"))?;
+            // can this happen?
+            Err(anyhow!("no container for {service_name}"))?;
         }
 
         Ok(svc_view)
@@ -543,23 +544,23 @@ pub struct UninstallServiceError(#[from] anyhow::Error);
 /// Effect: remove the service from the state
 /// Action: remove the container
 fn uninstall_service(
-    mut svc_ptr: Pointer<Service>,
+    svc_ptr: Pointer<Service>,
     Args(service_name): Args<String>,
     docker: Res<Docker>,
 ) -> Delete<Service, StartServiceError> {
-    // Delete the service if it is not running
-    let svc_id = svc_ptr.as_ref().and_then(|svc| svc.id.clone());
-    if let Some(ref svc) = *svc_ptr {
-        if !matches!(svc.status, Some(ServiceStatus::Running)) {
-            svc_ptr.unassign();
-        }
+    if svc_ptr
+        .as_ref()
+        .is_none_or(|svc| matches!(svc.status, Some(ServiceStatus::Running)))
+    {
+        // do nothing if the service is still running
+        return svc_ptr.into();
     }
 
-    with_io(svc_ptr, |mut svc_ptr| async move {
-        if let Some(id) = svc_id {
+    with_io(svc_ptr, |svc_ptr| async move {
+        if let Some(id) = svc_ptr.as_ref().and_then(|svc| svc.id.as_ref()) {
             docker
                 .remove_container(
-                    &id,
+                    id,
                     Some(bollard::container::RemoveContainerOptions {
                         v: true,
                         ..Default::default()
@@ -567,16 +568,13 @@ fn uninstall_service(
                 )
                 .await
                 .with_context(|| format!("failed to remove container for {service_name}"))?;
-
-            // TODO: we probably want to check that the service was deleted
-
-            svc_ptr.unassign();
         } else {
-            Err(anyhow!("no container Id for {service_name}"))?;
+            Err(anyhow!("no container for {service_name}"))?;
         }
 
         Ok(svc_ptr)
     })
+    .map(|svc_ptr| svc_ptr.unassign())
 }
 
 /// Stop and remove a service container method
@@ -587,7 +585,7 @@ fn uninstall_service(
 fn stop_and_uninstall_service(svc_view: View<Service>) -> Vec<Task> {
     let mut actions = vec![];
     if matches!(svc_view.status, Some(ServiceStatus::Running)) {
-        actions.push(stop_service.with_target(TargetService::from(svc_view.clone())));
+        actions.push(stop_service.with_target(TargetService::from(svc_view.to_owned())));
     }
 
     actions.push(uninstall_service.into_task());
@@ -600,8 +598,8 @@ fn purge_service(svc_view: View<Service>) -> Vec<Task> {
     let mut actions = vec![];
     actions.push(stop_and_uninstall_service.into_task());
 
-    if let Some(ref id) = svc_view.id {
-        actions.push(remove_image.with_arg("image_name", id));
+    if let Some(ref image) = svc_view.image {
+        actions.push(remove_image.with_arg("image_name", image));
     }
 
     actions
@@ -609,7 +607,7 @@ fn purge_service(svc_view: View<Service>) -> Vec<Task> {
 
 pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> {
     // Initialize the connection
-    let docker = Docker::connect_with_local_defaults().unwrap();
+    let docker = Docker::connect_with_defaults().unwrap();
 
     Worker::new()
         .jobs(
@@ -639,8 +637,10 @@ pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> 
                 delete(uninstall_service).with_description(|Args(service_name): Args<String>| {
                     format!("remove container for service '{service_name}'")
                 }),
-                delete(purge_service).with_priority(16),
-                delete(stop_and_uninstall_service).with_priority(8),
+                // give this method higher priority than stop and uninstall
+                // service (default is 0)
+                delete(purge_service).with_priority(8),
+                delete(stop_and_uninstall_service),
             ],
         )
         .resource::<Docker>(docker)
@@ -652,10 +652,10 @@ pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> 
 mod tests {
     use bollard::container::{ListContainersOptions, RemoveContainerOptions};
     use gustav::worker::SeekStatus;
-    use gustav::{Dag, seq};
+    use gustav::{seq, Dag};
     use serde_json::json;
     use tracing_subscriber::fmt::format::FmtSpan;
-    use tracing_subscriber::{EnvFilter, prelude::*};
+    use tracing_subscriber::{prelude::*, EnvFilter};
 
     use super::*;
 
@@ -678,7 +678,7 @@ mod tests {
     const PROJECT_NAME: &str = "my-project";
 
     async fn cleanup() {
-        let docker = Docker::connect_with_local_defaults().unwrap();
+        let docker = Docker::connect_with_defaults().unwrap();
         let containers = docker
             .list_containers(Some(ListContainersOptions::<String> {
                 all: true,
@@ -727,6 +727,9 @@ mod tests {
     async fn test_fetch_image() {
         before();
 
+        let docker = Docker::connect_with_defaults().unwrap();
+        let _ = docker.info().await.unwrap();
+
         let worker = create_worker(Project::new(PROJECT_NAME));
         let state = worker
             .run_task(fetch_image.with_arg("image_name", "alpine:3.18"))
@@ -734,7 +737,6 @@ mod tests {
             .unwrap();
 
         // The alpine image must exist now
-        let docker = Docker::connect_with_local_defaults().unwrap();
         let img = docker.inspect_image("alpine:3.18").await.unwrap();
         assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
 
@@ -764,7 +766,7 @@ mod tests {
         assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
 
         // The alpine image must exist now
-        let docker = Docker::connect_with_local_defaults().unwrap();
+        let docker = Docker::connect_with_defaults().unwrap();
         let img = docker.inspect_image("alpine:3.18").await.unwrap();
 
         // The image ids should match
@@ -806,7 +808,7 @@ mod tests {
         assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
 
         // The alpine image must exist now
-        let docker = Docker::connect_with_local_defaults().unwrap();
+        let docker = Docker::connect_with_defaults().unwrap();
         let img = docker.inspect_image("alpine:3.18").await.unwrap();
 
         // The image ids should match
@@ -898,6 +900,13 @@ mod tests {
             .await;
         assert!(matches!(
             container,
+            Err(bollard::errors::Error::DockerResponseServerError { .. })
+        ));
+
+        // The image should no longer exist
+        let image = docker.inspect_image("alpine:3.18").await;
+        assert!(matches!(
+            image,
             Err(bollard::errors::Error::DockerResponseServerError { .. })
         ));
 

@@ -1,6 +1,7 @@
 use json_patch::{diff, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use jsonptr::Pointer;
 use serde_json::Value;
+use std::collections::btree_set::Iter;
 use std::fmt::{self, Display};
 use std::{
     cmp::Ordering,
@@ -104,7 +105,7 @@ impl Distance {
         self.0.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Operation> {
+    pub fn iter(&self) -> Iter<Operation> {
         self.0.iter()
     }
 
@@ -163,12 +164,6 @@ impl Operation {
     }
 }
 
-impl Display for Operation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 impl PartialOrd for Operation {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -197,6 +192,7 @@ impl From<PatchOperation> for Operation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use serde_json::json;
 
     fn distance_eq(src: Value, tgt: Value, result: Vec<Value>) {

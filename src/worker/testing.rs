@@ -295,9 +295,9 @@ mod tests {
 
         // We expect a linear DAG with three tasks
         let expected: Dag<&str> = seq!(
+            "gustav::worker::testing::tests::plus_one(/one)",
+            "gustav::worker::testing::tests::plus_one(/one)",
             "gustav::worker::testing::tests::plus_one(/two)",
-            "gustav::worker::testing::tests::plus_one(/one)",
-            "gustav::worker::testing::tests::plus_one(/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);

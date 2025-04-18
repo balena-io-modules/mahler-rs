@@ -1,10 +1,11 @@
 use anyhow::anyhow;
 use matchit::Router;
+use std::collections::btree_set::Iter;
 use std::collections::{BTreeSet, HashMap};
 use thiserror::Error;
 
 use crate::path::PathArgs;
-use crate::task::{Job, Operation};
+use crate::task::Job;
 
 #[derive(Debug, Error)]
 #[error(transparent)]
@@ -179,24 +180,21 @@ impl Domain {
         }
     }
 
+    // Find a job given the path and the id
+    pub(crate) fn find_job(&self, path: &str, job_id: &str) -> Option<&Job> {
+        self.router
+            .at(path)
+            .ok()
+            .and_then(|matched| matched.value.iter().find(|job| job.id() == job_id))
+    }
+
     /// Find matches for the given path in the domain
     /// the matches are sorted in order that they should be
     /// tested
-    pub(crate) fn find_jobs_at(
-        &self,
-        path: &str,
-    ) -> Option<(PathArgs, impl Iterator<Item = &Job>)> {
+    pub(crate) fn find_matching_jobs(&self, path: &str) -> Option<(PathArgs, Iter<Job>)> {
         self.router
             .at(path)
-            .map(|matched| {
-                (
-                    PathArgs::from(matched.params),
-                    matched
-                        .value
-                        .iter()
-                        .filter(|i| i.operation() != &Operation::None),
-                )
-            })
+            .map(|matched| (PathArgs::from(matched.params), matched.value.iter()))
             .ok()
     }
 }
@@ -213,6 +211,15 @@ mod tests {
     fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
             *counter += 1;
+        }
+
+        // Update implements IntoResult
+        counter
+    }
+
+    fn minus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
+        if *counter < *tgt {
+            *counter -= 1;
         }
 
         // Update implements IntoResult
@@ -236,7 +243,7 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let jobs: Vec<&str> = domain
-            .find_jobs_at("/counters/{counter}")
+            .find_matching_jobs("/counters/{counter}")
             .map(|(_, iter)| iter.map(|j| j.id()).collect())
             .unwrap();
 
@@ -245,18 +252,33 @@ mod tests {
     }
 
     #[test]
-    fn it_ignores_none_jobs() {
+    fn it_finds_jobs_ordered_by_operation() {
         let domain = Domain::new()
-            .job("/counters/{counter}", none(plus_one))
-            .job("/counters/{counter}", update(plus_two));
+            .job("/counters/{counter}", any(plus_one))
+            .job("/counters/{counter}", update(minus_one));
 
         let jobs: Vec<&str> = domain
-            .find_jobs_at("/counters/{counter}")
+            .find_matching_jobs("/counters/{counter}")
             .map(|(_, iter)| iter.map(|j| j.id()).collect())
             .unwrap();
 
-        // It should not return jobs for None operations
-        assert_eq!(jobs, vec![plus_two.id()]);
+        // It should return compound jobs first
+        assert_eq!(jobs, vec![minus_one.id(), plus_one.id()]);
+    }
+
+    #[test]
+    fn it_finds_jobs_ordered_by_priority() {
+        let domain = Domain::new()
+            .job("/counters/{counter}", update(plus_one).with_priority(8))
+            .job("/counters/{counter}", update(minus_one).with_priority(16));
+
+        let jobs: Vec<&str> = domain
+            .find_matching_jobs("/counters/{counter}")
+            .map(|(_, iter)| iter.map(|j| j.id()).collect())
+            .unwrap();
+
+        // It should return compound jobs first
+        assert_eq!(jobs, vec![minus_one.id(), plus_one.id()]);
     }
 
     #[test]

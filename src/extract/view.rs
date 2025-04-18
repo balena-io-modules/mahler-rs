@@ -42,21 +42,21 @@ impl<T> Pointer<T> {
     /// Assign a value to location indicated by
     /// the path.
     pub fn assign(&mut self, value: impl Into<T>) -> &mut T {
-        self.state = Some(value.into());
-        self.state.as_mut().unwrap()
+        self.insert(value.into())
     }
 
     /// Apply a function to the internal value of the pointer
     /// if it exists
-    pub fn update<F: FnOnce(T) -> T>(mut self, f: F) -> Self {
+    pub fn update_with<F: FnOnce(T) -> T>(mut self, f: F) -> Self {
         self.state = self.state.map(f);
         self
     }
 
     /// Clear the value at the location indicated by
     /// the path
-    pub fn unassign(&mut self) {
-        self.state = None;
+    pub fn unassign(mut self) -> Self {
+        self.state.take();
+        self
     }
 
     /// Initialize the location pointed by the path
@@ -66,6 +66,11 @@ impl<T> Pointer<T> {
         T: Default,
     {
         self.assign(T::default())
+    }
+
+    /// Return true if the pointer is null
+    pub fn is_null(&self) -> bool {
+        self.state.is_none()
     }
 }
 
@@ -220,30 +225,6 @@ impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
 /// pointed by the value exists and extraction will fail otherwise
 #[derive(Debug)]
 pub struct View<T>(Pointer<T>);
-
-impl<T> View<T> {
-    /// Assign a value to location indicated by
-    /// the path.
-    pub fn assign(&mut self, value: impl Into<T>) -> &mut T {
-        self.0.assign(value)
-    }
-
-    /// Apply a function to the internal value of the pointer
-    /// if it exists
-    pub fn update<F: FnOnce(T) -> T>(mut self, f: F) -> Self {
-        self.0 = self.0.update(f);
-        self
-    }
-
-    /// Initialize the location pointed by the path
-    /// with the defaut value of the type T.
-    pub fn zero(&mut self) -> &mut T
-    where
-        T: Default,
-    {
-        self.0.assign(T::default())
-    }
-}
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
     type Error = InputError;
@@ -480,7 +461,7 @@ mod tests {
             Pointer::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
 
         // Delete the value
-        ptr.unassign();
+        ptr = ptr.unassign();
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();
@@ -557,7 +538,7 @@ mod tests {
             Pointer::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
 
         // Remove the second element
-        ptr.unassign();
+        ptr = ptr.unassign();
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();
@@ -589,7 +570,7 @@ mod tests {
             Pointer::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
 
         // Remove the third element
-        ptr.unassign();
+        ptr.take();
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();

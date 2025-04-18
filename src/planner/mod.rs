@@ -1,10 +1,12 @@
+use std::fmt::Debug;
+
 use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::Patch;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
-use tracing::{error, field, instrument, trace_span, warn, Level, Span};
+use tracing::{debug, debug_span, error, field, instrument, warn, Level, Span};
 
 use crate::path::Path;
 use crate::system::System;
@@ -68,7 +70,7 @@ impl Planner {
         &self.0
     }
 
-    #[instrument(level = "trace", skip_all, fields(task=?task, selected=field::Empty), err(level=Level::TRACE))]
+    #[instrument(level = "trace", skip_all, fields(task=?task, changes=field::Empty), err(level=Level::TRACE))]
     fn try_task(
         &self,
         task: Task,
@@ -97,6 +99,7 @@ impl Planner {
                 // Otherwise add the task to the plan
                 let Workflow { dag, pending } = cur_plan;
                 let dag = dag.with_head(WorkUnit::new(work_id, action, changes.clone()));
+                Span::current().record("changes", format!("{:?}", changes));
                 let pending = [pending, changes].concat();
 
                 Span::current().record("selected", true);
@@ -127,15 +130,24 @@ impl Planner {
                         // in which case we need to return an error
                         .map_err(SearchError::CannotExpand)?;
 
-                    let task = t.with_path(path);
+                    // Now that we have the proper path, look
+                    // up the job at the domain to get any additional metadata
+                    // from the job (such as the description)
+                    let job = self
+                        .0
+                        .find_job(&path, &task_id)
+                        // this really should not happen
+                        .ok_or(anyhow!("failed to find job for path {path}"))?;
+
+                    let task = job.clone_task(t.context().to_owned()).with_path(path);
+
                     let Workflow { dag, pending } =
                         self.try_task(task, &cur_state, cur_plan, stack_len + 1)?;
 
                     // Apply changes to the local copy of the state
                     cur_state
                         .patch(Patch(pending.clone()))
-                        // if this error happens it is likely to be an issue with the method
-                        // definition. We might want to just warn here?
+                        // not sure how this can happen, perhaps a bad method definition?
                         .context(format!("failed to apply patch {pending:?}"))?;
 
                     // But accumulate the changes separately to avoid
@@ -169,7 +181,7 @@ impl Planner {
     {
         // Store the initial state and an empty plan on the stack
         let mut stack = vec![(system.clone(), Workflow::default(), 0)];
-        let parent_span = Span::current();
+        let find_worflow_span = Span::current();
 
         // TODO: we should merge non conflicting workflows
         // for parallelism
@@ -199,13 +211,14 @@ impl Planner {
                 return Ok(cur_plan.reverse());
             }
 
-            let stack_len = stack.len();
-            let next_span = trace_span!("find_next", cur = %&cur_state.root(), ops = %distance, found = field::Empty);
+            let next_span = debug_span!("find_next", cur = %&cur_state.root());
+            let mut candidates = Vec::new();
             let _enter = next_span.enter();
-            for op in distance.iter() {
-                // Find applicable tasks
+            for op in distance.iter().rev() {
                 let path = Path::new(op.path());
-                let matching = self.0.find_jobs_at(path.to_str());
+                // Find applicable jobs
+                let matching = self.0.find_matching_jobs(path.to_str());
+
                 if let Some((args, jobs)) = matching {
                     // Calculate the target for the job path
                     let pointer = path.as_ref();
@@ -222,11 +235,14 @@ impl Planner {
                         args,
                         target: target.clone(),
                     };
-                    for job in jobs {
+
+                    // Go through the list of usable jobs
+                    for job in jobs.filter(|i| i.operation() != &Operation::None).rev() {
                         // If the job is applicable to the operation
                         if op.matches(job.operation()) || job.operation() == &Operation::Any {
                             let task = job.clone_task(context.clone());
                             let task_id = task.id().to_string();
+                            let task_description = task.to_string();
 
                             // apply the task to the state, if it progresses the plan, then select
                             // it and put the new state with the new plan on the stack
@@ -252,6 +268,7 @@ impl Planner {
                                     };
 
                                     // add the new initial state and plan to the stack
+                                    candidates.push(task_description);
                                     stack.push((new_sys, new_plan, depth + 1));
                                 }
                                 // Ignore harmless errors
@@ -266,14 +283,19 @@ impl Planner {
                                     if cfg!(debug_assertions) {
                                         return Err(TaskError(anyhow!(err)))?;
                                     }
-                                    warn!(parent: &parent_span, "task {} failed during planning: {} ... ignoring", task_id, err);
+                                    warn!(parent: &find_worflow_span, "task {} failed during planning: {} ... ignoring", task_id, err);
                                 }
                             }
                         }
                     }
                 }
             }
-            next_span.record("found", stack.len() - stack_len);
+            debug!(parent: &next_span, candidates=%candidates
+                    .iter()
+                    .map(|task| task.to_string())
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join(", "));
         }
 
         Err(Error::NotFound)?
@@ -285,6 +307,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+    use std::fmt::Display;
 
     use super::*;
     use crate::extract::{Args, System, Target, View};
@@ -364,6 +387,16 @@ mod tests {
     }
 
     #[test]
+    fn it_ignores_none_jobs() {
+        let domain = Domain::new().job("", none(plus_one));
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, 0, 2);
+
+        assert!(matches!(workflow, Err(super::Error::NotFound)));
+    }
+
+    #[test]
     fn it_aborts_search_if_plan_length_grows_too_much() {
         let domain = Domain::new()
             .job("", update(buggy_plus_one))
@@ -416,10 +449,10 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "gustav::planner::tests::plus_one(/counters/two)",
-            "gustav::planner::tests::plus_one(/counters/two)",
             "gustav::planner::tests::plus_one(/counters/one)",
             "gustav::planner::tests::plus_one(/counters/one)",
+            "gustav::planner::tests::plus_one(/counters/two)",
+            "gustav::planner::tests::plus_one(/counters/two)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -489,8 +522,21 @@ mod tests {
         assert_eq!(workflow.to_string(), expected.to_string(),);
     }
 
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::{prelude::*, EnvFilter};
     #[test]
     fn test_stacking_problem() {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .pretty()
+                    .with_target(false)
+                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE),
+            )
+            .with(EnvFilter::from_default_env())
+            .try_init()
+            .unwrap_or(());
+
         #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Debug)]
         enum Block {
             A,
@@ -498,13 +544,9 @@ mod tests {
             C,
         }
 
-        impl From<Block> for String {
-            fn from(blk: Block) -> String {
-                match blk {
-                    Block::A => "A".to_string(),
-                    Block::B => "B".to_string(),
-                    Block::C => "C".to_string(),
-                }
+        impl Display for Block {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{:?}", self)
             }
         }
 
@@ -523,7 +565,7 @@ mod tests {
 
         type Blocks = HashMap<Block, Location>;
 
-        #[derive(Serialize, Deserialize)]
+        #[derive(Serialize, Deserialize, Debug)]
         struct State {
             blocks: Blocks,
         }
@@ -533,6 +575,7 @@ mod tests {
                 // No block is on top of the location
                 return blocks.iter().all(|(_, l)| l != loc);
             }
+            // the table is always clear
             true
         }
 
@@ -543,7 +586,7 @@ mod tests {
         fn all_clear(blocks: &Blocks) -> Vec<&Block> {
             blocks
                 .iter()
-                .filter(|(_, l)| is_clear(blocks, l))
+                .filter(|(b, _)| is_clear(blocks, &Location::Blk((*b).clone())))
                 .map(|(b, _)| b)
                 .collect()
         }
@@ -610,26 +653,30 @@ mod tests {
             loc
         }
 
-        fn take(loc: View<Location>, System(sys): System<State>) -> Vec<Task> {
-            if is_clear(&sys.blocks, &loc) {
+        fn take(
+            loc: View<Location>,
+            System(sys): System<State>,
+            Args(block): Args<Block>,
+        ) -> Option<Task> {
+            if is_clear(&sys.blocks, &Location::Blk(block)) {
                 if *loc == Location::Table {
-                    return vec![pickup.into_task()];
+                    return Some(pickup.into_task());
                 } else {
-                    return vec![unstack.into_task()];
+                    return Some(unstack.into_task());
                 }
             }
-            vec![]
+            None
         }
 
-        fn put(loc: View<Location>, Target(tgt): Target<Location>) -> Vec<Task> {
+        fn put(loc: View<Location>, Target(tgt): Target<Location>) -> Option<Task> {
             if *loc == Location::Hand {
                 if tgt == Location::Table {
-                    return vec![putdown.into_task()];
+                    return Some(putdown.into_task());
                 } else {
-                    return vec![stack.with_target(tgt)];
+                    return Some(stack.with_target(tgt));
                 }
             }
-            vec![]
+            None
         }
 
         //
@@ -648,15 +695,15 @@ mod tests {
         //  Source: https://github.com/dananau/GTPyhop/blob/main/Examples/blocks_hgn/methods.py
         //
         fn move_blks(blocks: View<Blocks>, Target(target): Target<Blocks>) -> Vec<Task> {
-            for b in all_clear(&blocks) {
+            for blk in all_clear(&blocks) {
                 // we assume that the target is well formed
-                let tgt_blk = target.get(b).unwrap();
+                let blk_loc = target.get(blk).unwrap();
 
                 // The block is free and it can be moved to the final target (another block or the table)
-                if is_clear(&blocks, tgt_blk) {
+                if is_clear(&blocks, blk_loc) {
                     return vec![
-                        take.with_arg("block", b.clone()),
-                        put.with_target(tgt_blk).with_arg("block", b.clone()),
+                        take.with_arg("block", blk.to_string()),
+                        put.with_arg("block", blk.to_string()).with_target(blk_loc),
                     ];
                 }
             }
@@ -665,10 +712,10 @@ mod tests {
             // we move it to the table
             let mut to_table: Vec<Task> = vec![];
             for b in all_clear(&blocks) {
-                to_table.push(take.with_arg("block", b.clone()));
+                to_table.push(take.with_arg("block", b.to_string()));
                 to_table.push(
                     put.with_target(Location::Table)
-                        .with_arg("block", b.clone()),
+                        .with_arg("block", b.to_string()),
                 );
             }
 
@@ -678,10 +725,25 @@ mod tests {
             .jobs(
                 "/blocks/{block}",
                 [
-                    update(pickup),
-                    update(unstack),
-                    update(putdown),
-                    update(stack),
+                    update(pickup).with_description(|Args(block): Args<String>| {
+                        format!("pick up block {block}")
+                    }),
+                    update(unstack).with_description(|Args(block): Args<String>| {
+                        format!("unstack block {block}")
+                    }),
+                    update(putdown).with_description(|Args(block): Args<String>| {
+                        format!("put down block {block}")
+                    }),
+                    update(stack).with_description(
+                        |Args(block): Args<String>, Target(tgt): Target<Location>| {
+                            let tgt_block = match tgt {
+                                Location::Blk(block) => format!("{block:?}"),
+                                _ => format!("{tgt:?}"),
+                            };
+
+                            format!("stack block {block} on top of block {tgt_block}")
+                        },
+                    ),
                     update(take),
                     update(put),
                 ],
@@ -706,14 +768,13 @@ mod tests {
         };
 
         let workflow = find_plan(planner, initial, target).unwrap();
-
         let expected: Dag<&str> = seq!(
-            "gustav::planner::tests::test_stacking_problem::unstack(/blocks/C)",
-            "gustav::planner::tests::test_stacking_problem::stack(/blocks/C)",
-            "gustav::planner::tests::test_stacking_problem::unstack(/blocks/B)",
-            "gustav::planner::tests::test_stacking_problem::stack(/blocks/B)",
-            "gustav::planner::tests::test_stacking_problem::pickup(/blocks/A)",
-            "gustav::planner::tests::test_stacking_problem::stack(/blocks/A)",
+            "unstack block C",
+            "put down block C",
+            "unstack block B",
+            "stack block B on top of block C",
+            "pick up block A",
+            "stack block A on top of block B",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
