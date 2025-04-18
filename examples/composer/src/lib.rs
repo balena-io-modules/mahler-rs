@@ -1,5 +1,5 @@
-use anyhow::Context;
-use bollard::container::CreateContainerOptions;
+use anyhow::{Context as AnyhowCtx, anyhow};
+use bollard::container::{CreateContainerOptions, StartContainerOptions};
 use bollard::secret::{ContainerInspectResponse, ContainerState, ContainerStateStatusEnum};
 use futures_util::stream::StreamExt;
 use gustav::worker::{Ready, Worker};
@@ -10,7 +10,7 @@ use thiserror::Error;
 use bollard::Docker;
 use bollard::image::CreateImageOptions;
 
-use gustav::extract::{Args, Pointer, Res, System, Target};
+use gustav::extract::{Args, Pointer, Res, System, Target, View};
 use gustav::task::prelude::*;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Default)]
@@ -21,14 +21,19 @@ pub enum ServiceStatus {
     Stopped,
 }
 
+fn default_status() -> Option<ServiceStatus> {
+    Some(ServiceStatus::default())
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TargetService {
     //// Image URL
-    pub image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 
     /// Service status
-    #[serde(default)]
-    pub status: ServiceStatus,
+    #[serde(skip_serializing_if = "Option::is_none", default = "default_status")]
+    pub status: Option<ServiceStatus>,
 
     /// Container command configuration
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,7 +43,7 @@ pub struct TargetService {
 impl From<TargetService> for bollard::container::Config<String> {
     fn from(tgt: TargetService) -> bollard::container::Config<String> {
         bollard::container::Config {
-            image: Some(tgt.image),
+            image: tgt.image,
             cmd: tgt.cmd,
             ..Default::default()
         }
@@ -69,6 +74,40 @@ pub struct Service {
 
     /// Container command configuration
     pub cmd: Option<Vec<String>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ServiceConfig {
+    pub image: Option<String>,
+    pub cmd: Option<Vec<String>>,
+}
+
+impl From<TargetService> for ServiceConfig {
+    fn from(tgt: TargetService) -> Self {
+        Self {
+            image: tgt.image,
+            cmd: tgt.cmd,
+        }
+    }
+}
+
+impl From<Service> for ServiceConfig {
+    fn from(svc: Service) -> Self {
+        Self {
+            image: svc.image,
+            cmd: svc.cmd,
+        }
+    }
+}
+
+impl From<Service> for TargetService {
+    fn from(svc: Service) -> Self {
+        Self {
+            image: svc.image,
+            status: svc.status,
+            cmd: svc.cmd,
+        }
+    }
 }
 
 impl From<ContainerInspectResponse> for Service {
@@ -126,8 +165,8 @@ impl From<TargetService> for Service {
         } = tgt;
         Self {
             id: None,
-            image: Some(image),
-            status: Some(status),
+            image,
+            status,
             created_at: None,
             started_at: None,
             finished_at: None,
@@ -164,7 +203,7 @@ impl Project {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TargetProject {
     /// Project name
     pub name: String,
@@ -187,7 +226,7 @@ fn fetch_image(
     mut image: Pointer<Image>,
     Args(image_name): Args<String>,
     docker: Res<Docker>,
-) -> New<Image, FetchImageError> {
+) -> Create<Image, FetchImageError> {
     // Initialize the image if it doesn't exist
     if image.is_none() {
         image.zero();
@@ -196,7 +235,7 @@ fn fetch_image(
     with_io(image, |mut image| async move {
         // Check if the image exists first, we do this because
         // we don't know if the initial state is correct
-        match docker.inspect_image(image_name.as_str()).await {
+        match docker.inspect_image(&image_name).await {
             Ok(img_info) => {
                 if let Some(id) = img_info.id {
                     // If the image exists and has an id, skip
@@ -234,7 +273,7 @@ fn fetch_image(
 
         // Check that the image
         let img_info = docker
-            .inspect_image(image_name.as_str())
+            .inspect_image(&image_name)
             .await
             .with_context(|| format!("failed to read information for image {image_name}"))?;
 
@@ -244,11 +283,60 @@ fn fetch_image(
     })
 }
 
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct RemoveImageError(#[from] anyhow::Error);
+
+/// Remove an image
+///
+/// Condition: the image exists (and there are no services referencing it?)
+/// Effect: remove the image from the state
+/// Action: remove the image from the engine
+fn remove_image(
+    mut img_ptr: Pointer<Image>,
+    Args(image_name): Args<String>,
+    docker: Res<Docker>,
+) -> Delete<Image, RemoveImageError> {
+    // Delete the service if it is not running
+    let img_id = img_ptr.as_ref().and_then(|img| img.id.clone());
+    img_ptr.unassign();
+
+    with_io(img_ptr, |mut img_ptr| async move {
+        if let Some(id) = img_id {
+            docker
+                .remove_image(&id, None, None)
+                .await
+                .with_context(|| format!("failed to remove image {image_name}"))?;
+
+            img_ptr.unassign();
+        } else {
+            // can this actually happen?
+            Err(anyhow!("no image Id for {image_name}"))?;
+        }
+
+        Ok(img_ptr)
+    })
+}
+
 /// Pull an image from the registry, this task is applicable to
 /// the creation of a service, as pulling an image is only needed
 /// in that case.
-fn fetch_service_image(Target(tgt): Target<TargetService>) -> Task {
-    fetch_image.with_arg("image_name", tgt.image)
+fn fetch_service_image(Target(tgt): Target<TargetService>) -> Option<Task> {
+    tgt.image.map(|img| fetch_image.with_arg("image_name", img))
+}
+
+async fn image_matches_with_target(
+    docker: &Res<Docker>,
+    tgt_img: &Option<String>,
+    img_id: &Option<String>,
+) -> bool {
+    if let Some(img) = tgt_img {
+        if let Ok(info) = docker.inspect_image(img).await {
+            return &info.id == img_id;
+        }
+    }
+
+    false
 }
 
 #[derive(Debug, Error)]
@@ -261,19 +349,19 @@ pub struct InstallServiceError(#[from] anyhow::Error);
 /// Effect: add the service to the `services` object, with a `status` of `created`
 /// Action: create a new container using the docker API and set the `containerId` property of the service in the `services` object
 fn install_service(
-    mut svc: Pointer<Service>,
+    mut svc_ptr: Pointer<Service>,
     Args(service_name): Args<String>,
     System(project): System<Project>,
     Target(tgt): Target<TargetService>,
     docker: Res<Docker>,
-) -> New<Service, InstallServiceError> {
+) -> Create<Service, InstallServiceError> {
     let tgt_img = tgt.image.clone();
-    let local_img = project.images.get(tgt_img.as_str());
+    let local_img = tgt_img.as_ref().and_then(|img| project.images.get(img));
 
     // If the image has already been downloaded then
     // simulate the service install
     if local_img.is_some() {
-        svc.assign(Service {
+        svc_ptr.assign(Service {
             // The status should be 'Created' after install
             status: Some(ServiceStatus::Created),
             // The rest of the fields should be the same
@@ -281,28 +369,21 @@ fn install_service(
         });
     }
 
-    // Clone the local image to move it into the async block
-    let local_img = local_img.cloned().and_then(|i| i.id);
-
-    with_io(svc, |mut svc| async move {
+    with_io(svc_ptr, |mut svc_ptr| async move {
         let container_name = format!("{}_{}", project.name, service_name);
-        match docker
-            .inspect_container(container_name.as_str(), None)
-            .await
-        {
+        match docker.inspect_container(&container_name, None).await {
             Ok(svc_info) => {
-                let mut existing: Service = svc_info.into();
+                let mut svc: Service = svc_info.into();
 
                 // If the existing service has the same image id as the
                 // locally stored image, then we replace it with the target img
                 // name
-                if existing.image.is_some() && existing.image == local_img {
-                    existing.image = Some(tgt_img);
+                if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+                    svc.image = tgt_img;
                 }
+                svc_ptr.assign(svc);
 
-                svc.assign(existing);
-
-                return Ok(svc);
+                return Ok(svc_ptr);
             }
             Err(e) => {
                 if let bollard::errors::Error::DockerResponseServerError { status_code, .. } = e {
@@ -332,26 +413,198 @@ fn install_service(
             .with_context(|| format!("failed to create container for service {service_name}"))?;
 
         // Look for the new service
-        let mut new_svc: Service = docker
-            .inspect_container(container_name.as_str(), None)
+        let mut svc: Service = docker
+            .inspect_container(&container_name, None)
             .await
             .with_context(|| {
                 format!("failed to read container information for service {service_name}")
             })?
             .into();
 
-        // If the existing service has the same image id as the
-        // locally stored image, then we replace it with the target img
-        // name
-        if new_svc.image.is_some() && new_svc.image == local_img {
-            new_svc.image = Some(tgt_img);
+        if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+            svc.image = tgt_img;
         }
 
         // Assign the pointer to the new service info
-        svc.assign(new_svc);
+        svc_ptr.assign(svc);
 
-        Ok(svc)
+        Ok(svc_ptr)
     })
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct StartServiceError(#[from] anyhow::Error);
+
+/// Start a service container
+///
+/// Condition: the service has been created and has the same configuration as the target
+/// Effect: set the service status to Running
+/// Action: start the container
+fn start_service(
+    mut svc_view: View<Service>,
+    Args(service_name): Args<String>,
+    Target(tgt): Target<TargetService>,
+    docker: Res<Docker>,
+) -> Update<Service, StartServiceError> {
+    let svc_config = ServiceConfig::from(svc_view.clone());
+    let tgt_img = tgt.image.clone();
+    let tgt_config = ServiceConfig::from(tgt);
+
+    // If configurations match, then update the service status
+    if tgt_config == svc_config && !matches!(svc_view.status, Some(ServiceStatus::Running)) {
+        svc_view.status = Some(ServiceStatus::Running);
+    }
+
+    with_io(svc_view, |mut svc_view| async move {
+        if let Some(ref id) = svc_view.id {
+            docker
+                .start_container(id, None::<StartContainerOptions<String>>)
+                .await
+                .with_context(|| format!("failed to start container for {service_name}"))?;
+
+            // Inspect the service
+            let mut svc: Service = docker
+                .inspect_container(id, None)
+                .await
+                .with_context(|| {
+                    format!("failed to read container information for service {service_name}")
+                })?
+                .into();
+
+            if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+                svc.image = tgt_img;
+            }
+            *svc_view = svc;
+        } else {
+            Err(anyhow!("no container Id for {service_name}"))?;
+        }
+
+        Ok(svc_view)
+    })
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct StopServiceError(#[from] anyhow::Error);
+
+/// Stop a service container
+///
+/// Condition: the service exists and is running
+/// Effect: set the service status to Stopped
+/// Action: stop the container
+fn stop_service(
+    mut svc_view: View<Service>,
+    Args(service_name): Args<String>,
+    Target(tgt): Target<TargetService>,
+    docker: Res<Docker>,
+) -> Update<Service, StartServiceError> {
+    let tgt_img = tgt.image.clone();
+
+    if matches!(svc_view.status, Some(ServiceStatus::Running)) {
+        svc_view.status = Some(ServiceStatus::Stopped);
+    }
+
+    with_io(svc_view, |mut svc_view| async move {
+        if let Some(ref id) = svc_view.id {
+            docker
+                .stop_container(id, None)
+                .await
+                .with_context(|| format!("failed to stop container for {service_name}"))?;
+
+            // Inspect the service
+            let mut svc: Service = docker
+                .inspect_container(id, None)
+                .await
+                .with_context(|| {
+                    format!("failed to read container information for service {service_name}")
+                })?
+                .into();
+
+            if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+                svc.image = tgt_img;
+            }
+            svc_view.assign(svc);
+        } else {
+            Err(anyhow!("no container Id for {service_name}"))?;
+        }
+
+        Ok(svc_view)
+    })
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct UninstallServiceError(#[from] anyhow::Error);
+
+/// Remove a service container
+///
+/// Condition: the service exists and is not running
+/// Effect: remove the service from the state
+/// Action: remove the container
+fn uninstall_service(
+    mut svc_ptr: Pointer<Service>,
+    Args(service_name): Args<String>,
+    docker: Res<Docker>,
+) -> Delete<Service, StartServiceError> {
+    // Delete the service if it is not running
+    let svc_id = svc_ptr.as_ref().and_then(|svc| svc.id.clone());
+    if let Some(ref svc) = *svc_ptr {
+        if !matches!(svc.status, Some(ServiceStatus::Running)) {
+            svc_ptr.unassign();
+        }
+    }
+
+    with_io(svc_ptr, |mut svc_ptr| async move {
+        if let Some(id) = svc_id {
+            docker
+                .remove_container(
+                    &id,
+                    Some(bollard::container::RemoveContainerOptions {
+                        v: true,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .with_context(|| format!("failed to remove container for {service_name}"))?;
+
+            // TODO: we probably want to check that the service was deleted
+
+            svc_ptr.unassign();
+        } else {
+            Err(anyhow!("no container Id for {service_name}"))?;
+        }
+
+        Ok(svc_ptr)
+    })
+}
+
+/// Stop and remove a service container method
+///
+/// Condition: the service exists and is running
+/// Effect: stop and remove the service from the state
+/// Action: remove the container
+fn stop_and_uninstall_service(svc_view: View<Service>) -> Vec<Task> {
+    let mut actions = vec![];
+    if matches!(svc_view.status, Some(ServiceStatus::Running)) {
+        actions.push(stop_service.with_target(TargetService::from(svc_view.clone())));
+    }
+
+    actions.push(uninstall_service.into_task());
+
+    actions
+}
+
+/// Remove the service and its image
+fn purge_service(svc_view: View<Service>) -> Vec<Task> {
+    let mut actions = vec![];
+    actions.push(stop_and_uninstall_service.into_task());
+
+    if let Some(ref id) = svc_view.id {
+        actions.push(remove_image.with_arg("image_name", id));
+    }
+
+    actions
 }
 
 pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> {
@@ -359,11 +612,16 @@ pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> 
     let docker = Docker::connect_with_local_defaults().unwrap();
 
     Worker::new()
-        .job(
+        .jobs(
             "/images/{image_name}",
-            create(fetch_image).with_description(|Args(image_name): Args<String>| {
-                format!("pull image '{image_name}'")
-            }),
+            [
+                create(fetch_image).with_description(|Args(image_name): Args<String>| {
+                    format!("pull image '{image_name}'")
+                }),
+                none(remove_image).with_description(|Args(image_name): Args<String>| {
+                    format!("remove image '{image_name}'")
+                }),
+            ],
         )
         .jobs(
             "/services/{service_name}",
@@ -372,6 +630,17 @@ pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> 
                 create(install_service).with_description(|Args(service_name): Args<String>| {
                     format!("install container for service '{service_name}'")
                 }),
+                update(start_service).with_description(|Args(service_name): Args<String>| {
+                    format!("start container for service '{service_name}'")
+                }),
+                update(stop_service).with_description(|Args(service_name): Args<String>| {
+                    format!("stop container for service '{service_name}'")
+                }),
+                delete(uninstall_service).with_description(|Args(service_name): Args<String>| {
+                    format!("remove container for service '{service_name}'")
+                }),
+                delete(purge_service).with_priority(16),
+                delete(stop_and_uninstall_service).with_priority(8),
             ],
         )
         .resource::<Docker>(docker)
@@ -381,8 +650,9 @@ pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> 
 
 #[cfg(test)]
 mod tests {
-    use bollard::container::ListContainersOptions;
+    use bollard::container::{ListContainersOptions, RemoveContainerOptions};
     use gustav::worker::SeekStatus;
+    use gustav::{Dag, seq};
     use serde_json::json;
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{EnvFilter, prelude::*};
@@ -407,7 +677,7 @@ mod tests {
 
     const PROJECT_NAME: &str = "my-project";
 
-    async fn after() {
+    async fn cleanup() {
         let docker = Docker::connect_with_local_defaults().unwrap();
         let containers = docker
             .list_containers(Some(ListContainersOptions::<String> {
@@ -419,9 +689,11 @@ mod tests {
                 containers
                     .into_iter()
                     .filter(|c| {
-                        c.names
-                            .iter()
-                            .any(|names| names.iter().any(|name| name.starts_with(PROJECT_NAME)))
+                        c.names.iter().any(|names| {
+                            names
+                                .iter()
+                                .any(|name| name.starts_with(&format!("/{}_", PROJECT_NAME)))
+                        })
                     })
                     .collect()
             })
@@ -430,7 +702,16 @@ mod tests {
         // Delete containers
         for c in containers {
             if let Some(id) = c.id {
-                docker.delete_service(id.as_str()).await.unwrap_or(());
+                docker
+                    .remove_container(
+                        &id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .unwrap();
             }
         }
 
@@ -458,11 +739,54 @@ mod tests {
         assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
 
         // cleanup
-        after().await
+        cleanup().await
     }
 
     #[tokio::test]
-    async fn test_create_container() {
+    async fn test_start_container() {
+        before();
+
+        let worker = create_worker(Project::new(PROJECT_NAME));
+        let target = serde_json::from_value::<TargetProject>(json!({
+            "name": "my-project",
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Running"
+                }
+            }
+        }))
+        .unwrap();
+
+        // Seeking the target must succeed
+        let worker = worker.seek_target(target.clone()).await.unwrap();
+        assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
+
+        // The alpine image must exist now
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let img = docker.inspect_image("alpine:3.18").await.unwrap();
+
+        // The image ids should match
+        let state = worker.state().await.unwrap();
+        assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
+
+        let container = docker
+            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .await
+            .unwrap();
+        assert_eq!(container.id, state.services.get("my-service").unwrap().id);
+        assert_eq!(
+            container.state.unwrap().status,
+            Some(ContainerStateStatusEnum::RUNNING)
+        );
+
+        // cleanup
+        cleanup().await
+    }
+
+    #[tokio::test]
+    async fn test_create_start_and_stop_container() {
         before();
 
         let worker = create_worker(Project::new(PROJECT_NAME));
@@ -476,7 +800,6 @@ mod tests {
             }
         }))
         .unwrap();
-        println!("{:?}", target);
 
         // Seeking the target must succeed
         let worker = worker.seek_target(target).await.unwrap();
@@ -491,7 +814,7 @@ mod tests {
         assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
 
         let container = docker
-            .inspect_container(format!("{}_my-service", PROJECT_NAME).as_str(), None)
+            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
             .await
             .unwrap();
         assert_eq!(container.id, state.services.get("my-service").unwrap().id);
@@ -499,8 +822,86 @@ mod tests {
             container.state.unwrap().status,
             Some(ContainerStateStatusEnum::CREATED)
         );
+        let old_container_id = container.id;
+
+        let target = serde_json::from_value::<TargetProject>(json!({
+            "name": "my-project",
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Running"
+                }
+            }
+        }))
+        .unwrap();
+
+        let workflow = worker.find_workflow(target.clone()).await.unwrap();
+        let expected: Dag<&str> = seq!("start container for service 'my-service'");
+        assert_eq!(workflow.to_string(), expected.to_string());
+
+        // Seeking the target must succeed
+        let worker = worker.seek_target(target).await.unwrap();
+        assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
+
+        // The container ids should match
+        let container = docker
+            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .await
+            .unwrap();
+        assert_eq!(old_container_id, container.id);
+        assert_eq!(
+            container.state.unwrap().status,
+            Some(ContainerStateStatusEnum::RUNNING)
+        );
+
+        let target = serde_json::from_value::<TargetProject>(json!({
+            "name": "my-project",
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Stopped"
+                }
+            }
+        }))
+        .unwrap();
+
+        // Seeking the target must succeed
+        let worker = worker.seek_target(target).await.unwrap();
+        assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
+
+        // The container ids should match
+        let container = docker
+            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .await
+            .unwrap();
+        assert_eq!(old_container_id, container.id);
+        assert_eq!(
+            container.state.unwrap().status,
+            Some(ContainerStateStatusEnum::EXITED)
+        );
+
+        let target = serde_json::from_value::<TargetProject>(json!({
+            "name": "my-project",
+            "services": {}
+        }))
+        .unwrap();
+
+        // Seeking the target must succeed
+        let worker = worker.seek_target(target).await.unwrap();
+        assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
+
+        // The container should no longer exist
+        let container = docker
+            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .await;
+        assert!(matches!(
+            container,
+            Err(bollard::errors::Error::DockerResponseServerError { .. })
+        ));
 
         // cleanup
-        after().await
+        cleanup().await
     }
 }
