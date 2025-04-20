@@ -1,4 +1,90 @@
 - commits:
+    - subject: Move state type conversion to planner
+      hash: 4ed3ad1d12ae2e1eeee90444739540db9995edd0
+      body: |
+        The planner needs to be aware of the target type, so it can properly
+        compare the updated state with the target on each iteration of the
+        search.
+
+        This transformation was previously done on the Worker
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Split worker input and output types
+      hash: 48c340d9a103cd3f4b06c4b29ce676c0f4f69142
+      body: |
+        This allow to have fields that exist in the worker state that
+        are not connsidered for state comparison purposes. Some examples of this
+        are dynamically created ids, timestamps, etc.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Simplify Worker interface
+      hash: c0f1774462ed439ecd5b2c02187c40066c084d25
+      body: |
+        Remove the wait and cancel methods, the `seek_target` call is now async
+        and returns when the target has been reached or an error (recoverable or
+        not) happens. The search is interrupted if the worker is dropped.
+
+        This also drops re-try behavior. Users can implement their own backoff
+        and retry behavior.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Create Interrupt abstraction
+      hash: 301237667bbe07dffd27de3c87b929876a523a79
+      body: |
+        This makes the code easier to read. This commit also interrupts tasks
+        if the interrupt signal is set
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Move testing helper functions into Worker
+      hash: c49796d0bb38daa272a3d5d81511c75e7dd45010
+      body: >
+        With the introduction of shared worker resources and the
+
+        `Res`extractor, testing helpers like `test_task` (previously in the
+        domain module) or
+
+        `find_workflow` (previously in the planner module), no longer be
+
+        trusted to succeed unless in the context of a `Worker` instance.
+
+
+        This commit moves them under a `testing` module in worker that is
+
+        exported if `debug_assertions` is set.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Add Resource support to the Worker
+      hash: 8edacc55ae64984283e3bb48f156160ebca5e2a9
+      body: |
+        Resources are shared/read-only data that may not be serializable, but
+        are necessary for Task execution. Example of this are database
+        connections, sockets, filesystem handlers, etc.
+
+        Resources can be accessed with the `Res` extractor
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.12.0
+  title: ""
+  date: 2025-04-20T23:35:54.564Z
+- commits:
     - subject: Add support for executing parallel workflows
       hash: 44e8df9483dda882a1d4fc40ee4c285071a0ed8e
       body: |
