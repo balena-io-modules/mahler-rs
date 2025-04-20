@@ -23,6 +23,15 @@ pub enum Error {
     #[error("condition failed")]
     ConditionFailed,
 
-    #[error("task runtime error: {0}")]
+    #[error(transparent)]
     Runtime(#[from] RuntimeError),
+}
+
+impl PartialEq for Error {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Error::ConditionFailed, Error::ConditionFailed)
+        )
+    }
 }

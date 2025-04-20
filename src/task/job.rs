@@ -13,10 +13,10 @@ pub enum Operation {
     None,
 }
 
-#[derive(Debug)]
 /// Jobs are generic work definitions.
 ///
 /// They are assignable to an operation and can be given a priority
+#[derive(Debug, Clone)]
 pub struct Job {
     operation: Operation,
     task: Task,
@@ -28,7 +28,8 @@ impl Job {
         Job {
             operation: Operation::Update,
             task,
-            priority: u8::MAX,
+            // all tasks have the lowest priority
+            priority: 0,
         }
     }
 
@@ -44,46 +45,22 @@ impl Job {
     ///
     /// This defines search priority when looking for jobs
     /// the lower the value, the higher the priority
-    pub fn with_priority(self, priority: u8) -> Self {
-        let Job {
-            operation,
-            task: job,
-            ..
-        } = self;
-        Job {
-            operation,
-            task: job,
-            priority,
-        }
+    pub fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
     }
 
-    fn with_operation(self, operation: Operation) -> Self {
-        let Job {
-            priority,
-            task: job,
-            ..
-        } = self;
-        Job {
-            operation,
-            task: job,
-            priority,
-        }
+    fn with_operation(mut self, operation: Operation) -> Self {
+        self.operation = operation;
+        self
     }
 
-    pub fn with_description<D, T>(self, description: D) -> Self
+    pub fn with_description<D, T>(mut self, description: D) -> Self
     where
         D: Description<T>,
     {
-        let Job {
-            operation,
-            task: job,
-            priority,
-        } = self;
-        Job {
-            operation,
-            task: job.with_description(description),
-            priority,
-        }
+        self.task = self.task.with_description(description);
+        self
     }
 
     pub(crate) fn clone_task(&self, context: Context) -> Task {
@@ -130,7 +107,8 @@ impl Ord for Job {
             .degree()
             .cmp(&other.task.degree())
             .then(self.operation.cmp(&other.operation))
-            .then(self.priority.cmp(&other.priority))
+            // lower priority is better
+            .then(other.priority.cmp(&self.priority))
             .then(self.task.id().cmp(other.task.id()))
     }
 }

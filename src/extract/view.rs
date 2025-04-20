@@ -39,21 +39,24 @@ impl<T> Pointer<T> {
         }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Assign a value to location indicated by
     /// the path.
     pub fn assign(&mut self, value: impl Into<T>) -> &mut T {
-        self.state = Some(value.into());
-        self.state.as_mut().unwrap()
+        self.insert(value.into())
+    }
+
+    /// Apply a function to the internal value of the pointer
+    /// if it exists
+    pub fn update_with<F: FnOnce(T) -> T>(mut self, f: F) -> Self {
+        self.state = self.state.map(f);
+        self
     }
 
     /// Clear the value at the location indicated by
     /// the path
-    pub fn unassign(&mut self) {
-        self.state = None;
+    pub fn unassign(mut self) -> Self {
+        self.state.take();
+        self
     }
 
     /// Initialize the location pointed by the path
@@ -63,6 +66,11 @@ impl<T> Pointer<T> {
         T: Default,
     {
         self.assign(T::default())
+    }
+
+    /// Return true if the pointer is null
+    pub fn is_null(&self) -> bool {
+        self.state.is_none()
     }
 }
 
@@ -195,6 +203,13 @@ impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
     }
 }
 
+/// Convert a simple pointer into an effect
+impl<T, E> From<Pointer<T>> for Effect<Pointer<T>, E> {
+    fn from(ptr: Pointer<T>) -> Effect<Pointer<T>, E> {
+        Effect::from_result(Ok(ptr))
+    }
+}
+
 // Allow tasks to return a pointer
 // This converts the pointer into a pure effect
 impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
@@ -210,12 +225,6 @@ impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
 /// pointed by the value exists and extraction will fail otherwise
 #[derive(Debug)]
 pub struct View<T>(Pointer<T>);
-
-impl<T> View<T> {
-    pub fn path(&self) -> &Path {
-        self.0.path()
-    }
-}
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
     type Error = InputError;
@@ -250,6 +259,13 @@ impl<T> DerefMut for View<T> {
 impl<T: Serialize> IntoResult<Patch> for View<T> {
     fn into_result(self) -> Result<Patch, Error> {
         self.0.into_result()
+    }
+}
+
+/// Convert a simple view into an effect
+impl<T, E> From<View<T>> for Effect<View<T>, E> {
+    fn from(view: View<T>) -> Effect<View<T>, E> {
+        Effect::from_result(Ok(view))
     }
 }
 
@@ -445,7 +461,7 @@ mod tests {
             Pointer::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
 
         // Delete the value
-        ptr.unassign();
+        ptr = ptr.unassign();
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();
@@ -522,7 +538,7 @@ mod tests {
             Pointer::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
 
         // Remove the second element
-        ptr.unassign();
+        ptr = ptr.unassign();
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();
@@ -554,7 +570,7 @@ mod tests {
             Pointer::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
 
         // Remove the third element
-        ptr.unassign();
+        ptr.take();
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();

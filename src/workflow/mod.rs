@@ -4,15 +4,22 @@ use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::instrument;
 
-use crate::ack_channel::Sender;
-use crate::dag::{AggregateError, Dag, ExecutionStatus, Task};
 use crate::system::System;
 use crate::task::{Action, Error as TaskError};
+
+mod aggregate_error;
+mod channel;
+mod dag;
+mod interrupt;
+
+pub use aggregate_error::*;
+pub(crate) use channel::*;
+pub use dag::*;
+pub(crate) use interrupt::*;
 
 #[derive(Hash)]
 struct WorkUnitId<'s> {
@@ -50,12 +57,12 @@ impl WorkUnit {
         Self { id, action, output }
     }
 
-    pub fn new_id(task: &Action, state: &Value) -> Result<u64, jsonptr::resolve::ResolveError> {
+    pub fn new_id(task: &Action, state: &Value) -> u64 {
         let pointer = task.context().path.as_ref();
 
         // Resolve the value that will be modified by
-        // the task
-        let state = pointer.resolve(state)?;
+        // the task. If the value does not exist yet, we use Null
+        let state = pointer.resolve(state).unwrap_or(&Value::Null);
 
         let action_id = WorkUnitId {
             task_id: String::from(task.id()),
@@ -70,7 +77,7 @@ impl WorkUnit {
         action_id.hash(&mut hasher);
 
         // Retrieve the hash value
-        Ok(hasher.finish())
+        hasher.finish()
     }
 }
 
@@ -86,7 +93,7 @@ impl Task for WorkUnit {
     type Changes = Patch;
     type Error = TaskError;
 
-    #[instrument(name="run_task", skip_all, fields(task=%self.action, state=%system.root()), err)]
+    #[instrument(name="run_task", skip_all, fields(id=%self.action.id(), task=%self.action, state=%system.root()), err)]
     async fn run(&self, system: &System) -> Result<Patch, TaskError> {
         // dry-run the task to test that conditions hold
         // before executing the action should not really fail at this point
@@ -143,10 +150,10 @@ impl Workflow {
         self,
         system: &Arc<RwLock<System>>,
         channel: Sender<Patch>,
-        sigint: &Arc<AtomicBool>,
+        interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
         self.dag
-            .execute(system, channel, sigint)
+            .execute(system, channel, interrupt)
             .await
             .map(|s| s.into())
     }

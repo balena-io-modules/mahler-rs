@@ -1,11 +1,10 @@
 use async_trait::async_trait;
-use std::fmt::{self, Display};
+use std::fmt;
 use std::ops::Add;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
-use thiserror::Error;
 
-use crate::ack_channel::Sender;
+use super::channel::Sender;
+use super::{AggregateError, Interrupt};
 
 type Link<T> = Option<Arc<RwLock<Node<T>>>>;
 
@@ -576,24 +575,9 @@ macro_rules! dag {
     };
 }
 
-pub enum ExecutionStatus {
+pub(crate) enum ExecutionStatus {
     Completed,
     Interrupted,
-}
-
-#[derive(Error, Debug)]
-pub struct AggregateError<E>(#[from] pub Vec<E>);
-
-impl<E> Display for AggregateError<E>
-where
-    E: Display,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for e in &self.0 {
-            writeln!(f, "- {}", e)?;
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -614,7 +598,7 @@ where
         self,
         input: &Arc<tokio::sync::RwLock<T::Input>>,
         channel: Sender<T::Changes>,
-        interrupt: &Arc<AtomicBool>,
+        interrupt: Interrupt,
     ) -> Result<ExecutionStatus, AggregateError<T::Error>> {
         enum InnerNode<T> {
             Item { task: T, next: Link<T> },
@@ -627,11 +611,32 @@ where
             Interrupted,
         }
 
+        async fn run_task<T: Task>(
+            task: T,
+            value: &T::Input,
+            interrupt: &Interrupt,
+        ) -> Result<T::Changes, InnerError<T::Error>> {
+            let future = task.run(value);
+
+            // XXX: this assumes tasks are cancel-safe which might be a source
+            // of problems in the future
+            // See: https://docs.rs/tokio/latest/tokio/macro.select.html#cancellation-safety
+            // alternatively we might want to let tasks check the interrupt directly?
+            tokio::select! {
+                _ = interrupt.wait() => {
+                    Err(InnerError::Interrupted)
+                }
+                result = future => {
+                    result.map_err(|e|  InnerError::Failure(vec![e]))
+                }
+            }
+        }
+
         async fn exec_node<T>(
             node: Link<T>,
             input: &Arc<tokio::sync::RwLock<T::Input>>,
             channel: &Sender<T::Changes>,
-            interrupt: &Arc<AtomicBool>,
+            interrupt: &Interrupt,
         ) -> Result<Link<T>, InnerError<T::Error>>
         where
             T: Task + Clone,
@@ -641,7 +646,7 @@ where
             let mut errors = Vec::new();
 
             while let Some(node_rc) = current {
-                if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                if interrupt.is_set() {
                     return Err(InnerError::Interrupted);
                 }
 
@@ -665,17 +670,19 @@ where
                             guard.clone()
                         };
 
-                        match task.run(&value).await {
+                        match run_task(task, &value, interrupt).await {
                             Ok(changes) => {
                                 if channel.send(changes).await.is_err() {
                                     return Err(InnerError::Interrupted);
                                 }
                             }
-                            Err(err) => {
-                                errors.push(err);
+                            Err(InnerError::Interrupted) => return Err(InnerError::Interrupted),
+                            Err(InnerError::Failure(mut err)) => {
+                                errors.append(&mut err);
                                 break;
                             }
                         };
+
                         current = next;
                     }
                     InnerNode::Fork { branches } => {
@@ -725,7 +732,7 @@ where
 
         let mut next = self.head;
         while next.is_some() {
-            next = match exec_node(next, input, &channel, interrupt).await {
+            next = match exec_node(next, input, &channel, &interrupt).await {
                 Ok(next) => next,
                 Err(InnerError::Interrupted) => return Ok(ExecutionStatus::Interrupted),
                 Err(InnerError::Failure(err)) => return Err(AggregateError(err)),
@@ -745,9 +752,10 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
         time::Instant,
     };
+    use tracing::debug;
 
     use super::*;
-    use crate::ack_channel::ack_channel;
+    use crate::workflow::channel;
 
     fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
         if let Node::Item { .. } = &*node.read().unwrap() {
@@ -1073,8 +1081,8 @@ mod tests {
 
         let dag: Dag<DummyTask> = seq!(DummyTask, DummyTask, DummyTask);
         let reader = Arc::new(tokio::sync::RwLock::new(()));
-        let (tx, mut rx) = ack_channel(10);
-        let sigint = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = channel(10);
+        let sigint = Interrupt::new();
 
         let count_atomic = Arc::new(AtomicUsize::new(0));
         let counter = count_atomic.clone();
@@ -1086,7 +1094,7 @@ mod tests {
             }
         });
 
-        let result = dag.execute(&reader, tx, &sigint).await;
+        let result = dag.execute(&reader, tx, sigint).await;
         assert!(matches!(result, Ok(ExecutionStatus::Completed)));
         assert_eq!(count_atomic.load(Ordering::Relaxed), 3);
     }
@@ -1127,8 +1135,8 @@ mod tests {
         let dag: Dag<SleepyTask> = dag!(seq!(task_a), seq!(task_b)) + seq!(task_c);
 
         let input = Arc::new(tokio::sync::RwLock::new(()));
-        let (tx, mut rx) = ack_channel::<&'static str>(10);
-        let sigint = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = channel::<&'static str>(10);
+        let sigint = Interrupt::new();
 
         let start = Instant::now();
 
@@ -1145,9 +1153,9 @@ mod tests {
             });
         }
 
-        let exec_result = dag.execute(&input, tx, &sigint).await;
+        let exec_result = dag.execute(&input, tx, sigint).await;
         let elapsed = start.elapsed();
-        println!("Execution time: {:?}", elapsed);
+        debug!("Execution time: {:?}", elapsed);
         assert!(matches!(exec_result, Ok(ExecutionStatus::Completed)));
 
         let results = results.read().await;
@@ -1178,10 +1186,10 @@ mod tests {
         );
 
         let input = Arc::new(tokio::sync::RwLock::new(()));
-        let (tx, mut rx) = ack_channel::<&'static str>(10);
-        let interrupt = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = channel::<&'static str>(10);
+        let interrupt = Interrupt::new();
 
-        let interrupt_clone = Arc::clone(&interrupt);
+        let interrupt_clone = interrupt.clone();
 
         // Collect all results
         let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
@@ -1199,10 +1207,10 @@ mod tests {
         // Set interrupt after 50ms
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            interrupt_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            interrupt_clone.set();
         });
 
-        let exec_result = dag.execute(&input, tx, &interrupt).await;
+        let exec_result = dag.execute(&input, tx, interrupt).await;
 
         assert!(matches!(exec_result, Ok(ExecutionStatus::Interrupted)));
 
@@ -1269,8 +1277,8 @@ mod tests {
         });
 
         let input = Arc::new(tokio::sync::RwLock::new(()));
-        let (tx, mut rx) = ack_channel::<&'static str>(10);
-        let interrupt = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = channel::<&'static str>(10);
+        let interrupt = Interrupt::new();
 
         // Collect all results
         let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
@@ -1285,7 +1293,7 @@ mod tests {
             });
         }
 
-        let exec_result = dag.execute(&input, tx, &interrupt).await;
+        let exec_result = dag.execute(&input, tx, interrupt).await;
 
         assert!(exec_result.is_err(), "Expected execution to fail on error");
 
