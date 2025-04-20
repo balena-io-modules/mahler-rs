@@ -297,18 +297,12 @@ fn remove_image(
     Args(image_name): Args<String>,
     docker: Res<Docker>,
 ) -> Delete<Image, RemoveImageError> {
-    with_io(img_ptr, |mut img_ptr| async move {
-        if let Some(id) = img_ptr.as_ref().and_then(|img| img.id.as_ref()) {
-            docker
-                .remove_image(id, None, None)
-                .await
-                .with_context(|| format!("failed to remove image {image_name}"))?;
-
-            img_ptr.take();
-        } else {
-            // can this actually happen?
-            Err(anyhow!("image not found: {image_name}"))?;
-        }
+    // TODO: only remove the image if it not being used by any service
+    with_io(img_ptr, |img_ptr| async move {
+        docker
+            .remove_image(&image_name, None, None)
+            .await
+            .with_context(|| format!("failed to remove image {image_name}"))?;
 
         Ok(img_ptr)
     })
@@ -577,6 +571,22 @@ fn uninstall_service(
     .map(|svc_ptr| svc_ptr.unassign())
 }
 
+/// Recreate the service on configuration change
+fn update_service(svc_view: View<Service>, Target(tgt): Target<TargetService>) -> Vec<Task> {
+    let mut tasks = Vec::new();
+    if svc_view.image != tgt.image {
+        tasks.push(fetch_service_image.with_target(tgt.clone()));
+        tasks.push(stop_and_uninstall_service.into_task());
+        tasks.push(install_service.with_target(tgt));
+
+        if let Some(img_name) = svc_view.image.as_ref() {
+            // Remove the existing image
+            tasks.push(remove_image.with_arg("image_name", img_name));
+        }
+    }
+    tasks
+}
+
 /// Stop and remove a service container method
 ///
 /// Condition: the service exists and is running
@@ -634,13 +644,15 @@ pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> 
                 update(stop_service).with_description(|Args(service_name): Args<String>| {
                     format!("stop container for service '{service_name}'")
                 }),
-                delete(uninstall_service).with_description(|Args(service_name): Args<String>| {
+                // Use any for uninstall so it is applicable to configuration change
+                any(uninstall_service).with_description(|Args(service_name): Args<String>| {
                     format!("remove container for service '{service_name}'")
                 }),
                 // give this method higher priority than stop and uninstall
                 // service (default is 0)
                 delete(purge_service).with_priority(8),
                 delete(stop_and_uninstall_service),
+                update(update_service),
             ],
         )
         .resource::<Docker>(docker)
@@ -653,6 +665,7 @@ mod tests {
     use bollard::container::{ListContainersOptions, RemoveContainerOptions};
     use gustav::worker::SeekStatus;
     use gustav::{seq, Dag};
+    use pretty_assertions::assert_eq;
     use serde_json::json;
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
@@ -724,7 +737,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_image() {
+    async fn it_can_fetch_image() {
         before();
 
         let docker = Docker::connect_with_defaults().unwrap();
@@ -745,7 +758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_container() {
+    async fn it_can_start_container() {
         before();
 
         let worker = create_worker(Project::new(PROJECT_NAME));
@@ -785,6 +798,122 @@ mod tests {
 
         // cleanup
         cleanup().await
+    }
+
+    #[tokio::test]
+    async fn it_finds_a_workflow_to_start_service() {
+        before();
+
+        let initial_state = serde_json::from_value::<Project>(json!({
+            "name": "my-project",
+            "images": {},
+            "services": {}
+        }))
+        .unwrap();
+        let worker = create_worker(initial_state);
+        let target = serde_json::from_value::<TargetProject>(json!({
+            "name": "my-project",
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Running"
+                }
+            }
+        }))
+        .unwrap();
+
+        let workflow = worker.find_workflow(target).await.unwrap();
+        let expected: Dag<&str> = seq!(
+            "pull image 'alpine:3.18'",
+            "install container for service 'my-service'",
+            "start container for service 'my-service'"
+        );
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[tokio::test]
+    async fn it_finds_a_workflow_to_recreate_service() {
+        before();
+
+        let initial_state = serde_json::from_value::<Project>(json!({
+            "name": "my-project",
+            "images": {
+                "alpine:3.18": {}
+            },
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Running"
+                }
+            }
+        }))
+        .unwrap();
+        let worker = create_worker(initial_state);
+        let target = serde_json::from_value::<TargetProject>(json!({
+            "name": "my-project",
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "30"],
+                    "status": "Running"
+                }
+            }
+        }))
+        .unwrap();
+
+        let workflow = worker.find_workflow(target).await.unwrap();
+        let expected: Dag<&str> = seq!(
+            "stop container for service 'my-service'",
+            "remove container for service 'my-service'",
+            "install container for service 'my-service'",
+            "start container for service 'my-service'"
+        );
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[tokio::test]
+    async fn it_finds_a_workflow_to_update_service() {
+        before();
+
+        let initial_state = serde_json::from_value::<Project>(json!({
+            "name": "my-project",
+            "images": {
+                "alpine:3.18": {}
+            },
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Running"
+                }
+            }
+        }))
+        .unwrap();
+        let worker = create_worker(initial_state);
+        let target = serde_json::from_value::<TargetProject>(json!({
+            "name": "my-project",
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.20",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Running"
+                }
+            }
+        }))
+        .unwrap();
+
+        let workflow = worker.find_workflow(target).await.unwrap();
+        let expected: Dag<&str> = seq!(
+            "pull image 'alpine:3.20'",
+            "stop container for service 'my-service'",
+            "remove container for service 'my-service'",
+            "install container for service 'my-service'",
+            "remove image 'alpine:3.18'",
+            "start container for service 'my-service'",
+        );
+        assert_eq!(workflow.to_string(), expected.to_string());
     }
 
     #[tokio::test]
