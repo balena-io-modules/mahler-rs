@@ -1,0 +1,24 @@
+services:
+  sut:
+    build: .
+    depends_on:
+      podman:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://podman:2375
+
+  podman:
+    image: quay.io/podman/stable
+    command: podman system service tcp://0.0.0.0:2375 --time=0
+    volumes:
+      - containers:/var/lib/containers
+    privileged: true
+    healthcheck:
+      test: ['CMD', 'podman', 'info']
+      interval: 5s
+      retries: 10
+      start_period: 2s
+      timeout: 2s
+
+volumes:
+  containers:
