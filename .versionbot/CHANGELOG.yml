@@ -1,4 +1,17 @@
 - commits:
+    - subject: Fix run-tests script
+      hash: 8fd9a6c7092d247cb7d7dbe8cb0b7f31eec27793
+      body: |
+        Updates the script to exit on the first test failure
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.12.1
+  title: ""
+  date: 2025-04-21T00:29:26.201Z
+- commits:
     - subject: Move state type conversion to planner
       hash: 4ed3ad1d12ae2e1eeee90444739540db9995edd0
       body: |
