@@ -3,20 +3,32 @@ use json_patch::Patch;
 use super::Task;
 
 use super::effect::Effect;
-use super::errors::{Error, RuntimeError};
+use super::errors::Error;
+use crate::errors::RuntimeError;
 
 pub trait IntoResult<O> {
     fn into_result(self) -> Result<O, Error>;
 }
 
+/// Allow tasks to return an Option
 impl<T, O> IntoResult<O> for Option<T>
 where
-    O: Default,
     T: IntoResult<O>,
 {
     fn into_result(self) -> Result<O, Error> {
         self.map(|value| value.into_result())
             .ok_or_else(|| Error::ConditionFailed)?
+    }
+}
+
+/// Allow tasks to return a value that implements
+/// IntoResult<Patch>, e.g. View
+impl<I> From<I> for Effect<Patch, Error, I>
+where
+    I: IntoResult<Patch> + Send + 'static,
+{
+    fn from(value: I) -> Effect<Patch, Error, I> {
+        Effect::of(value).and_then(move |o| o.into_result())
     }
 }
 
@@ -29,7 +41,7 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     fn from(eff: Effect<I, E>) -> Effect<Patch, Error, I> {
-        eff.map_err(|e| Error::from(RuntimeError(Box::new(e))))
+        eff.map_err(|e| RuntimeError::new(e).into())
             .and_then(move |o| o.into_result())
     }
 }

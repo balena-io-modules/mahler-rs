@@ -210,14 +210,6 @@ impl<T, E> From<Pointer<T>> for Effect<Pointer<T>, E> {
     }
 }
 
-// Allow tasks to return a pointer
-// This converts the pointer into a pure effect
-impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
-    fn from(ptr: Pointer<T>) -> Effect<Patch, Error> {
-        Effect::from_result(ptr.into_result())
-    }
-}
-
 /// Extracts a sub-element of a state S as indicated by
 /// a path.
 ///
@@ -266,14 +258,6 @@ impl<T: Serialize> IntoResult<Patch> for View<T> {
 impl<T, E> From<View<T>> for Effect<View<T>, E> {
     fn from(view: View<T>) -> Effect<View<T>, E> {
         Effect::from_result(Ok(view))
-    }
-}
-
-// Allow tasks to return a view
-// This converts the view into a pure effect
-impl<T: Serialize> From<View<T>> for Effect<Patch, Error> {
-    fn from(view: View<T>) -> Effect<Patch, Error> {
-        Effect::from_result(view.into_result())
     }
 }
 

@@ -661,7 +661,7 @@ mod tests {
             if is_clear(&sys.blocks, &Location::Blk(block)) {
                 if *loc == Location::Table {
                     return Some(pickup.into_task());
-                } else {
+                } else if *loc != Location::Hand {
                     return Some(unstack.into_task());
                 }
             }
@@ -697,19 +697,20 @@ mod tests {
         fn move_blks(blocks: View<Blocks>, Target(target): Target<Blocks>) -> Vec<Task> {
             for blk in all_clear(&blocks) {
                 // we assume that the target is well formed
-                let blk_loc = target.get(blk).unwrap();
+                let tgt_loc = target.get(blk).unwrap();
+                let cur_loc = blocks.get(blk).unwrap();
 
-                // The block is free and it can be moved to the final target (another block or the table)
-                if is_clear(&blocks, blk_loc) {
+                // The block is free and it can be moved to the final location (another block or the table)
+                if cur_loc != tgt_loc && is_clear(&blocks, tgt_loc) {
                     return vec![
                         take.with_arg("block", blk.to_string()),
-                        put.with_arg("block", blk.to_string()).with_target(blk_loc),
+                        put.with_arg("block", blk.to_string()).with_target(tgt_loc),
                     ];
                 }
             }
 
             // If we get here, no blocks can be moved to the final location so
-            // we move it to the table
+            // we move them to the table
             let mut to_table: Vec<Task> = vec![];
             for b in all_clear(&blocks) {
                 to_table.push(take.with_arg("block", b.to_string()));
