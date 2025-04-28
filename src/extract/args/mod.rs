@@ -2,8 +2,9 @@ use anyhow::Context as AnyhowCtx;
 use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
+use crate::errors::ExtractionError;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, FromContext, InputError};
+use crate::task::{Context, FromContext};
 
 mod de;
 mod error;
@@ -12,7 +13,7 @@ mod error;
 pub struct Args<T>(pub T);
 
 impl<T: DeserializeOwned + Send> FromContext for Args<T> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_context(context: &Context) -> Result<Self, Self::Error> {
         let args = &context.args;
@@ -28,7 +29,7 @@ impl<T: DeserializeOwned + Send> FromContext for Args<T> {
 }
 
 impl<T: DeserializeOwned + Send> FromSystem for Args<T> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
         Self::from_context(context)

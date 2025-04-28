@@ -30,6 +30,7 @@ pub use testing::*;
 #[cfg(feature = "logging")]
 pub use logging::init as init_logging;
 
+use crate::errors::{IOError, InternalError, SerializationError};
 use crate::planner::{Domain, Error as PlannerError, Planner};
 use crate::system::{Resources, System};
 use crate::task::{Error as TaskError, Job};
@@ -40,62 +41,53 @@ pub mod prelude {
 }
 
 #[derive(Debug, Error)]
-#[error("serialization error: {0}")]
-pub struct SerializationError(#[from] serde_json::Error);
-
-#[derive(Debug, Error)]
 #[error(transparent)]
 pub struct Panicked(#[from] tokio::task::JoinError);
 
 #[derive(Debug, Error)]
-#[error("unexpected error: {0}")]
-pub struct UnexpectedError(#[from] anyhow::Error);
-
-#[derive(Debug, Error)]
 pub enum FatalError {
     #[error(transparent)]
+    /// An eror happened while serializing/deserializing
+    /// the worker input types
     Serialization(#[from] SerializationError),
 
     #[error(transparent)]
+    /// A panic happened within the worker execution, this
+    /// most likely mean there is an uncaught error in a task
     Panic(#[from] Panicked),
 
     #[error(transparent)]
-    Unexpected(#[from] UnexpectedError),
-}
+    /// An error happened with a task during planning. This most
+    /// likely mean there is a bug in a task. This error will
+    /// only be returned if debug_assertions are set. Otherwise
+    /// task errors are ignored by the planner
+    Planning(#[from] TaskError),
 
-#[derive(Debug, Error)]
-#[error("planning error: {0}")]
-pub struct PlanningError(#[from] PlannerError);
-
-#[derive(Debug, Error)]
-pub enum RecoverableError {
-    #[error("planning failure: {0}")]
-    Planning(#[from] PlanningError),
-
-    #[error("running workflow failure: {0}")]
-    Runtime(AggregateError<TaskError>),
+    #[error(transparent)]
+    /// An internal error occured during the worker operation
+    /// this is probably a bug
+    Internal(#[from] InternalError),
 }
 
 #[derive(Debug)]
 pub enum SeekStatus {
     /// Worker has reached the target state
-    TargetStateReached,
+    TargetReached,
     /// Workflow not found
     NotFound,
     /// Worker interrupted by user request
     Interrupted,
-    /// Worker execution terminated due to some unexpected error
-    Aborted(RecoverableError),
+    /// Worker execution was terminated due to some unexpected
+    /// error during runtime
+    Aborted(Vec<IOError>),
 }
 
 impl PartialEq for SeekStatus {
     fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (
-                SeekStatus::TargetStateReached,
-                SeekStatus::TargetStateReached
-            ) | (SeekStatus::NotFound, SeekStatus::NotFound)
+            (SeekStatus::TargetReached, SeekStatus::TargetReached)
+                | (SeekStatus::NotFound, SeekStatus::NotFound)
                 | (SeekStatus::Interrupted, SeekStatus::Interrupted)
         )
     }
@@ -376,7 +368,7 @@ impl<O, I> Worker<O, Ready, I> {
         I: Serialize + DeserializeOwned,
     {
         let cur_span = Span::current();
-        let tgt = serde_json::to_value(tgt).map_err(SerializationError)?;
+        let tgt = serde_json::to_value(tgt).map_err(SerializationError::from)?;
 
         let Ready {
             planner,
@@ -388,13 +380,13 @@ impl<O, I> Worker<O, Ready, I> {
             ..
         } = self.inner;
 
-        enum InternalResult {
+        enum SeekResult {
             TargetReached,
             WorkflowCompleted,
             Interrupted,
         }
 
-        enum InternalError {
+        enum SeekError {
             Runtime(AggregateError<TaskError>),
             Planning(PlannerError),
         }
@@ -405,28 +397,28 @@ impl<O, I> Worker<O, Ready, I> {
             tgt: &Value,
             channel: &Sender<Patch>,
             sigint: &Interrupt,
-        ) -> Result<InternalResult, InternalError> {
+        ) -> Result<SeekResult, SeekError> {
             let workflow = {
                 let system = sys.read().await;
                 planner
                     .find_workflow::<I>(&system, tgt)
-                    .map_err(InternalError::Planning)?
+                    .map_err(SeekError::Planning)?
             };
 
             if workflow.is_empty() {
-                return Ok(InternalResult::TargetReached);
+                return Ok(SeekResult::TargetReached);
             }
 
             let status = workflow
                 .execute(sys, channel.clone(), sigint.clone())
                 .await
-                .map_err(InternalError::Runtime)?;
+                .map_err(SeekError::Runtime)?;
 
             if matches!(status, WorkflowStatus::Interrupted) {
-                return Ok(InternalResult::Interrupted);
+                return Ok(SeekResult::Interrupted);
             }
 
-            Ok(InternalResult::WorkflowCompleted)
+            Ok(SeekResult::WorkflowCompleted)
         }
 
         let err_rx = writer_closed.clone();
@@ -443,9 +435,7 @@ impl<O, I> Worker<O, Ready, I> {
                         biased;
 
                         _ = err_rx.notified() => {
-                            cur_span.record("error", "failed to update worker internal state");
-                            cur_span.record("return", "aborted");
-                            return Err(UnexpectedError(anyhow!("state patch failed, worker state possibly tainted")))?;
+                            return Err(InternalError::from(anyhow!("state patch failed, worker state possibly tainted")))?;
                         }
 
                         _ = workflow_int.wait() => {
@@ -455,35 +445,49 @@ impl<O, I> Worker<O, Ready, I> {
 
                         res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &changes, &task_int) => {
                             match res {
-                                Ok(InternalResult::TargetReached) => {
+                                Ok(SeekResult::TargetReached) => {
                                     cur_span.record("return", "success");
-                                    return Ok((planner, SeekStatus::TargetStateReached));
+                                    return Ok((planner, SeekStatus::TargetReached));
                                 }
-                                Ok(InternalResult::WorkflowCompleted) => {}
-                                Ok(InternalResult::Interrupted) => {
+                                Ok(SeekResult::WorkflowCompleted) => {}
+                                Ok(SeekResult::Interrupted) => {
                                     cur_span.record("return", "interrupted");
                                     return Ok((planner, SeekStatus::Interrupted));
                                 }
-                                Err(InternalError::Planning(err)) => {
-                                    return match err {
-                                        PlannerError::NotFound => Ok((planner, SeekStatus::NotFound)),
-                                        PlannerError::Unexpected(e) => Err(UnexpectedError(e))?,
-                                        _ => {
-                                            cur_span.record("return", "aborted");
-                                            Ok((planner, SeekStatus::Aborted(RecoverableError::Planning(err.into()))))
+                                Err(SeekError::Planning(PlannerError::NotFound)) =>  return Ok((planner, SeekStatus::NotFound)),
+                                Err(SeekError::Planning(PlannerError::Serialization(e))) =>  return Err(e)?,
+                                Err(SeekError::Planning(PlannerError::Internal(e))) =>  return Err(e)?,
+                                Err(SeekError::Planning(PlannerError::Task(e))) => return Err(e)?,
+                                Err(SeekError::Runtime(err)) => {
+                                    let mut io = Vec::new();
+                                    let mut other = Vec::new();
+                                    let AggregateError (all) = err;
+                                    for e in all.into_iter() {
+                                        match e {
+                                            TaskError::IO(re) => io.push(re),
+                                            TaskError::ConditionFailed => {},
+                                            _ => other.push(e)
                                         }
-                                    };
-                                }
-                                Err(InternalError::Runtime(err)) => {
-                                    if err.iter().all(|e| matches!(e, TaskError::ConditionFailed)) {
-                                        // Re-plan if the only type of error is condition failed as
-                                        // the state may have changed outside the worker
-                                        continue;
+
                                     }
-                                    // TODO: maybe terminate the search if any UnexpectedError
-                                    // happen while running the workflow
-                                    cur_span.record("return", "aborted");
-                                    return Ok((planner, SeekStatus::Aborted(RecoverableError::Runtime(err))));
+
+                                    // If there are non-IO errors, there is
+                                    // probably a bug somewhere
+                                    if !other.is_empty() {
+                                        return Err(InternalError::from(anyhow!(AggregateError::from(other))))?;
+                                    }
+
+                                    // Abort if there are any runtime errors as those
+                                    // should be recoverable
+                                    if !io.is_empty() {
+                                        cur_span.record("return", "aborted");
+                                        return Ok((planner, SeekStatus::Aborted(io)));
+                                    }
+
+                                    // If we got here, all errors were of type ConditionNotMet
+                                    // in which case we re-plan as the state may have changed
+                                    // underneath the worker
+                                    continue;
                                 }
                             }
                         }
@@ -665,7 +669,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
+        assert_eq!(worker.status(), &SeekStatus::TargetReached);
         let state = worker.state().await.unwrap();
         assert_eq!(
             state,
@@ -686,10 +690,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            res.status(),
-            &SeekStatus::Aborted(RecoverableError::Planning(_))
-        ))
+        assert!(matches!(res.status(), &SeekStatus::NotFound))
     }
 
     #[tokio::test]
@@ -718,7 +719,7 @@ mod tests {
 
         // Wait for worker to finish
         let worker = worker.seek_target(2).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
+        assert_eq!(worker.status(), &SeekStatus::TargetReached);
 
         let results = results.read().await;
         assert_eq!(*results, vec![Some(1), Some(2)]);
@@ -754,7 +755,7 @@ mod tests {
 
         // Wait for worker to finish
         let worker = worker.seek_target(100).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
+        assert_eq!(worker.status(), &SeekStatus::TargetReached);
 
         let results = results.read().await;
         assert_eq!(
@@ -839,7 +840,7 @@ mod tests {
         let worker = worker.seek_target(1).await.unwrap();
 
         // Wait for worker to finish
-        assert_eq!(worker.status(), &SeekStatus::TargetStateReached);
+        assert_eq!(worker.status(), &SeekStatus::TargetReached);
 
         // Close the stream
         worker.stop();

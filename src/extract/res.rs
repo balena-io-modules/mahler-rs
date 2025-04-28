@@ -2,13 +2,14 @@ use anyhow::Context as AnyhowCxt;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use crate::errors::ExtractionError;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, InputError};
+use crate::task::Context;
 
 pub struct Res<R>(Arc<R>);
 
 impl<R: Send + Sync + 'static> FromSystem for Res<R> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_system(system: &System, _: &Context) -> Result<Self, Self::Error> {
         let arc = system
@@ -19,7 +20,7 @@ impl<R: Send + Sync + 'static> FromSystem for Res<R> {
                     std::any::type_name::<R>()
                 )
             })
-            .map_err(InputError::from)?;
+            .map_err(ExtractionError::from)?;
         Ok(Res(arc))
     }
 }

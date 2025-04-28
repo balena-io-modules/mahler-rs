@@ -91,9 +91,6 @@ where
                                 "success" => {
                                     log!(target: meta.target(), Level::Info, "target state applied")
                                 }
-                                "failure" => {
-                                    log!(target: meta.target(), Level::Info, "failed to apply target state")
-                                }
                                 "interrupted" => {
                                     log!(target: meta.target(), Level::Warn, "target state apply interrupted by user request")
                                 }

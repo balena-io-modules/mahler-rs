@@ -4,7 +4,7 @@ use super::Task;
 
 use super::effect::Effect;
 use super::errors::Error;
-use crate::errors::RuntimeError;
+use crate::errors::{IOError, MethodError};
 
 pub trait IntoResult<O> {
     fn into_result(self) -> Result<O, Error>;
@@ -41,7 +41,7 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     fn from(eff: Effect<I, E>) -> Effect<Patch, Error, I> {
-        eff.map_err(|e| RuntimeError::new(e).into())
+        eff.map_err(|e| IOError::new(e).into())
             .and_then(move |o| o.into_result())
     }
 }
@@ -82,10 +82,10 @@ where
 impl<T, E> From<Result<T, E>> for Effect<Vec<Task>, Error>
 where
     T: Into<Effect<Vec<Task>, Error>>,
-    E: Into<Error>,
+    E: std::error::Error + Send + Sync + 'static,
 {
     fn from(res: Result<T, E>) -> Effect<Vec<Task>, Error> {
         res.map(|t| t.into())
-            .unwrap_or_else(|e| Effect::from_error(e.into()))
+            .unwrap_or_else(|e| Effect::from_error(MethodError::new(e).into()))
     }
 }

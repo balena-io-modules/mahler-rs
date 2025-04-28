@@ -7,8 +7,6 @@ mod into_result;
 mod job;
 mod with_io;
 
-use anyhow::anyhow;
-use anyhow::Context as AnyhowCtx;
 use json_patch::Patch;
 use serde::Serialize;
 use std::fmt::{self, Display};
@@ -17,6 +15,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tracing::warn;
 
+use crate::errors::SerializationError;
 use crate::system::System;
 
 pub(crate) use context::*;
@@ -62,6 +61,10 @@ impl fmt::Debug for Action {
     }
 }
 
+fn default_description(id: &'static str, ctx: &Context) -> String {
+    format!("{}({})", id, ctx.path)
+}
+
 impl Action {
     pub(crate) fn new<H, T, I>(action: H, context: Context) -> Self
     where
@@ -69,8 +72,9 @@ impl Action {
         I: Send + 'static,
     {
         let handler_clone = action.clone();
+        let id = action.id();
         Self {
-            id: action.id(),
+            id,
             scoped: action.is_scoped(),
             context,
             dry_run: Arc::new(move |system: &System, context: &Context| {
@@ -82,10 +86,7 @@ impl Action {
 
                 Box::pin(async { effect.run().await })
             }),
-            describe: Arc::new(|_: &Context| {
-                // This error should never be seen
-                Err(UnexpectedError::from(anyhow!("undefined description")))?
-            }),
+            describe: Arc::new(move |context: &Context| Ok(default_description(id, context))),
         }
     }
 
@@ -114,11 +115,8 @@ impl Action {
 impl Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let description = (self.describe)(self.context()).unwrap_or_else(|e| {
-            match e {
-                Error::Unexpected(_) => {}
-                _ => warn!("failed to expand description for task {}: {}", self.id, e),
-            }
-            format!("{}({})", self.id, self.context.path)
+            warn!("failed to expand description for task {}: {}", self.id, e);
+            default_description(self.id, self.context())
         });
         write!(f, "{}", description)
     }
@@ -148,17 +146,15 @@ impl Method {
     where
         H: Handler<T, Vec<Task>>,
     {
+        let id = method.id();
         Method {
-            id: method.id(),
+            id,
             scoped: method.is_scoped(),
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
                 method.call(system, context).pure()
             }),
-            describe: Arc::new(|_: &Context| {
-                // This error should never be seen
-                Err(UnexpectedError::from(anyhow!("undefined description")))?
-            }),
+            describe: Arc::new(move |context: &Context| Ok(default_description(id, context))),
         }
     }
 
@@ -181,11 +177,8 @@ impl Method {
 impl Display for Method {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let description = (self.describe)(self.context()).unwrap_or_else(|e| {
-            match e {
-                Error::Unexpected(_) => {}
-                _ => warn!("failed to expand description for task {}: {}", self.id, e),
-            }
-            format!("{}({})", self.id, self.context.path)
+            warn!("failed to expand description for task {}: {}", self.id, e);
+            default_description(self.id, self.context())
         });
         write!(f, "{}", description)
     }
@@ -264,8 +257,8 @@ impl Task {
     /// Set a target for the task
     ///
     /// This returns a result with an error if the serialization of the target fails
-    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self, InputError> {
-        let target = serde_json::to_value(target).context("Serialization failed")?;
+    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self, SerializationError> {
+        let target = serde_json::to_value(target)?;
         Ok(match self {
             Self::Action(mut action) => {
                 action.context = action.context.with_target(target);
@@ -603,15 +596,15 @@ mod tests {
     fn plus_two_with_error(
         counter: View<i32>,
         Target(tgt): Target<i32>,
-    ) -> Result<[Task; 2], Error> {
+    ) -> Result<Vec<Task>, SerializationError> {
         if tgt - *counter > 1 {
-            return Ok([
+            return Ok(vec![
                 plus_one.into_task().try_target(tgt)?,
                 plus_one.into_task().try_target(tgt)?,
             ]);
         }
 
-        Err(Error::ConditionFailed)
+        Ok(vec![])
     }
 
     #[test]
@@ -636,21 +629,9 @@ mod tests {
         let system = System::try_from(0).unwrap();
 
         if let Task::Method(method) = task {
-            assert!(matches!(method.expand(&system), Err(Error::BadInput(_))));
-        } else {
-            panic!("Expected a method task");
-        }
-    }
-
-    #[test]
-    fn it_catches_condition_failure_in_method_expansions() {
-        let task = plus_two_with_error.with_target(1);
-        let system = System::try_from(0).unwrap();
-
-        if let Task::Method(method) = task {
             assert!(matches!(
                 method.expand(&system),
-                Err(Error::ConditionFailed)
+                Err(Error::CannotExtractArgs(_))
             ));
         } else {
             panic!("Expected a method task");

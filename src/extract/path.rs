@@ -1,12 +1,13 @@
 use std::fmt::{Display, Formatter};
 
+use crate::errors::ExtractionError;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, FromContext, InputError};
+use crate::task::{Context, FromContext};
 
 pub struct Path(pub String);
 
 impl FromContext for Path {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_context(context: &Context) -> Result<Self, Self::Error> {
         let path = context.path.to_str();
@@ -22,7 +23,7 @@ impl Display for Path {
 }
 
 impl FromSystem for Path {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
         Self::from_context(context)

@@ -8,6 +8,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tracing::{debug, debug_span, error, field, instrument, warn, Level, Span};
 
+use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
 use crate::system::System;
 use crate::task::{self, Context, Operation, Task};
@@ -23,42 +24,38 @@ pub use domain::*;
 pub struct Planner(Domain);
 
 #[derive(Debug, Error)]
-enum SearchError {
+enum SearchFailed {
     #[error("method error: {0}")]
-    CannotExpand(#[source] PathSearchError),
+    BadMethod(#[from] PathSearchError),
 
-    #[error("task error: {0}")]
-    Task(#[from] task::Error),
+    #[error("task error: {0:?}")]
+    BadTask(#[from] task::Error),
 
-    #[error("task condition failed")]
-    ConditionFailed,
+    #[error("task empty")]
+    EmptyTask,
 
     #[error("loop detected")]
     LoopDetected,
 
     // this is probably a bug if this error
     // happens
-    #[error("unexpected error: {0}")]
-    Unexpected(#[from] anyhow::Error),
+    #[error("internal error: {0:?}")]
+    Internal(#[from] anyhow::Error),
 }
-
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct TaskError(#[from] anyhow::Error);
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
     #[error(transparent)]
-    Task(#[from] TaskError),
+    Serialization(#[from] SerializationError),
+
+    #[error(transparent)]
+    Task(#[from] task::Error),
 
     #[error("workflow not found")]
     NotFound,
 
-    #[error("max search depth reached")]
-    MaxDepthReached,
-
     #[error(transparent)]
-    Unexpected(#[from] anyhow::Error),
+    Internal(#[from] InternalError),
 }
 
 impl Planner {
@@ -77,23 +74,23 @@ impl Planner {
         cur_state: &System,
         cur_plan: Workflow,
         stack_len: u32,
-    ) -> Result<Workflow, SearchError> {
+    ) -> Result<Workflow, SearchFailed> {
         match task {
             Task::Action(action) => {
                 let work_id = WorkUnit::new_id(&action, cur_state.root());
 
                 // Detect loops in the plan
                 if cur_plan.as_dag().some(|a| a.id == work_id) {
-                    return Err(SearchError::LoopDetected)?;
+                    return Err(SearchFailed::LoopDetected)?;
                 }
 
                 // Test the task
-                let Patch(changes) = action.dry_run(cur_state).map_err(SearchError::Task)?;
+                let Patch(changes) = action.dry_run(cur_state).map_err(SearchFailed::BadTask)?;
 
                 // if we are at the top of the stack and no changes are introduced
                 // then assume the condition has failed
                 if stack_len == 0 && changes.is_empty() {
-                    return Err(SearchError::ConditionFailed);
+                    return Err(SearchFailed::EmptyTask);
                 }
 
                 // Otherwise add the task to the plan
@@ -106,7 +103,7 @@ impl Planner {
                 Ok(Workflow { dag, pending })
             }
             Task::Method(method) => {
-                let tasks = method.expand(cur_state).map_err(SearchError::Task)?;
+                let tasks = method.expand(cur_state).map_err(SearchFailed::BadTask)?;
 
                 let mut cur_state = cur_state.clone();
                 let mut cur_plan = cur_plan;
@@ -124,11 +121,10 @@ impl Planner {
                     let Context { args, .. } = t.context_mut();
                     let path = self
                         .0
-                        .find_path_for_job(task_id.as_str(), args)
                         // The user may have not have put the child task in the
                         // domain, or failed to account for all args in the path
                         // in which case we need to return an error
-                        .map_err(SearchError::CannotExpand)?;
+                        .find_path_for_job(task_id.as_str(), args)?;
 
                     // Now that we have the proper path, look
                     // up the job at the domain to get any additional metadata
@@ -148,7 +144,7 @@ impl Planner {
                     cur_state
                         .patch(Patch(pending.clone()))
                         // not sure how this can happen, perhaps a bad method definition?
-                        .context(format!("failed to apply patch {pending:?}"))?;
+                        .with_context(|| format!("failed to apply patch {pending:?}"))?;
 
                     // But accumulate the changes separately to avoid
                     // applying them twice
@@ -162,7 +158,7 @@ impl Planner {
                 // if we are at the top of the stack and no changes are introduced
                 // then assume the condition has failed
                 if stack_len == 0 && changes.is_empty() {
-                    return Err(SearchError::ConditionFailed)?;
+                    return Err(SearchFailed::EmptyTask)?;
                 }
 
                 let mut cur_plan = cur_plan;
@@ -188,9 +184,10 @@ impl Planner {
         while let Some((cur_state, cur_plan, depth)) = stack.pop() {
             // we need to limit the search depth to avoid following
             // a buggy task forever
-            // TODO: make this configurable
             if depth >= 256 {
-                return Err(Error::MaxDepthReached)?;
+                // TODO: make this configurable
+                warn!(parent: &find_worflow_span, "reached max search depth (256) while looking for a plan");
+                return Err(Error::NotFound)?;
             }
 
             // There may be fields in internal state that we don't want
@@ -200,8 +197,7 @@ impl Planner {
             let cur = cur_state
                 .state::<T>()
                 .and_then(System::try_from)
-                // TODO: return seriaization error
-                .with_context(|| "failed to serialize state")?;
+                .map_err(SerializationError::from)?;
 
             let distance = Distance::new(&cur, tgt);
 
@@ -261,7 +257,8 @@ impl Planner {
                                     // Update the state and the workflow
                                     new_sys
                                         .patch(Patch(pending))
-                                        .with_context(|| "failed to apply system patch")?;
+                                        .with_context(|| "failed to apply patch")
+                                        .map_err(InternalError::from)?;
                                     let new_plan = Workflow {
                                         dag,
                                         pending: vec![],
@@ -272,16 +269,24 @@ impl Planner {
                                     stack.push((new_sys, new_plan, depth + 1));
                                 }
                                 // Ignore harmless errors
-                                Err(SearchError::Task(task::Error::ConditionFailed)) => {}
-                                Err(SearchError::LoopDetected) => {}
-                                Err(SearchError::ConditionFailed) => {}
-                                // this is probably a bug so we terminate the search
-                                Err(SearchError::Unexpected(err)) => {
-                                    return Err(Error::Unexpected(err))
-                                }
-                                Err(err) => {
+                                Err(SearchFailed::LoopDetected) => {}
+
+                                Err(SearchFailed::EmptyTask) => {}
+                                Err(SearchFailed::BadTask(task::Error::ConditionFailed)) => {}
+                                // Transform errors to the corresponding result
+                                Err(SearchFailed::BadMethod(err)) => {
+                                    let err = MethodError::new(err);
                                     if cfg!(debug_assertions) {
-                                        return Err(TaskError(anyhow!(err)))?;
+                                        return Err(task::Error::from(err))?;
+                                    }
+                                    warn!(parent: &find_worflow_span, "task {} failed during planning: {} ... ignoring", task_id, err);
+                                }
+                                Err(SearchFailed::Internal(err)) => {
+                                    return Err(InternalError::from(err))?
+                                }
+                                Err(SearchFailed::BadTask(err)) => {
+                                    if cfg!(debug_assertions) {
+                                        return Err(err)?;
                                     }
                                     warn!(parent: &find_worflow_span, "task {} failed during planning: {} ... ignoring", task_id, err);
                                 }
@@ -614,7 +619,7 @@ mod tests {
             mut loc: View<Location>,
             System(sys): System<State>,
             Args(block): Args<Block>,
-        ) -> View<Location> {
+        ) -> Option<View<Location>> {
             // if the block is clear and we are not holding any other blocks
             // we can grab the block
             if loc.is_block()
@@ -622,9 +627,10 @@ mod tests {
                 && !is_holding(&sys.blocks)
             {
                 *loc = Location::Hand;
+                return Some(loc);
             }
 
-            loc
+            None
         }
 
         // There is really not that much of a difference between putdown and stack
@@ -661,7 +667,7 @@ mod tests {
             if is_clear(&sys.blocks, &Location::Blk(block)) {
                 if *loc == Location::Table {
                     return Some(pickup.into_task());
-                } else if *loc != Location::Hand {
+                } else {
                     return Some(unstack.into_task());
                 }
             }

@@ -10,9 +10,10 @@ use serde::Serialize;
 use serde_json::Value;
 use std::ops::{Deref, DerefMut};
 
+use crate::errors::ExtractionError;
 use crate::path::Path;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, Effect, Error, InputError, IntoResult, UnexpectedError};
+use crate::task::{Context, Effect, Error, IntoResult};
 
 /// Extracts a pointer to a sub-element of the global state indicated
 /// by the path.
@@ -75,7 +76,7 @@ impl<T> Pointer<T> {
 }
 
 impl<T: DeserializeOwned> FromSystem for Pointer<T> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_system(system: &System, context: &Context) -> Result<Self, Self::Error> {
         let json_ptr = context.path.as_ref();
@@ -180,9 +181,10 @@ impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
     fn into_result(self) -> Result<Patch, Error> {
         let before = self.initial;
         let after = if let Some(state) = self.state {
-            serde_json::to_value(state)
-                .with_context(|| "Failed to serialize pointer value")
-                .map_err(UnexpectedError::from)?
+            // This should not happen unless there is a bug (hopefully).
+            // if this happens during worker operation, it will be catched
+            // as a panic in the task
+            serde_json::to_value(state).expect("failed to serialize pointer value")
         } else {
             Value::Null
         };
@@ -219,7 +221,7 @@ impl<T, E> From<Pointer<T>> for Effect<Pointer<T>, E> {
 pub struct View<T>(Pointer<T>);
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_system(system: &System, context: &Context) -> Result<Self, Self::Error> {
         let pointer = Pointer::<T>::from_system(system, context)?;
