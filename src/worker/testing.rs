@@ -150,11 +150,11 @@ impl<O, I> Worker<O, Ready, I> {
     /// let worker = Worker::new().job("", update(plus_one)).initial_state::<i32>(0).unwrap();
     ///
     /// // Run task emulating a target of 2 and initial state of 0
-    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await, Ok(1));
+    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await.unwrap(), 1);
     ///
     /// // Run task emulating a target of 2 and initial state of 2 (no changes)
     /// let worker = Worker::new().job("", update(plus_one)).initial_state::<i32>(2).unwrap();
-    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await, Ok(2));
+    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await.unwrap(), 2);
     /// # })
     /// ```
     pub async fn run_task(&self, mut task: Task) -> Result<O, task::Error>

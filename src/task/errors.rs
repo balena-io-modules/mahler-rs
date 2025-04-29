@@ -1,37 +1,27 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct InputError(#[from] anyhow::Error);
-
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct UnexpectedError(#[from] anyhow::Error);
-
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct RuntimeError(pub(super) Box<dyn std::error::Error + Send + Sync>);
+use crate::errors::{ExtractionError, IOError, MethodError};
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("input error: {0}")]
-    BadInput(#[from] InputError),
+    #[error(transparent)]
+    /// Arguments to the task could not be extracted.
+    /// This is likely to be an error with the task definition.
+    CannotExtractArgs(#[from] ExtractionError),
 
-    #[error("unexpected error, this might be a bug: {0}")]
-    Unexpected(#[from] UnexpectedError),
+    #[error(transparent)]
+    /// An error happened while trying to expand the method
+    /// task into its sub-tasks. This is likely an issue with the
+    /// method definition
+    CannotExpandMethod(#[from] MethodError),
 
     #[error("condition failed")]
+    /// The task condition was not met
     ConditionFailed,
 
     #[error(transparent)]
-    Runtime(#[from] RuntimeError),
-}
-
-impl PartialEq for Error {
-    fn eq(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (Error::ConditionFailed, Error::ConditionFailed)
-        )
-    }
+    /// An error happened while executing the task within the workflow.
+    /// These errors only happen at runtime, never at the planning stage
+    /// of the worker.
+    IO(#[from] IOError),
 }

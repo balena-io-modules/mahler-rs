@@ -1,15 +1,16 @@
 use anyhow::Context as AnyhowCtx;
 use serde::de::DeserializeOwned;
 
+use crate::errors::ExtractionError;
 use crate::system::{FromSystem, System as SystemState};
-use crate::task::{Context, InputError};
+use crate::task::Context;
 
 /// Extracts the root of the system state
 #[derive(Debug, Clone)]
 pub struct System<S>(pub S);
 
 impl<S: DeserializeOwned> FromSystem for System<S> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_system(system: &SystemState, _: &Context) -> Result<Self, Self::Error> {
         // This will fail if the value cannot be deserialized into the target type

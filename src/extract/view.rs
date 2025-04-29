@@ -10,9 +10,10 @@ use serde::Serialize;
 use serde_json::Value;
 use std::ops::{Deref, DerefMut};
 
+use crate::errors::ExtractionError;
 use crate::path::Path;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, Effect, Error, InputError, IntoResult, UnexpectedError};
+use crate::task::{Context, Effect, Error, IntoResult};
 
 /// Extracts a pointer to a sub-element of the global state indicated
 /// by the path.
@@ -75,7 +76,7 @@ impl<T> Pointer<T> {
 }
 
 impl<T: DeserializeOwned> FromSystem for Pointer<T> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_system(system: &System, context: &Context) -> Result<Self, Self::Error> {
         let json_ptr = context.path.as_ref();
@@ -180,9 +181,10 @@ impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
     fn into_result(self) -> Result<Patch, Error> {
         let before = self.initial;
         let after = if let Some(state) = self.state {
-            serde_json::to_value(state)
-                .with_context(|| "Failed to serialize pointer value")
-                .map_err(UnexpectedError::from)?
+            // This should not happen unless there is a bug (hopefully).
+            // if this happens during worker operation, it will be catched
+            // as a panic in the task
+            serde_json::to_value(state).expect("failed to serialize pointer value")
         } else {
             Value::Null
         };
@@ -210,14 +212,6 @@ impl<T, E> From<Pointer<T>> for Effect<Pointer<T>, E> {
     }
 }
 
-// Allow tasks to return a pointer
-// This converts the pointer into a pure effect
-impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
-    fn from(ptr: Pointer<T>) -> Effect<Patch, Error> {
-        Effect::from_result(ptr.into_result())
-    }
-}
-
 /// Extracts a sub-element of a state S as indicated by
 /// a path.
 ///
@@ -227,7 +221,7 @@ impl<T: Serialize> From<Pointer<T>> for Effect<Patch, Error> {
 pub struct View<T>(Pointer<T>);
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_system(system: &System, context: &Context) -> Result<Self, Self::Error> {
         let pointer = Pointer::<T>::from_system(system, context)?;
@@ -266,14 +260,6 @@ impl<T: Serialize> IntoResult<Patch> for View<T> {
 impl<T, E> From<View<T>> for Effect<View<T>, E> {
     fn from(view: View<T>) -> Effect<View<T>, E> {
         Effect::from_result(Ok(view))
-    }
-}
-
-// Allow tasks to return a view
-// This converts the view into a pure effect
-impl<T: Serialize> From<View<T>> for Effect<Patch, Error> {
-    fn from(view: View<T>) -> Effect<Patch, Error> {
-        Effect::from_result(view.into_result())
     }
 }
 

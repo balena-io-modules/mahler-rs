@@ -2,6 +2,7 @@ mod path;
 mod planner;
 mod system;
 
+pub mod errors;
 pub mod extract;
 pub mod task;
 pub mod worker;

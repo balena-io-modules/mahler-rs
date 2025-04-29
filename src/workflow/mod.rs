@@ -16,7 +16,7 @@ mod channel;
 mod dag;
 mod interrupt;
 
-pub use aggregate_error::*;
+pub(crate) use aggregate_error::*;
 pub(crate) use channel::*;
 pub use dag::*;
 pub(crate) use interrupt::*;

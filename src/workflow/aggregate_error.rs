@@ -1,6 +1,6 @@
 use std::{
     fmt::{self, Display},
-    ops::Deref,
+    ops::{Deref, DerefMut},
 };
 use thiserror::Error;
 
@@ -27,5 +27,11 @@ impl<E> Deref for AggregateError<E> {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl<E> DerefMut for AggregateError<E> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }

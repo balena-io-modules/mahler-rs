@@ -2,13 +2,14 @@ use anyhow::Context as AnyhowCxt;
 use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
+use crate::errors::ExtractionError;
 use crate::system::{FromSystem, System};
-use crate::task::{Context, FromContext, InputError};
+use crate::task::{Context, FromContext};
 
 pub struct Target<T>(pub T);
 
 impl<T: DeserializeOwned> FromContext for Target<T> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_context(context: &Context) -> Result<Self, Self::Error> {
         let value = &context.target;
@@ -26,7 +27,7 @@ impl<T: DeserializeOwned> FromContext for Target<T> {
 }
 
 impl<T: DeserializeOwned> FromSystem for Target<T> {
-    type Error = InputError;
+    type Error = ExtractionError;
 
     fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
         Self::from_context(context)
