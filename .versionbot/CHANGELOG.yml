@@ -1,4 +1,19 @@
 - commits:
+    - subject: Refactor error handling
+      hash: 287fec90c2222ff6ea505f726a9e939cca35101f
+      body: |
+        This change organizes error types to distinguish errors that can happen
+        at different stages of the worker lifecycle. This should make it easier
+        for users to identify what caused a `Worker::seek()` operation to fail
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.12.2
+  title: ""
+  date: 2025-04-29T03:05:11.769Z
+- commits:
     - subject: Fix run-tests script
       hash: 8fd9a6c7092d247cb7d7dbe8cb0b7f31eec27793
       body: |
