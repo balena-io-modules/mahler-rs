@@ -87,9 +87,10 @@ impl Planner {
                 // Test the task
                 let Patch(changes) = action.dry_run(cur_state).map_err(SearchFailed::BadTask)?;
 
-                // if we are at the top of the stack and no changes are introduced
-                // then assume the condition has failed
-                if stack_len == 0 && changes.is_empty() {
+                // Task without any changes is interpreted as a condition
+                // failed. This should be the same no matter if the task is used
+                // independently or as part of a method
+                if changes.is_empty() {
                     return Err(SearchFailed::EmptyTask);
                 }
 
