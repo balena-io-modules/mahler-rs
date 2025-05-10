@@ -1,4 +1,18 @@
 - commits:
+    - subject: Do not allow empty tasks in methods
+      hash: dee594b0b2679f2abc148008187e2f758507d7b2
+      body: |
+        Atomic tasks should behave the same when selected individually or as
+        part of a method.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.13.0
+  title: ""
+  date: 2025-05-10T15:43:58.306Z
+- commits:
     - subject: Refactor error handling
       hash: 287fec90c2222ff6ea505f726a9e939cca35101f
       body: |
