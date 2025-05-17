@@ -133,14 +133,6 @@ impl Workflow {
         &self.dag
     }
 
-    pub(crate) fn reverse(self) -> Self {
-        let Self { dag, pending } = self;
-        Self {
-            dag: dag.reverse(),
-            pending,
-        }
-    }
-
     pub fn is_empty(&self) -> bool {
         self.dag.is_empty()
     }

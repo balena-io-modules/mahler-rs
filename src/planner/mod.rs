@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Debug;
 
 use anyhow::{anyhow, Context as AnyhowCtx};
@@ -13,6 +14,7 @@ use crate::path::Path;
 use crate::system::System;
 use crate::task::{self, Context, Operation, Task};
 use crate::workflow::{WorkUnit, Workflow};
+use crate::Dag;
 
 mod distance;
 mod domain;
@@ -96,7 +98,11 @@ impl Planner {
 
                 // Otherwise add the task to the plan
                 let Workflow { dag, pending } = cur_plan;
-                let dag = dag.with_head(WorkUnit::new(work_id, action, changes.clone()));
+                let dag = dag.concat(Dag::from_sequence([WorkUnit::new(
+                    work_id,
+                    action,
+                    changes.clone(),
+                )]));
                 Span::current().record("changes", format!("{:?}", changes));
                 let pending = [pending, changes].concat();
 
@@ -204,8 +210,8 @@ impl Planner {
 
             // we reached the target
             if distance.is_empty() {
-                // return the existing plan reversing it first
-                return Ok(cur_plan.reverse());
+                // return the existing plan
+                return Ok(cur_plan);
             }
 
             let next_span = debug_span!("find_next", cur = %&cur_state.root());
@@ -243,7 +249,7 @@ impl Planner {
 
                             // apply the task to the state, if it progresses the plan, then select
                             // it and put the new state with the new plan on the stack
-                            match self.try_task(task, &cur_state, cur_plan.clone(), 0) {
+                            match self.try_task(task, &cur_state, Workflow::default(), 0) {
                                 Ok(Workflow { dag, pending }) => {
                                     // If the task is not progressing the plan, we can ignore it
                                     // this should never happen
@@ -261,7 +267,9 @@ impl Planner {
                                         .with_context(|| "failed to apply patch")
                                         .map_err(InternalError::from)?;
                                     let new_plan = Workflow {
-                                        dag,
+                                        // only clone the current plan once
+                                        // we found a potential extension
+                                        dag: cur_plan.dag.clone().concat(dag),
                                         pending: vec![],
                                     };
 

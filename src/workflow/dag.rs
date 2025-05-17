@@ -174,7 +174,6 @@ impl<T> Dag<T> {
     /// Link the current Dag to the Dag
     /// passed as argument
     pub fn concat(self, other: Dag<T>) -> Self {
-        debug_assert!(self.tail.is_some());
         if let Some(tail_node) = self.tail {
             match *tail_node.write().unwrap() {
                 Node::Item { ref mut next, .. } => {
@@ -186,6 +185,9 @@ impl<T> Dag<T> {
                 // The tail should never point to a fork
                 Node::Fork { .. } => unreachable!(),
             }
+        } else {
+            // this dag is empty
+            return other;
         }
 
         Dag {
