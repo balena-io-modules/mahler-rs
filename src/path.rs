@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-#[derive(Clone, Default, PartialEq, Debug)]
+#[derive(Clone, Default, PartialEq, PartialOrd, Eq, Ord, Debug)]
 pub struct Path(PointerBuf);
 
 impl Path {

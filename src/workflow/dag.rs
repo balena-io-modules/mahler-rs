@@ -577,6 +577,16 @@ macro_rules! dag {
     };
 }
 
+#[macro_export]
+macro_rules! par {
+    // If the input is a list of values (strings, etc.), convert each to a single-element Dag
+    ($($value:expr),* $(,)?) => {
+        $crate::Dag::from_branches([
+            $($crate::Dag::from_sequence([$value])),*
+        ])
+    }
+}
+
 pub(crate) enum ExecutionStatus {
     Completed,
     Interrupted,
