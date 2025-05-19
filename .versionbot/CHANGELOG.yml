@@ -1,4 +1,47 @@
 - commits:
+    - subject: Prioritize method parallelism over automated parallelism
+      hash: ae93688ec0e395fcc37e2d219ff13f2bbb907c7e
+      body: |
+        Parallel branching coming from methods should be selected over
+        automatically detected parallelism.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Generate parallel workflows when expanding methods
+      hash: 56ea676cfac44ff2d75e7b891632b89c85abc59d
+      body: |
+        A method returning scoped tasks for non-conflicting paths is
+        parallelizable. This updates the planner to consider this scenario
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Use parallel branches for non conflicting paths in planner
+      hash: 83d784335e37f3e42e024f682d79b2f6495ae759
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Create the plan front-to back
+      hash: 29ed3c9dc4255bf67f6afb455ebab607fd232bc8
+      body: |
+        The planner was creating the plan in reverse order and reversing before
+        returning. This was leftover from a previous implementation using
+        recursion that took advantage of that plan contruction mechanism
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.14.0
+  title: ""
+  date: 2025-05-19T21:07:11.024Z
+- commits:
     - subject: Do not allow empty tasks in methods
       hash: dee594b0b2679f2abc148008187e2f758507d7b2
       body: |
