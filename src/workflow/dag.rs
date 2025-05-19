@@ -136,41 +136,6 @@ impl<T> Dag<T> {
         self.tail.is_none()
     }
 
-    pub fn with_head(self, value: T) -> Dag<T> {
-        let head = Node::item(value, self.head).into_link();
-        let mut tail = self.tail;
-
-        if tail.is_none() {
-            tail = head.clone();
-        }
-
-        Dag { head, tail }
-    }
-
-    /// Concatenate a DAG at the head
-    /// rather than the tail.
-    ///
-    /// This allows to build the DAG backwards and reverse
-    /// it later using `reverse`
-    pub fn prepend(self, dag: Dag<T>) -> Dag<T> {
-        let Dag { head, tail } = dag;
-
-        if let Some(tail_rc) = tail {
-            match *tail_rc.write().unwrap() {
-                Node::Item { ref mut next, .. } => *next = self.head,
-                Node::Join { ref mut next } => *next = self.head,
-                _ => unreachable!(),
-            }
-        } else {
-            return self;
-        }
-
-        Dag {
-            head,
-            tail: self.tail,
-        }
-    }
-
     /// Link the current Dag to the Dag
     /// passed as argument
     pub fn concat(self, other: Dag<T>) -> Self {
@@ -230,42 +195,6 @@ impl<T> Dag<T> {
             }
         }
         true
-    }
-
-    /// Traverse the DAG sequentially, applying a fold function at each node.
-    ///
-    /// # Arguments
-    /// - `initial`: Initial accumulator value.
-    /// - `fold_fn`: Function to process each node and update the accumulator.
-    ///
-    /// # Example
-    /// ```rust
-    /// use gustav::Dag;
-    /// use gustav::{dag,seq};
-    ///
-    /// let dag: Dag<char> = dag!(seq!('h', 'e', 'l', 'l', 'o'), seq!(' '), seq!('m', 'y'))
-    ///        + seq!(' ')
-    ///        + dag!(
-    ///            seq!('o', 'l', 'd'),
-    ///            seq!(' '),
-    ///            seq!('f', 'r', 'i', 'e', 'n', 'd')
-    ///        );
-    ///        
-    ///    let msg = dag.fold(
-    ///        String::new(),
-    ///        |acc, c| acc + c.to_string().as_ref(),
-    ///    );
-    ///
-    ///    assert_eq!(msg, "hello my old friend")
-    /// ```
-    pub fn fold<U>(&self, initial: U, fold_fn: impl Fn(U, &T) -> U) -> U {
-        let mut acc = initial;
-        for node in self.iter() {
-            if let Node::Item { value, .. } = &*node.read().unwrap() {
-                acc = fold_fn(acc, value);
-            }
-        }
-        acc
     }
 
     /// Create a linear DAG from a list of elements.
@@ -366,92 +295,6 @@ impl<T> Dag<T> {
         Dag {
             head: Node::fork(next).into_link(),
             tail,
-        }
-    }
-
-    /**
-     * Return a new DAG that is the reverse of the
-     * current DAG
-     *
-     * e.g. reversing
-     *
-     * ```text
-     *         + - c - d - +
-     * a - b - +           + - g
-     *         + - e - f - +
-     * ```
-     *
-     * should return
-     *
-     * ```text
-     *     + - d - c - +
-     * g - +           + - b - a
-     *     + - f - e - +
-     * ```
-     *
-     */
-    pub fn reverse(self) -> Dag<T> {
-        let Dag { head, .. } = self;
-        let tail = head.clone();
-        let mut stack = vec![(head, None as Link<T>, Vec::<usize>::new())];
-        let mut results: Vec<Link<T>> = Vec::new();
-
-        while let Some((head, prev, branching)) = stack.pop() {
-            if let Some(node_rc) = head.clone() {
-                match *node_rc.write().unwrap() {
-                    Node::Item { ref mut next, .. } => {
-                        // copy the next node to continue the operation
-                        let newhead = next.clone();
-                        // Update the pointer to point to the previous node
-                        *next = prev;
-
-                        // Add the next node to the stack
-                        stack.push((newhead, head, branching));
-                    }
-                    Node::Fork { ref next } => {
-                        // Create a join node for branches to point to
-                        let prev = Node::join(prev).into_link();
-
-                        for (i, br_head) in next.iter().rev().enumerate() {
-                            // Keep track of the branch within the DAG
-                            let mut branching = branching.clone();
-                            branching.push(i);
-
-                            // Add a new stack item for each branch
-                            stack.push((br_head.clone(), prev.clone(), branching));
-                        }
-                    }
-                    Node::Join { ref next } => {
-                        // Store the accumulated result when reaching a join node
-                        results.push(prev);
-
-                        let mut branching = branching;
-                        if let Some(branch) = branching.pop() {
-                            // But only join the branches on the last branch
-                            if branch == 0 {
-                                // Reverse the branches so iterating returns
-                                // the right order
-                                results.reverse();
-                                let head = Node::fork(results).into_link();
-                                stack.push((next.clone(), head, branching));
-
-                                // Clear the branch list
-                                results = Vec::new();
-                            }
-                        }
-                    }
-                }
-            } else {
-                results.push(prev);
-            }
-        }
-
-        if results.is_empty() {
-            Dag::new()
-        } else {
-            debug_assert!(results.len() == 1);
-            let head = results.pop().unwrap();
-            Dag { head, tail }
         }
     }
 }
@@ -581,8 +424,8 @@ macro_rules! dag {
 macro_rules! par {
     // If the input is a list of values (strings, etc.), convert each to a single-element Dag
     ($($value:expr),* $(,)?) => {
-        $crate::Dag::from_branches([
-            $($crate::Dag::from_sequence([$value])),*
+        Dag::from_branches([
+            $(Dag::from_sequence([$value])),*
         ])
     }
 }
@@ -867,116 +710,6 @@ mod tests {
     }
 
     #[test]
-    fn test_contructing_linear_inverted_dag() {
-        let dag: Dag<i32> = Dag::new().with_head(1).with_head(2).with_head(3);
-        let elems: Vec<i32> = dag
-            .iter()
-            .filter(is_item)
-            .map(|node| match &*node.read().unwrap() {
-                Node::Item { value, .. } => *value,
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(elems, vec![3, 2, 1])
-    }
-
-    #[test]
-    fn test_contructing_forking_inverted_dag() {
-        let dag: Dag<i32> = Dag::new()
-            .with_head(1)
-            .with_head(2)
-            .with_head(3)
-            .prepend(dag!(seq!(5), seq!(4)))
-            .with_head(6);
-        let elems: Vec<i32> = dag
-            .iter()
-            .filter(is_item)
-            .map(|node| match &*node.read().unwrap() {
-                Node::Item { value, .. } => *value,
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(elems, vec![6, 5, 4, 3, 2, 1])
-    }
-
-    #[test]
-    fn test_reverse_dag() {
-        let dag: Dag<i32> = Dag::new()
-            .with_head(1)
-            .with_head(2)
-            .with_head(3)
-            .prepend(dag!(seq!(5), seq!(4)))
-            .with_head(6)
-            .reverse();
-        let elems: Vec<i32> = dag
-            .iter()
-            .filter(is_item)
-            .map(|node| match &*node.read().unwrap() {
-                Node::Item { value, .. } => *value,
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(elems, vec![1, 2, 3, 4, 5, 6])
-    }
-
-    #[test]
-    fn test_iterate_reversed_dag() {
-        let dag: Dag<i32> = Dag::new()
-            .with_head(1)
-            .with_head(2)
-            .with_head(3)
-            .prepend(dag!(seq!(5), seq!(4)))
-            .with_head(6)
-            .reverse();
-        let mut reverse: Vec<i32> = dag
-            .iter()
-            .filter(is_item)
-            .map(|node| match &*node.read().unwrap() {
-                Node::Item { value, .. } => *value,
-                _ => unreachable!(),
-            })
-            .collect();
-        reverse.reverse();
-
-        let forward: Vec<i32> = dag
-            .reverse()
-            .iter()
-            .filter(is_item)
-            .map(|node| match &*node.read().unwrap() {
-                Node::Item { value, .. } => *value,
-                _ => unreachable!(),
-            })
-            .collect();
-
-        assert_eq!(reverse, forward);
-    }
-
-    #[test]
-    fn test_reverse_empty_dag() {
-        let dag: Dag<i32> = Dag::new().reverse();
-        assert!(dag.head.is_none());
-        assert!(dag.tail.is_none());
-    }
-
-    #[test]
-    fn test_reverse_dag_with_forks() {
-        let dag: Dag<char> = seq!('A') + dag!(seq!('B', 'C'), seq!('D')) + seq!('E');
-        let reversed = dag.reverse();
-        assert_str_eq!(
-            reversed.to_string(),
-            dedent!(
-                r#"
-                - E
-                + ~ - D
-                  ~ - C
-                    - B
-                - A
-                "#
-            )
-        );
-    }
-
-    #[test]
     fn test_empty_dag_string_representation() {
         let dag: Dag<char> = Dag::new();
         assert_eq!(dag.to_string(), "");
@@ -1049,7 +782,7 @@ mod tests {
         let dag: Dag<i32> = seq!(1, 2)
             + dag!(
                 seq!(3) + dag!(seq!(4, 5), dag!(seq!(6), seq!(7)) + seq!(8)) + seq!(9),
-                seq!(10) + dag!(seq!(11), seq!(12)),
+                seq!(10) + par!(11, 12),
             )
             + seq!(13);
 
