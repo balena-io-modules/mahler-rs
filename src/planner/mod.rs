@@ -76,7 +76,7 @@ pub(crate) enum Error {
 fn longest_non_conflicting(paths: Vec<Path>) -> Vec<Path> {
     // We use a simple O(n^2) approach:
     // For each path, if any other path starts with it, then skip it.
-    // TODO: implement a more efficient algorithm with a trie
+    // TODO: maybe implement a more efficient algorithm with a trie
     let mut result = Vec::new();
     for (i, p) in paths.iter().enumerate() {
         // Check p against every other path in the input.
@@ -119,28 +119,28 @@ impl Planner {
             Task::Action(action) => {
                 let work_id = WorkUnit::new_id(&action, cur_state.root());
 
-                // Detect loops in the plan
+                // Detect loops first, if the same action is being applied to the same
+                // state then abort this search branch
                 if cur_plan.as_dag().some(|a| a.id == work_id) {
                     return Err(SearchFailed::LoopDetected)?;
                 }
 
-                // Test the task
+                // Simulate the task and get the list of changes
                 let Patch(changes) = action.dry_run(cur_state).map_err(SearchFailed::BadTask)?;
-
-                // Task without any changes is interpreted as a condition
-                // failed. This should be the same no matter if the task is used
-                // independently or as part of a method
                 if changes.is_empty() {
                     return Err(SearchFailed::EmptyTask);
                 }
 
-                // Otherwise add the task to the plan
                 let Workflow { dag, pending } = cur_plan;
+
+                // Append a new node to the workflow, include a copy
+                // of the changes for validation during runtime
                 let dag = dag.concat(Dag::from_sequence([WorkUnit::new(
                     work_id,
                     action,
                     changes.clone(),
                 )]));
+
                 Span::current().record("changes", format!("{:?}", changes));
                 let pending = [pending, changes].concat();
 
@@ -148,68 +148,101 @@ impl Planner {
                 Ok(Workflow { dag, pending })
             }
             Task::Method(method) => {
+                // Get the list of referenced tasks
                 let tasks = method.expand(cur_state).map_err(SearchFailed::BadTask)?;
 
-                let mut cur_state = cur_state.clone();
-                let mut cur_plan = cur_plan;
-                let mut changes = Vec::new();
+                // Extended tasks will store the correct references from the domain with the
+                // right path and description
+                let mut extended_tasks = Vec::new();
+
                 for mut t in tasks.into_iter() {
-                    // A task cannot override the context set by the
-                    // parent task. For instance a method for `/a/b` cannot
-                    // have a sub-task for `/a/c`, it can however have a task
-                    // for `/a/b` or `/a/b/c`. This is to ensure we can parallelize
-                    // tasks
+                    // The subtask is not allowed to override arguments
+                    // in the parent task, so we first make sure to propagate
+                    // arguments from the parent
                     for (k, v) in method.context().args.iter() {
-                        t = t.with_arg(k, v)
+                        t = t.with_arg(k, v);
                     }
+
                     let task_id = t.id().to_string();
                     let Context { args, .. } = t.context_mut();
-                    let path = self
-                        .0
-                        // The user may have not have put the child task in the
-                        // domain, or failed to account for all args in the path
-                        // in which case we need to return an error
-                        .find_path_for_job(task_id.as_str(), args)?;
 
-                    // Now that we have the proper path, look
-                    // up the job at the domain to get any additional metadata
-                    // from the job (such as the description)
+                    // Find the job path on the domain list
+                    let path = self.0.find_path_for_job(&task_id, args)?;
+
+                    // Using the path, now find the actual job on the domain.
+                    // The domain job includes metadata like the description that
+                    // we want to use in the workflow
                     let job = self
                         .0
                         .find_job(&path, &task_id)
-                        // this really should not happen
+                        // this should never happen
                         .ok_or(anyhow!("failed to find job for path {path}"))?;
 
-                    let task = job.clone_task(t.context().to_owned()).with_path(path);
+                    // Get a copy of the task for the final list
+                    let task = job
+                        .clone_task(t.context().to_owned())
+                        .with_path(path.clone());
 
-                    let Workflow { dag, pending } =
-                        self.try_task(task, &cur_state, cur_plan, stack_len + 1)?;
-
-                    // Apply changes to the local copy of the state
-                    cur_state
-                        .patch(Patch(pending.clone()))
-                        // not sure how this can happen, perhaps a bad method definition?
-                        .with_context(|| format!("failed to apply patch {pending:?}"))?;
-
-                    // But accumulate the changes separately to avoid
-                    // applying them twice
-                    changes = [changes, pending].concat();
-                    cur_plan = Workflow {
-                        dag,
-                        pending: vec![],
-                    };
+                    extended_tasks.push(task);
                 }
 
-                // if we are at the top of the stack and no changes are introduced
-                // then assume the condition has failed
-                if stack_len == 0 && changes.is_empty() {
-                    return Err(SearchFailed::EmptyTask)?;
+                // Compute a maximal set of non-overlapping (non-prefix) paths for parallelism
+                let non_conflicting_paths = longest_non_conflicting(
+                    extended_tasks.iter().map(|t| t.path().clone()).collect(),
+                );
+
+                // The method is parallelizable if all task paths are in the non-conflicting list
+                // and are all scoped (i.e. none of them requires access to System)
+                let mut parallelizable = true;
+                for task in &extended_tasks {
+                    if !task.is_scoped() || !non_conflicting_paths.contains(task.path()) {
+                        parallelizable = false;
+                        break;
+                    }
                 }
 
+                let mut changes = vec![];
+                let mut cur_state = cur_state.clone();
                 let mut cur_plan = cur_plan;
-                cur_plan.pending = changes;
 
-                Span::current().record("selected", true);
+                if parallelizable {
+                    let mut branches = vec![];
+
+                    // Create a branch for each task
+                    for task in extended_tasks {
+                        let Workflow { dag, pending } =
+                            self.try_task(task, &cur_state, Workflow::default(), stack_len + 1)?;
+
+                        changes.extend(pending);
+                        branches.push(dag);
+                    }
+
+                    // Extend the current plan with the forking dag
+                    cur_plan = Workflow {
+                        dag: cur_plan.dag.concat(Dag::from_branches(branches)),
+                        pending: vec![],
+                    }
+                } else {
+                    // If the task is not parallelizable, run tasks in sequence making
+                    // sure to apply changes before calling the next task
+                    for task in extended_tasks {
+                        let Workflow { dag, pending } =
+                            self.try_task(task, &cur_state, cur_plan, stack_len + 1)?;
+
+                        cur_state
+                            .patch(Patch(pending.clone()))
+                            .with_context(|| format!("failed to apply patch {pending:?}"))?;
+
+                        changes.extend(pending);
+                        cur_plan = Workflow {
+                            dag,
+                            pending: vec![],
+                        };
+                    }
+                }
+
+                // Include changes in the returned plan
+                cur_plan.pending = changes;
                 Ok(cur_plan)
             }
         }

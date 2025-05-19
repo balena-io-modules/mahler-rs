@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::errors::SerializationError;
+use crate::path::Path;
 use crate::system::System;
 
 pub(crate) use context::*;
@@ -222,6 +223,13 @@ impl Task {
         match self {
             Self::Action(Action { id, .. }) => id,
             Self::Method(Method { id, .. }) => id,
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::Action(Action { context, .. }) => &context.path,
+            Self::Method(Method { context, .. }) => &context.path,
         }
     }
 
