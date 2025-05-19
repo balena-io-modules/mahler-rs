@@ -197,7 +197,7 @@ mod tests {
 
     use super::*;
     use crate::extract::{Target, View};
-    use crate::{seq, task::*, Dag};
+    use crate::{par, seq, task::*, Dag};
 
     fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
@@ -294,11 +294,10 @@ mod tests {
             .unwrap();
 
         // We expect a linear DAG with three tasks
-        let expected: Dag<&str> = seq!(
+        let expected: Dag<&str> = par!(
             "gustav::worker::testing::tests::plus_one(/one)",
-            "gustav::worker::testing::tests::plus_one(/one)",
-            "gustav::worker::testing::tests::plus_one(/two)",
-        );
+            "gustav::worker::testing::tests::plus_one(/two)"
+        ) + seq!("gustav::worker::testing::tests::plus_one(/one)",);
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
     }

@@ -295,9 +295,18 @@ pub struct RemoveImageError(#[from] anyhow::Error);
 fn remove_image(
     img_ptr: Pointer<Image>,
     Args(image_name): Args<String>,
+    System(project): System<Project>,
     docker: Res<Docker>,
 ) -> Delete<Image, RemoveImageError> {
-    // TODO: only remove the image if it not being used by any service
+    // only remove the image if it not being used by any service
+    if project
+        .services
+        .values()
+        .any(|s| s.image == Some(image_name.clone()))
+    {
+        return img_ptr.into();
+    }
+
     with_io(img_ptr, |img_ptr| async move {
         docker
             .remove_image(&image_name, None, None)
