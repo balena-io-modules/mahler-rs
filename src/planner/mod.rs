@@ -288,6 +288,12 @@ impl Planner {
                 non_conflicting.insert(path, Vec::<Workflow>::new());
             }
 
+            // Prioritize forking paths coming from methods instead of
+            // parallelism from non conflicting paths
+            // TODO: we probably need a way to prioritize candidates, perhaps
+            // by number of changes rather than by degree or job priority
+            let mut has_parallel = false;
+
             let next_span = debug_span!("find_next", cur = %&cur_state.root());
             let _enter = next_span.enter();
             let mut candidates = Vec::new();
@@ -326,6 +332,10 @@ impl Planner {
                                         .with_context(|| "failed to apply patch")
                                         .map_err(InternalError::from)?;
 
+                                    if dag.is_forking() {
+                                        has_parallel = dag.is_forking();
+                                    }
+
                                     // Extend current plan with new task
                                     let new_plan = Workflow {
                                         dag: cur_plan.dag.clone().concat(dag.clone()),
@@ -340,6 +350,7 @@ impl Planner {
                                     }
 
                                     // Add updated plan/state to the search stack
+
                                     candidates.push(task_description);
                                     stack.push((new_sys, new_plan, depth + 1));
                                 }
@@ -395,7 +406,9 @@ impl Planner {
                 .filter_map(|v| v.first().cloned())
                 .collect();
 
-            if parallel.len() > 1 {
+            // Only add parallel option if there is no parallel method in
+            // the generated list
+            if !has_parallel && parallel.len() > 1 {
                 let mut changes = Vec::new();
                 let mut branches = Vec::new();
 
@@ -438,6 +451,24 @@ mod tests {
     use crate::extract::{Args, System, Target, View};
     use crate::{dag, par, task::*};
     use crate::{seq, Dag};
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::{prelude::*, EnvFilter};
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct Counters(HashMap<String, i32>);
+
+    fn init() {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .pretty()
+                    .with_target(false)
+                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE),
+            )
+            .with(EnvFilter::from_default_env())
+            .try_init()
+            .unwrap_or(());
+    }
 
     fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
         if *counter < tgt {
@@ -551,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn it_calculates_a_linear_workflow_on_a_complex_state_1() {
+    fn it_calculates_a_linear_workflow_on_a_complex_state() {
         #[derive(Serialize, Deserialize)]
         struct MyState {
             counters: HashMap<String, i32>,
@@ -654,20 +685,98 @@ mod tests {
         assert_eq!(workflow.to_string(), expected.to_string(),);
     }
 
-    use tracing_subscriber::fmt::format::FmtSpan;
-    use tracing_subscriber::{prelude::*, EnvFilter};
+    #[test]
+    fn it_finds_parallel_plans_with_nested_forks() {
+        init();
+        type Counters = BTreeMap<String, i32>;
+
+        #[derive(Serialize, Deserialize, Debug)]
+        struct MyState {
+            counters: Counters,
+        }
+
+        // This is a very dumb example to test how the planner
+        // choses parallelizable methods over automated parallelization
+        fn multi_increment(counters: View<Counters>, target: Target<Counters>) -> Vec<Task> {
+            counters
+                .keys()
+                .filter(|k| {
+                    target.get(k.as_str()).unwrap_or(&0) - counters.get(k.as_str()).unwrap_or(&0)
+                        > 1
+                })
+                .map(|k| {
+                    plus_two
+                        .with_arg("counter", k)
+                        .with_target(target.get(k.as_str()))
+                })
+                .collect::<Vec<Task>>()
+        }
+
+        fn chunker(counters: View<Counters>, target: Target<Counters>) -> Vec<Task> {
+            let to_update = counters
+                .keys()
+                .filter(|k| {
+                    target.get(k.as_str()).unwrap_or(&0) - counters.get(k.as_str()).unwrap_or(&0)
+                        > 1
+                })
+                .collect::<Vec<&String>>();
+
+            let mut tasks: Vec<Task> = Vec::new();
+            for chunk in to_update.chunks(2) {
+                let mut tgt = (*counters).clone();
+                for k in chunk {
+                    if target.contains_key(k.as_str()) {
+                        tgt.insert(k.to_string(), *target.get(k.as_str()).unwrap_or(&0));
+                    }
+                }
+                tasks.push(multi_increment.with_target(tgt));
+            }
+
+            tasks
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/counters/{counter}",
+                update(plus_one)
+                    .with_description(|Args(counter): Args<String>| format!("{counter}++")),
+            )
+            .job("/counters/{counter}", update(plus_two))
+            .job("/counters", update(chunker))
+            .job("/counters", update(multi_increment));
+
+        let initial = MyState {
+            counters: BTreeMap::from([
+                ("a".to_string(), 0),
+                ("b".to_string(), 0),
+                ("c".to_string(), 0),
+                ("d".to_string(), 0),
+            ]),
+        };
+
+        let target = MyState {
+            counters: BTreeMap::from([
+                ("a".to_string(), 3),
+                ("b".to_string(), 2),
+                ("c".to_string(), 2),
+                ("d".to_string(), 2),
+            ]),
+        };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        // We expect a parallel dag with two tasks on each branch
+        let expected: Dag<&str> = dag!(seq!("a++", "a++"), seq!("b++", "b++"))
+            + dag!(seq!("c++", "c++"), seq!("d++", "d++"))
+            + seq!("a++");
+
+        assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
     #[test]
     fn test_stacking_problem() {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .pretty()
-                    .with_target(false)
-                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE),
-            )
-            .with(EnvFilter::from_default_env())
-            .try_init()
-            .unwrap_or(());
+        init();
 
         #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Debug)]
         enum Block {

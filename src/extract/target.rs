@@ -6,6 +6,7 @@ use crate::errors::ExtractionError;
 use crate::system::{FromSystem, System};
 use crate::task::{Context, FromContext};
 
+#[derive(Debug)]
 pub struct Target<T>(pub T);
 
 impl<T: DeserializeOwned> FromContext for Target<T> {

@@ -136,6 +136,14 @@ impl<T> Dag<T> {
         self.tail.is_none()
     }
 
+    pub fn is_forking(&self) -> bool {
+        if let Some(head) = &self.head {
+            matches!(*head.read().unwrap(), Node::Fork { .. })
+        } else {
+            false
+        }
+    }
+
     /// Link the current Dag to the Dag
     /// passed as argument
     pub fn concat(self, other: Dag<T>) -> Self {
