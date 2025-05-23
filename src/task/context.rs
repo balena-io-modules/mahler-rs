@@ -5,6 +5,7 @@ use super::errors::Error;
 use crate::path::{Path, PathArgs};
 
 #[derive(Clone, Default, Debug)]
+/// Describes the Task applicability context
 pub struct Context {
     pub(crate) target: Value,
     pub(crate) path: Path,
@@ -37,6 +38,12 @@ impl Context {
     }
 }
 
+/// Trait for types that can be initialized from a context
+///
+/// See [`crate::extract`] for more info.
+///
+/// Types created from the context do not need to know the runtime state of the system and only use
+/// the task configuration for initialization. They can be used on this crate to create a task [description](`super::Description`).
 pub trait FromContext: Sized {
     type Error: Into<Error> + 'static;
 

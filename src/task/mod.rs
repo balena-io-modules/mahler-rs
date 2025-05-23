@@ -1,3 +1,4 @@
+//! Types and traits for declaring and operating with Jobs and Tasks
 mod context;
 mod description;
 mod effect;
@@ -23,6 +24,7 @@ use crate::system::System;
 pub(crate) use context::*;
 pub(crate) use into_result::*;
 
+pub use context::FromContext;
 pub use description::*;
 pub use effect::*;
 pub use errors::*;
@@ -32,6 +34,7 @@ pub use job::*;
 pub use with_io::*;
 
 pub mod prelude {
+    //! Core types and traits for setting up tasks
     pub use super::handler::*;
     pub use super::job::{any, create, delete, none, update};
     pub use super::with_io::*;
@@ -45,6 +48,7 @@ type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>, Error> + Send +
 type Describe = Arc<dyn Fn(&Context) -> Result<String, Error> + Send + Sync>;
 
 #[derive(Clone)]
+/// An atomic task
 pub struct Action {
     id: &'static str,
     scoped: bool,
@@ -93,20 +97,25 @@ impl Action {
         }
     }
 
+    /// Get the internal task context
     pub(crate) fn context(&self) -> &Context {
         &self.context
     }
 
+    /// Get the unique identifier for the task
+    ///
+    /// The task id is the [`Handler`] type name
     pub fn id(&self) -> &str {
         self.id
     }
 
-    /// Run the task sequentially
+    /// Run the task on the system and return a list of changes
     pub(crate) async fn run(&self, system: &System) -> Result<Patch, Error> {
         let Action { context, run, .. } = self;
         (run)(system, context).await
     }
 
+    /// Simulate the effect of the task on the system
     pub(crate) fn dry_run(&self, system: &System) -> Result<Patch, Error> {
         let Action {
             context, dry_run, ..
@@ -126,6 +135,7 @@ impl Display for Action {
 }
 
 #[derive(Clone)]
+/// A compound task, i.e. a task that can be expanded into child tasks
 pub struct Method {
     id: &'static str,
     scoped: bool,
@@ -161,14 +171,19 @@ impl Method {
         }
     }
 
+    /// Get the internal context for the task
     pub(crate) fn context(&self) -> &Context {
         &self.context
     }
 
+    /// Get the unique identifier for the task
+    ///
+    /// The task id is the [`Handler`] type name
     pub fn id(&self) -> &str {
         self.id
     }
 
+    /// Expand the method into its component tasks
     pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>, Error> {
         let Method {
             context, expand, ..
@@ -189,9 +204,9 @@ impl Display for Method {
 
 /// The Task degree denotes its cardinality or its position in a search tree
 ///
-/// - Atom jobs are the leafs in the search tree, they define the work to be
+/// - Atomic tasks are the leafs in the search tree, they define the work to be
 ///   executed and cannot be expanded
-/// - List jobs define work in terms of other tasks, they are expanded recursively
+/// - Composite tasks define work in terms of other tasks, they are expanded recursively
 ///   in order to get to a list of atoms
 #[derive(Clone, PartialEq, PartialOrd, Eq, Ord, Debug)]
 pub(crate) enum Degree {
@@ -199,11 +214,14 @@ pub(crate) enum Degree {
     Atomic,
 }
 
-/// A task is either a concrete unit of work (action) or rule to
-/// derive a list of tasks (method)
 #[derive(Debug, Clone)]
+/// Utility type to operate either with atomic or compound tasks
+///
+/// A task describes the application of a [`Handler`] to a context.
 pub enum Task {
+    /// An atomic task
     Action(Action),
+    /// A compound task, i.e. a task that can be expanded into child tasks
     Method(Method),
 }
 
@@ -221,6 +239,8 @@ impl From<Method> for Task {
 
 impl Task {
     /// Get the unique identifier for the task
+    ///
+    /// The task id is the [`Handler`] type name
     pub fn id(&self) -> &str {
         match self {
             Self::Action(Action { id, .. }) => id,
@@ -228,6 +248,7 @@ impl Task {
         }
     }
 
+    /// Get the internal path that the task applies to
     pub(crate) fn path(&self) -> &Path {
         match self {
             Self::Action(Action { context, .. }) => &context.path,
@@ -256,7 +277,9 @@ impl Task {
         }
     }
 
-    /// Return true if the task can be parallelized
+    /// Return true if the task only operates within its assigned path
+    ///
+    /// A scoped task is parallelizable
     pub fn is_scoped(&self) -> bool {
         match self {
             Self::Action(Action { scoped, .. }) => *scoped,
@@ -284,11 +307,29 @@ impl Task {
     /// Set a target for the task
     ///
     /// This function will panic if the serialization of the target fails
+    ///
+    /// ```rust
+    /// use mahler::task::prelude::*;
+    ///
+    /// fn foo() {}
+    ///
+    /// // Assign the value of the `foo` path argument to the task.
+    /// let task = foo.into_task().with_target(10);
+    /// ```
     pub fn with_target<S: Serialize>(self, target: S) -> Self {
         self.try_target(target).unwrap()
     }
 
     /// Set an argument for the task
+    ///
+    /// ```rust
+    /// use mahler::task::prelude::*;
+    ///
+    /// fn foo() {}
+    ///
+    /// // Assign the value of the `foo` path argument to the task.
+    /// let task = foo.into_task().with_arg("foo", "123");
+    /// ```
     pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         match self {
             Self::Action(mut action) => {
@@ -302,6 +343,10 @@ impl Task {
         }
     }
 
+    /// Set a path for the task
+    ///
+    /// This is called by the planner, the path is obtained by finding the task by id on the
+    /// planner domain and replacing the arguments set by the user
     pub(crate) fn with_path(self, path: impl AsRef<str>) -> Self {
         match self {
             Self::Action(mut action) => {
@@ -315,6 +360,7 @@ impl Task {
         }
     }
 
+    /// Set a context for the task
     pub(crate) fn with_context(self, context: Context) -> Self {
         match self {
             Self::Action(task) => Self::Action(Action { context, ..task }),
@@ -322,6 +368,10 @@ impl Task {
         }
     }
 
+    /// Set a description for the task
+    ///
+    /// This is for internal use only, task descriptions must be defined using
+    /// [`Job::with_description`]
     pub(crate) fn with_description<D, T>(self, description: D) -> Self
     where
         D: Description<T>,
@@ -335,6 +385,10 @@ impl Task {
 }
 
 impl Display for Task {
+    /// Human readable description for the Task
+    ///
+    /// The description will be obtained from the [`Description`] handler set by calling
+    /// [`Job::with_description`]. If no description is set it defaults to `<task.id>(<task.path>)`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Action(action) => action.fmt(f),

@@ -5,37 +5,77 @@ use super::from_system::FromSystem;
 use super::{Action, Context, Effect, Error, Method, Task};
 use crate::system::System;
 
+/// Trait for functions that can be used as worker jobs
+///
+/// A Handler is any function that accepts zero or more "[extractors](`crate::extract`)" as
+/// arguments and returns something that can be converted into an [Effect](`super::Effect`) on the
+/// system.
 pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
+    /// Execute the handler
+    ///
+    /// This is never called directly by the library users but it is used by mahler to simulate or
+    /// run the handler on the system in the right context
     fn call(&self, system: &System, context: &Context) -> Effect<O, Error, I>;
 
     /// Get the unique identifier of the job handler
+    ///
+    /// The identifier is given by the type name of `Self`
+    ///
+    /// This is used accross the library to search for tasks for tracing purposes and human
+    /// readable logs.
     fn id(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
 
-    /// Return true if the handler can be parallelized
+    /// Return true if the handler requires scoped access to a partion of the system
     ///
-    /// This means the handler only scoped extractors and
-    /// no global extractors, allowing it to be used in parallel
-    /// with other handler with non-conflicting scope.
+    /// A scoped handler is parallelizable.
+    ///
+    /// The scoping of the handler is determined from the extractor. If all extractors are scoped,
+    /// then the handler is scoped.
+    ///
+    /// See [`FromSystem::is_scoped`]
     fn is_scoped(&self) -> bool;
 
-    /// Create a task from the handler
+    /// Create a task from the handler using the default context
+    ///
+    /// The generated task can be modified using [`Task::with_target`] and [`Task::with_arg`]
     fn into_task(self) -> Task;
 
     /// Create a task from the handler with a specific target
     ///
+    /// This is a convenience method that is equivalent to calling
+    /// `handler.into_task().with_target(target)`.
+    ///
     /// Important: This function will panic if serialization of the target into JSON fails
-    /// Use `into_task().try_target()` if you want to handle the error. This is done for convenience as
+    /// Use [`Task::try_target`] if you want to handle the error. This is done for convenience as
     /// serialization errors should be rare and this makes the code more concise.
+    ///
+    /// ```rust
+    /// use mahler::task::prelude::*;
+    ///
+    /// fn foo() {}
+    ///
+    /// // Assign the value of the `foo` path argument to the task.
+    /// let task = foo.with_target(10);
+    /// ```
     fn with_target<S: Serialize>(self, target: S) -> Task {
         self.into_task().with_target(target)
     }
 
     /// Create a task from the handler with a specific path argument
     ///
-    /// This is a convenience method and it is equivalent to calling
-    /// handler.into_task().with_path();
+    /// This is a convenience method that is equivalent to calling
+    /// `handler.into_task().with_path()`.
+    ///
+    /// ```rust
+    /// use mahler::task::prelude::*;
+    ///
+    /// fn foo() {}
+    ///
+    /// // Assign the value of the `foo` path argument to the task.
+    /// let task = foo.with_arg("foo", "123");
+    /// ```
     fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Task {
         self.into_task().with_arg(key, value)
     }

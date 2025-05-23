@@ -1,5 +1,16 @@
 use super::{Context, Error, FromContext};
 
+/// Trait for functions that can be used to describe a Job/Task
+///
+/// A description is any function that accepts zero or more context "[extractors](`crate::extract`)" as
+/// arguments and returns a String. A context extractor is a type that implements
+/// [FromContext](`super::FromContext`)
+///
+/// Supported context extractors are
+///
+/// - [`crate::extract::Target`] to extract the task target
+/// - [`crate::extract::Args`] to extract the task args
+/// - [`crate::extract::Path`] to extract the task path
 pub trait Description<T>: Clone + Sync + Send + 'static {
     fn call(&self, context: &Context) -> Result<String, Error>;
 }
