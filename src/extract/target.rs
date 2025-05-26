@@ -3,8 +3,8 @@ use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
 use crate::errors::ExtractionError;
-use crate::system::{FromSystem, System};
-use crate::task::{Context, FromContext};
+use crate::system::System;
+use crate::task::{Context, FromContext, FromSystem};
 
 #[derive(Debug)]
 pub struct Target<T>(pub T);

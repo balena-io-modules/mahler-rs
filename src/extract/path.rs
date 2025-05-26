@@ -1,8 +1,8 @@
 use std::fmt::{Display, Formatter};
 
 use crate::errors::ExtractionError;
-use crate::system::{FromSystem, System};
-use crate::task::{Context, FromContext};
+use crate::system::System;
+use crate::task::{Context, FromContext, FromSystem};
 
 pub struct Path(pub String);
 

@@ -3,8 +3,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::errors::ExtractionError;
-use crate::system::{FromSystem, System};
-use crate::task::Context;
+use crate::system::System;
+use crate::task::{Context, FromSystem};
 
 pub struct Res<R>(Arc<R>);
 

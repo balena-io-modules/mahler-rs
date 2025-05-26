@@ -2,8 +2,8 @@ use anyhow::Context as AnyhowCtx;
 use serde::de::DeserializeOwned;
 
 use crate::errors::ExtractionError;
-use crate::system::{FromSystem, System as SystemState};
-use crate::task::Context;
+use crate::system::System as SystemState;
+use crate::task::{Context, FromSystem};
 
 /// Extracts the root of the system state
 #[derive(Debug, Clone)]

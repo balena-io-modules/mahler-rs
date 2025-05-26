@@ -12,8 +12,8 @@ use std::ops::{Deref, DerefMut};
 
 use crate::errors::ExtractionError;
 use crate::path::Path;
-use crate::system::{FromSystem, System};
-use crate::task::{Context, Effect, Error, IntoResult};
+use crate::system::System;
+use crate::task::{Context, Effect, Error, FromSystem, IntoResult};
 
 /// Extracts a pointer to a sub-element of the global state indicated
 /// by the path.
