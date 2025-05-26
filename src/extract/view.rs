@@ -46,13 +46,6 @@ impl<T> Pointer<T> {
         self.insert(value.into())
     }
 
-    /// Apply a function to the internal value of the pointer
-    /// if it exists
-    pub fn update_with<F: FnOnce(T) -> T>(mut self, f: F) -> Self {
-        self.state = self.state.map(f);
-        self
-    }
-
     /// Clear the value at the location indicated by
     /// the path
     pub fn unassign(mut self) -> Self {
@@ -67,11 +60,6 @@ impl<T> Pointer<T> {
         T: Default,
     {
         self.assign(T::default())
-    }
-
-    /// Return true if the pointer is null
-    pub fn is_null(&self) -> bool {
-        self.state.is_none()
     }
 }
 
