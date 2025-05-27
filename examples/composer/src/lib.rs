@@ -785,7 +785,7 @@ mod tests {
 
         // Seeking the target must succeed
         let worker = worker.seek_target(target.clone()).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::TargetReached);
+        assert_eq!(worker.status(), &SeekStatus::Success);
 
         // The alpine image must exist now
         let docker = Docker::connect_with_defaults().unwrap();
@@ -943,7 +943,7 @@ mod tests {
 
         // Seeking the target must succeed
         let worker = worker.seek_target(target).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::TargetReached);
+        assert_eq!(worker.status(), &SeekStatus::Success);
 
         // The alpine image must exist now
         let docker = Docker::connect_with_defaults().unwrap();
@@ -982,7 +982,7 @@ mod tests {
 
         // Seeking the target must succeed
         let worker = worker.seek_target(target).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::TargetReached);
+        assert_eq!(worker.status(), &SeekStatus::Success);
 
         // The container ids should match
         let container = docker
@@ -1009,7 +1009,7 @@ mod tests {
 
         // Seeking the target must succeed
         let worker = worker.seek_target(target).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::TargetReached);
+        assert_eq!(worker.status(), &SeekStatus::Success);
 
         // The container ids should match
         let container = docker
@@ -1030,7 +1030,7 @@ mod tests {
 
         // Seeking the target must succeed
         let worker = worker.seek_target(target).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::TargetReached);
+        assert_eq!(worker.status(), &SeekStatus::Success);
 
         // The container should no longer exist
         let container = docker

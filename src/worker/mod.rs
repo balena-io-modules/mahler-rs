@@ -72,7 +72,7 @@ pub enum FatalError {
 #[derive(Debug)]
 pub enum SeekStatus {
     /// Worker has reached the target state
-    TargetReached,
+    Success,
     /// Workflow not found
     NotFound,
     /// Worker interrupted by user request
@@ -86,7 +86,7 @@ impl PartialEq for SeekStatus {
     fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (SeekStatus::TargetReached, SeekStatus::TargetReached)
+            (SeekStatus::Success, SeekStatus::Success)
                 | (SeekStatus::NotFound, SeekStatus::NotFound)
                 | (SeekStatus::Interrupted, SeekStatus::Interrupted)
         )
@@ -447,7 +447,7 @@ impl<O, I> Worker<O, Ready, I> {
                             match res {
                                 Ok(SeekResult::TargetReached) => {
                                     cur_span.record("return", "success");
-                                    return Ok((planner, SeekStatus::TargetReached));
+                                    return Ok((planner, SeekStatus::Success));
                                 }
                                 Ok(SeekResult::WorkflowCompleted) => {}
                                 Ok(SeekResult::Interrupted) => {
@@ -669,7 +669,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(worker.status(), &SeekStatus::TargetReached);
+        assert_eq!(worker.status(), &SeekStatus::Success);
         let state = worker.state().await.unwrap();
         assert_eq!(
             state,
@@ -719,7 +719,7 @@ mod tests {
 
         // Wait for worker to finish
         let worker = worker.seek_target(2).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::TargetReached);
+        assert_eq!(worker.status(), &SeekStatus::Success);
 
         let results = results.read().await;
         assert_eq!(*results, vec![Some(1), Some(2)]);
@@ -755,7 +755,7 @@ mod tests {
 
         // Wait for worker to finish
         let worker = worker.seek_target(100).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::TargetReached);
+        assert_eq!(worker.status(), &SeekStatus::Success);
 
         let results = results.read().await;
         assert_eq!(
@@ -840,7 +840,7 @@ mod tests {
         let worker = worker.seek_target(1).await.unwrap();
 
         // Wait for worker to finish
-        assert_eq!(worker.status(), &SeekStatus::TargetReached);
+        assert_eq!(worker.status(), &SeekStatus::Success);
 
         // Close the stream
         worker.stop();
