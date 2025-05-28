@@ -95,7 +95,7 @@ impl PartialEq for SeekStatus {
 
 #[async_trait]
 pub trait SeekTarget<O, I = O> {
-    async fn seek_target(self, tgt: I) -> Result<Worker<O, Idle, I>, FatalError>;
+    async fn seek_target(self, tgt: I) -> Result<Worker<O, Ready, I>, FatalError>;
 }
 
 impl Eq for SeekStatus {}
@@ -124,25 +124,16 @@ pub struct Ready {
     patches: Sender<Patch>,
     writer_closed: Arc<Notify>,
     interrupt: AutoInterrupt,
+    status: SeekStatus,
 }
 
 #[derive(Debug, Clone)]
 struct UpdateEvent;
 
-pub struct Idle {
-    planner: Planner,
-    system: Arc<RwLock<System>>,
-    updates: broadcast::Sender<UpdateEvent>,
-    patches: Sender<Patch>,
-    writer_closed: Arc<Notify>,
-    status: SeekStatus,
-}
-
 pub struct Stopped {}
 
 impl WorkerState for Uninitialized {}
 impl WorkerState for Ready {}
-impl WorkerState for Idle {}
 impl WorkerState for Stopped {}
 
 pub struct Worker<O, S: WorkerState = Uninitialized, I = O> {
@@ -266,6 +257,7 @@ impl<O> Worker<O, Uninitialized> {
             patches: tx,
             writer_closed,
             interrupt: AutoInterrupt::default(),
+            status: SeekStatus::Success,
         }))
     }
 }
@@ -362,8 +354,13 @@ impl<O, I> Worker<O, Ready, I> {
         follow_worker(self.inner.updates.clone(), Arc::clone(&self.inner.system))
     }
 
+    /// Return the result of the last worker run
+    pub fn status(&self) -> &SeekStatus {
+        &self.inner.status
+    }
+
     #[instrument(skip_all, fields(return=field::Empty), err)]
-    pub async fn seek_target(self, tgt: I) -> Result<Worker<O, Idle, I>, FatalError>
+    pub async fn seek_target(self, tgt: I) -> Result<Worker<O, Ready, I>, FatalError>
     where
         I: Serialize + DeserializeOwned,
     {
@@ -502,13 +499,13 @@ impl<O, I> Worker<O, Ready, I> {
             Err(e) => Err(Panicked(e))?,
         }?;
 
-        // autointerupt isc
-        Ok(Worker::from_inner(Idle {
+        Ok(Worker::from_inner(Ready {
             planner,
             system,
             updates,
             patches,
             writer_closed,
+            interrupt: AutoInterrupt::default(),
             status,
         }))
     }
@@ -518,81 +515,9 @@ impl<O, I> Worker<O, Ready, I> {
 impl<O: Send, I: Serialize + DeserializeOwned + Send> SeekTarget<O, I>
     for Result<Worker<O, Ready, I>, SerializationError>
 {
-    async fn seek_target(self, tgt: I) -> Result<Worker<O, Idle, I>, FatalError> {
+    async fn seek_target(self, tgt: I) -> Result<Worker<O, Ready, I>, FatalError> {
         let worker = self?;
         worker.seek_target(tgt).await
-    }
-}
-
-// -- Worker is idle seek target finished
-
-impl<O, I> Worker<O, Idle, I> {
-    /// Stop following system updates
-    pub fn stop(self) -> Worker<O, Stopped> {
-        Worker::from_inner(Stopped {})
-    }
-
-    /// Returns a stream of updated states after each system change.
-    ///
-    /// Best effort: updates may be missed if the receiver lags behind.
-    /// Fetches the current system state at the time of notification.
-    pub fn follow(&self) -> FollowStream<O>
-    where
-        O: DeserializeOwned,
-    {
-        follow_worker(self.inner.updates.clone(), Arc::clone(&self.inner.system))
-    }
-
-    /// Read the current system state from the worker
-    pub async fn state(&self) -> Result<O, SerializationError>
-    where
-        O: DeserializeOwned,
-    {
-        let system = self.inner.system.read().await;
-        let state = system.state()?;
-        Ok(state)
-    }
-
-    /// Read the current system state from the worker
-    /// using the target type to modify and re-insert
-    /// into the worker
-    pub async fn state_as_target(&self) -> Result<I, SerializationError>
-    where
-        I: DeserializeOwned,
-    {
-        let system = self.inner.system.read().await;
-        let state = system.state()?;
-        Ok(state)
-    }
-
-    /// Return the result of the last worker run
-    pub fn status(&self) -> &SeekStatus {
-        &self.inner.status
-    }
-
-    pub async fn seek_target(self, tgt: I) -> Result<Worker<O, Idle, I>, FatalError>
-    where
-        I: Serialize + DeserializeOwned,
-    {
-        let Idle {
-            planner,
-            system,
-            updates,
-            writer_closed,
-            patches,
-            ..
-        } = self.inner;
-
-        Worker::from_inner(Ready {
-            planner,
-            system,
-            updates,
-            patches,
-            writer_closed,
-            interrupt: AutoInterrupt::default(),
-        })
-        .seek_target(tgt)
-        .await
     }
 }
 

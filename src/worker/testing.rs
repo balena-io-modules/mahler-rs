@@ -4,7 +4,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use super::{Idle, Ready, Worker};
+use super::{Ready, Worker};
 use crate::planner::{Error as PlannerError, Planner};
 use crate::system::System;
 use crate::task::{self, Context};
@@ -177,15 +177,6 @@ impl<O, I> Worker<O, Ready, I> {
         let new_state = system.state().expect("failed to serialize output state");
 
         Ok(new_state)
-    }
-}
-
-impl<O, I> Worker<O, Idle, I> {
-    pub async fn find_workflow(&self, tgt: I) -> Result<Workflow, NotFound>
-    where
-        I: Serialize + DeserializeOwned,
-    {
-        find_workflow::<I>(&self.inner.system, &self.inner.planner, tgt).await
     }
 }
 
