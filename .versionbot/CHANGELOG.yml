@@ -1,4 +1,46 @@
 - commits:
+    - subject: Update code documentation
+      hash: a261c087395f323b03e290aea15e4c9c9b16ca81
+      body: |
+        Add rustdoc documentation to most of the public interfaces. This also
+        renames a couple of methods for better clarity.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Unify `Ready` and `Idle` worker states
+      hash: f5d5fd7397f4a9c67bbcdd0c91c33bcf6bbc3bd8
+      body: >
+        These were essentially equivalent states with the exception of a couple
+        of fields.
+
+        This change simplifies the code.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Remove redundant Pointer methods
+      hash: 4890e0f007bf9e01bbe5e4d4fac4bd09b35ed0a2
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Rename the library to mahler and update README
+      hash: afc1f014af6c23efef360d49c0466078c7a26286
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.14.1
+  title: ""
+  date: 2025-06-03T21:48:47.155Z
+- commits:
     - subject: Prioritize method parallelism over automated parallelism
       hash: ae93688ec0e395fcc37e2d219ff13f2bbb907c7e
       body: |
