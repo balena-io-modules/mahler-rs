@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -12,7 +12,7 @@ use mahler::worker::{init_logging, Worker};
 // since the library uses JSON internally to access parts
 // of the state
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Counters(HashMap<String, i32>);
+struct Counters(BTreeMap<String, i32>);
 
 // `plus_one` defines a job that updates a counter if it is below some target.
 // The job makes use of two extractors:
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         .job("/{counter}", update(plus_two))
         // We initialize the worker with two counters
         // `a` and `b` with value 0
-        .initial_state(Counters(HashMap::from([
+        .initial_state(Counters(BTreeMap::from([
             ("a".to_string(), 0),
             ("b".to_string(), 0),
         ])))
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
     let worker = worker
-        .seek_target(Counters(HashMap::from([
+        .seek_target(Counters(BTreeMap::from([
             ("a".to_string(), 1),
             ("b".to_string(), 2),
         ])))
@@ -98,7 +98,9 @@ async fn main() -> Result<()> {
 
     assert_eq!(
         state,
-        Counters(HashMap::from([("a".to_string(), 1), ("b".to_string(), 2),]))
+        Counters(BTreeMap::from(
+            [("a".to_string(), 1), ("b".to_string(), 2),]
+        ))
     );
 
     println!("The system state is now {:?}", state);
