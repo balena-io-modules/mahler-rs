@@ -121,7 +121,7 @@ impl Planner {
 
                 // Detect loops first, if the same action is being applied to the same
                 // state then abort this search branch
-                if cur_plan.as_dag().some(|a| a.id == work_id) {
+                if cur_plan.as_dag().any(|a| a.id == work_id) {
                     return Err(SearchFailed::LoopDetected)?;
                 }
 
@@ -135,11 +135,7 @@ impl Planner {
 
                 // Append a new node to the workflow, include a copy
                 // of the changes for validation during runtime
-                let dag = dag.concat(Dag::from_sequence([WorkUnit::new(
-                    work_id,
-                    action,
-                    changes.clone(),
-                )]));
+                let dag = dag + WorkUnit::new(work_id, action, changes.clone());
 
                 Span::current().record("changes", format!("{:?}", changes));
                 let pending = [pending, changes].concat();
@@ -179,9 +175,7 @@ impl Planner {
                         .ok_or(anyhow!("failed to find job for path {path}"))?;
 
                     // Get a copy of the task for the final list
-                    let task = job
-                        .clone_task(t.context().to_owned())
-                        .with_path(path.clone());
+                    let task = job.new_task(t.context().to_owned()).with_path(path.clone());
 
                     extended_tasks.push(task);
                 }
@@ -219,7 +213,7 @@ impl Planner {
 
                     // Extend the current plan with the forking dag
                     cur_plan = Workflow {
-                        dag: cur_plan.dag.concat(Dag::from_branches(branches)),
+                        dag: cur_plan.dag.concat(Dag::new(branches)),
                         pending: vec![],
                     }
                 } else {
@@ -317,7 +311,7 @@ impl Planner {
                     // stack first
                     for job in jobs.filter(|j| j.operation() != &Operation::None).rev() {
                         if op.matches(job.operation()) || job.operation() == &Operation::Any {
-                            let task = job.clone_task(context.clone());
+                            let task = job.new_task(context.clone());
                             let task_id = task.id().to_string();
                             let task_is_scoped = task.is_scoped();
                             let task_description = task.to_string();
@@ -423,8 +417,8 @@ impl Planner {
                     .with_context(|| "failed to apply parallel patch")
                     .map_err(InternalError::from)?;
 
-                // Construct a new DAG with parallel branches joined via `Dag::from_branches`
-                let dag = Dag::from_branches(branches);
+                // Construct a new DAG with parallel branches joined via `Dag::new`
+                let dag = Dag::new(branches);
                 let new_plan = Workflow {
                     dag: cur_plan.dag.concat(dag),
                     pending: vec![],
@@ -535,8 +529,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "gustav::planner::tests::plus_one()",
-            "gustav::planner::tests::plus_one()"
+            "mahler::planner::tests::plus_one()",
+            "mahler::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -574,8 +568,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "gustav::planner::tests::plus_one()",
-            "gustav::planner::tests::plus_one()"
+            "mahler::planner::tests::plus_one()",
+            "mahler::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -605,11 +599,11 @@ mod tests {
 
         // We expect counters to be updated in parallel
         let expected: Dag<&str> = par!(
-            "gustav::planner::tests::plus_one(/counters/one)",
-            "gustav::planner::tests::plus_one(/counters/two)",
+            "mahler::planner::tests::plus_one(/counters/one)",
+            "mahler::planner::tests::plus_one(/counters/two)",
         ) + par!(
-            "gustav::planner::tests::plus_one(/counters/one)",
-            "gustav::planner::tests::plus_one(/counters/two)",
+            "mahler::planner::tests::plus_one(/counters/one)",
+            "mahler::planner::tests::plus_one(/counters/two)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -640,12 +634,12 @@ mod tests {
         // We expect a parallel dag with two tasks on each branch
         let expected: Dag<&str> = dag!(
             seq!(
-                "gustav::planner::tests::plus_one(/counters/one)",
-                "gustav::planner::tests::plus_one(/counters/one)",
+                "mahler::planner::tests::plus_one(/counters/one)",
+                "mahler::planner::tests::plus_one(/counters/one)",
             ),
             seq!(
-                "gustav::planner::tests::plus_one(/counters/two)",
-                "gustav::planner::tests::plus_one(/counters/two)",
+                "mahler::planner::tests::plus_one(/counters/two)",
+                "mahler::planner::tests::plus_one(/counters/two)",
             )
         );
 
@@ -677,9 +671,9 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "gustav::planner::tests::plus_one(/counters/one)",
-            "gustav::planner::tests::plus_one(/counters/one)",
-            "gustav::planner::tests::plus_one(/counters/one)",
+            "mahler::planner::tests::plus_one(/counters/one)",
+            "mahler::planner::tests::plus_one(/counters/one)",
+            "mahler::planner::tests::plus_one(/counters/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);

@@ -6,24 +6,69 @@ type IOResult<O, E> = Pin<Box<dyn Future<Output = Result<O, E>> + Send>>;
 type IO<O, E = Infallible, I = O> = Box<dyn FnOnce(I) -> IOResult<O, E> + Send>;
 type Pure<O, E, I> = Box<dyn FnOnce(I) -> Result<O, E> + Send>;
 
+/// Encode pure and IO operations on a single type
+///
+/// An `Effect` is a way to define an effectful operation on a system, but to also provide a
+/// way to simulate/test the changes the operation will have on the system (the `pure` part of the
+/// effect).
+///
+/// `Effect` is used as a return type for the Job handler to allow the planner to safely test the
+/// Job effect without actually having to run the function.
+///
+/// An effect may be `Pure`, meaning it has no side-effects (is just a value), or `IO`, meaning it
+/// has pure and effectful computations.
 pub enum Effect<O, E = Infallible, I = O> {
+    /// Pure computation with no side-effects
     Pure(Result<O, E>),
+    /// Effectful computation
     IO {
+        /// Input type
         input: Result<I, E>,
+        /// Pure computation on the input type
         pure: Pure<O, E, I>,
+        /// Effectful operation for the given input
         io: IO<O, E, I>,
     },
 }
 
 impl<O, E> Effect<O, E> {
+    /// Create a pure `Effect`
+    ///
+    /// ```rust
+    /// use mahler::task::Effect;
+    ///
+    /// // Create a pure `Effect` containing the value 0
+    /// let e: Effect<i32> = Effect::of(0);
+    /// ```
     pub fn of(o: O) -> Self {
         Effect::Pure(Ok(o))
     }
 
-    pub fn from_result(res: Result<O, E>) -> Effect<O, E> {
+    /// Create a pure `Effect` from a `Result`
+    pub(crate) fn from_result(res: Result<O, E>) -> Effect<O, E> {
         Effect::Pure(res)
     }
 
+    /// Convert the effect to an effectful computation
+    ///
+    /// Allows providing an computation to apply to the input value that performs side-effects on the
+    /// underlying system.
+    ///
+    /// ```rust
+    /// use mahler::task::Effect;
+    /// use tokio::time::{sleep, Duration};
+    ///
+    /// // Create a pure `Effect` containing the value 0
+    /// let e: Effect<i32> = Effect::of(0)
+    ///         .with_io(|i| async move {
+    ///             // system changes should only be performed
+    ///             // within the IO part of the Effect
+    ///             sleep(Duration::from_millis(10)).await;
+    ///
+    ///             // update the Result if desired
+    ///             Ok(i + 1)
+    ///         });
+    /// ```
     pub fn with_io<
         F: FnOnce(O) -> Res + Send + 'static,
         Res: Future<Output = Result<O, E>> + Send,
@@ -48,10 +93,31 @@ impl<O, E> Effect<O, E> {
 }
 
 impl<T: 'static, E: 'static, I: Send + 'static> Effect<T, E, I> {
-    pub fn from_error(e: E) -> Self {
+    /// Create a pure effect from an `Error`
+    pub(crate) fn from_error(e: E) -> Self {
         Effect::Pure(Err(e))
     }
 
+    /// Transform the effect output type using a pure function
+    ///
+    ///```rust
+    /// use mahler::task::Effect;
+    /// use std::convert::Infallible;
+    ///
+    /// fn new_effect() -> Effect<String, Infallible, i32> {
+    ///     Effect::of(0)
+    ///         .map(|i| i + 1)
+    ///         .with_io(|i| async move {
+    ///             Ok(i + 1)
+    ///         })
+    ///         .map(|i| format!("the result is {i}"))
+    /// }
+    ///
+    /// assert_eq!(new_effect().pure(), Ok(String::from("the result is 1")));
+    /// # tokio_test::block_on(async move {
+    /// assert_eq!(new_effect().run().await, Ok(String::from("the result is 2")));
+    /// # })
+    /// ```
     pub fn map<O, F: FnOnce(T) -> O + Clone + Send + 'static>(self, fu: F) -> Effect<O, E, I> {
         match self {
             Effect::Pure(output) => Effect::Pure(output.map(fu)),
@@ -71,6 +137,25 @@ impl<T: 'static, E: 'static, I: Send + 'static> Effect<T, E, I> {
         }
     }
 
+    /// Apply a transformation function to the effectful part of the Effect
+    ///
+    ///```rust
+    /// use mahler::task::Effect;
+    /// use std::convert::Infallible;
+    ///
+    /// fn new_effect() -> Effect<i32> {
+    ///     Effect::of(0)
+    ///         .with_io(|i| async move {
+    ///             Ok(i)
+    ///         })
+    ///         .map_io(|i| i + 1)
+    /// }
+    ///
+    /// assert_eq!(new_effect().pure(), Ok(0));
+    /// # tokio_test::block_on(async move {
+    /// assert_eq!(new_effect().run().await, Ok(1));
+    /// # })
+    /// ```
     pub fn map_io<F: FnOnce(T) -> T + Send + 'static>(self, fu: F) -> Effect<T, E, I> {
         match self {
             Effect::Pure(output) => Effect::Pure(output),
@@ -87,6 +172,25 @@ impl<T: 'static, E: 'static, I: Send + 'static> Effect<T, E, I> {
         }
     }
 
+    /// Transform the effect output type using a pure function returning a Result
+    ///
+    ///```rust
+    /// use mahler::task::Effect;
+    /// use std::convert::Infallible;
+    ///
+    /// fn new_effect() -> Effect<i32, Infallible> {
+    ///     Effect::of(0)
+    ///         .and_then(|i| Ok(i + 1))
+    ///         .with_io(|i| async move {
+    ///             Ok(i + 1)
+    ///         })
+    /// }
+    ///
+    /// assert_eq!(new_effect().pure(), Ok(1));
+    /// # tokio_test::block_on(async move {
+    /// assert_eq!(new_effect().run().await, Ok(2));
+    /// # })
+    /// ```
     pub fn and_then<O, F: FnOnce(T) -> Result<O, E> + Clone + Send + 'static>(
         self,
         fu: F,
@@ -109,6 +213,22 @@ impl<T: 'static, E: 'static, I: Send + 'static> Effect<T, E, I> {
         }
     }
 
+    /// Transform the error type of the Effect
+    ///
+    ///```rust
+    /// use mahler::task::Effect;
+    /// use std::convert::Infallible;
+    ///
+    /// struct MyError;
+    ///
+    /// fn new_effect() -> Effect<i32, MyError> {
+    ///     Effect::of(0)
+    ///         .with_io(|i| async move {
+    ///             Ok(i + 1)
+    ///         })
+    ///         .map_err(|_: Infallible| MyError {/* ... */})
+    /// }
+    /// ```
     pub fn map_err<E1, F: FnOnce(E) -> E1 + Clone + Send + 'static>(
         self,
         fe: F,
@@ -127,13 +247,45 @@ impl<T: 'static, E: 'static, I: Send + 'static> Effect<T, E, I> {
         }
     }
 
+    /// Run the *pure* part of the Effect
+    ///
+    ///```rust
+    /// use mahler::task::Effect;
+    /// use std::convert::Infallible;
+    ///
+    /// fn new_effect() -> Effect<i32, Infallible> {
+    ///     Effect::of(0)
+    ///         .with_io(|i| async move {
+    ///             Ok(i + 1)
+    ///         })
+    /// }
+    ///
+    /// assert_eq!(new_effect().pure(), Ok(0));
+    /// ```
     pub fn pure(self) -> Result<T, E> {
         match self {
             Effect::Pure(output) => output,
             Effect::IO { input, pure, .. } => input.and_then(pure),
         }
     }
-
+    /// Run the effectful (IO) part of the effect
+    ///```rust
+    /// use mahler::task::Effect;
+    /// use tokio::time::{sleep, Duration};
+    /// use std::convert::Infallible;
+    ///
+    /// fn new_effect() -> Effect<i32, Infallible> {
+    ///     Effect::of(0)
+    ///         .with_io(|i| async move {
+    ///             sleep(Duration::from_millis(10)).await;
+    ///             Ok(i + 1)
+    ///         })
+    /// }
+    ///
+    /// # tokio_test::block_on(async move {
+    /// // Run executes the code inside the with_io block
+    /// assert_eq!(new_effect().run().await, Ok(1));
+    /// # })
     pub async fn run(self) -> Result<T, E> {
         match self {
             Effect::Pure(output) => output,

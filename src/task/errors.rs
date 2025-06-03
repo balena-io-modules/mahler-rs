@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::errors::{ExtractionError, IOError, MethodError};
 
 #[derive(Error, Debug)]
+/// Type for errors that can happen when operating with a [`super::Task`]
 pub enum Error {
     #[error(transparent)]
     /// Arguments to the task could not be extracted.
