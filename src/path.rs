@@ -20,7 +20,8 @@ impl Path {
         Path(Pointer::from_static(s).to_buf())
     }
 
-    pub fn to_str(&self) -> &str {
+    /// Get the internal string representation for the Path
+    pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
 }
@@ -46,6 +47,14 @@ impl From<Path> for PointerBuf {
 impl AsRef<Pointer> for Path {
     fn as_ref(&self) -> &Pointer {
         &self.0
+    }
+}
+
+impl Deref for Path {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
     }
 }
 

@@ -34,9 +34,7 @@ impl FromContext for Path {
     type Error = ExtractionError;
 
     fn from_context(context: &Context) -> Result<Self, Self::Error> {
-        let path = context.path.to_str();
-
-        Ok(Path(String::from(path)))
+        Ok(Path(context.path.to_string()))
     }
 }
 

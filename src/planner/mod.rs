@@ -86,7 +86,7 @@ fn longest_non_conflicting(paths: Vec<Path>) -> Vec<Path> {
                 continue;
             }
             // If p is a proper prefix of q, then skip p.
-            if q.to_str().starts_with(p.to_str()) {
+            if q.starts_with(p.as_str()) {
                 p_is_prefix = true;
                 break;
             }
@@ -110,14 +110,14 @@ impl Planner {
     #[instrument(level = "trace", skip_all, fields(task=?task, changes=field::Empty), err(level=Level::TRACE))]
     fn try_task(
         &self,
-        task: Task,
+        task: &Task,
         cur_state: &System,
         cur_plan: Workflow,
         stack_len: u32,
     ) -> Result<Workflow, SearchFailed> {
         match task {
             Task::Action(action) => {
-                let work_id = WorkUnit::new_id(&action, cur_state.root());
+                let work_id = WorkUnit::new_id(action, cur_state.root());
 
                 // Detect loops first, if the same action is being applied to the same
                 // state then abort this search branch
@@ -135,7 +135,7 @@ impl Planner {
 
                 // Append a new node to the workflow, include a copy
                 // of the changes for validation during runtime
-                let dag = dag + WorkUnit::new(work_id, action, changes.clone());
+                let dag = dag + WorkUnit::new(work_id, action.clone(), changes.clone());
 
                 Span::current().record("changes", format!("{:?}", changes));
                 let pending = [pending, changes].concat();
@@ -196,7 +196,6 @@ impl Planner {
                 }
 
                 let mut changes = vec![];
-                let mut cur_state = cur_state.clone();
                 let mut cur_plan = cur_plan;
 
                 if parallelizable {
@@ -205,7 +204,7 @@ impl Planner {
                     // Create a branch for each task
                     for task in extended_tasks {
                         let Workflow { dag, pending } =
-                            self.try_task(task, &cur_state, Workflow::default(), stack_len + 1)?;
+                            self.try_task(&task, cur_state, Workflow::default(), stack_len + 1)?;
 
                         changes.extend(pending);
                         branches.push(dag);
@@ -217,11 +216,14 @@ impl Planner {
                         pending: vec![],
                     }
                 } else {
+                    // Clone the state in order to apply sequential changes
+                    let mut cur_state = cur_state.clone();
+
                     // If the task is not parallelizable, run tasks in sequence making
                     // sure to apply changes before calling the next task
                     for task in extended_tasks {
                         let Workflow { dag, pending } =
-                            self.try_task(task, &cur_state, cur_plan, stack_len + 1)?;
+                            self.try_task(&task, &cur_state, cur_plan, stack_len + 1)?;
 
                         cur_state
                             .patch(Patch(pending.clone()))
@@ -297,7 +299,7 @@ impl Planner {
                 let path = Path::new(op.path());
 
                 // Retrieve matching jobs at this path
-                if let Some((args, jobs)) = self.0.find_matching_jobs(path.to_str()) {
+                if let Some((args, jobs)) = self.0.find_matching_jobs(path.as_str()) {
                     let pointer = path.as_ref();
                     let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
 
@@ -312,12 +314,9 @@ impl Planner {
                     for job in jobs.filter(|j| j.operation() != &Operation::None).rev() {
                         if op.matches(job.operation()) || job.operation() == &Operation::Any {
                             let task = job.new_task(context.clone());
-                            let task_id = task.id().to_string();
-                            let task_is_scoped = task.is_scoped();
-                            let task_description = task.to_string();
 
                             // Try applying this task to the current state
-                            match self.try_task(task.clone(), &cur_state, Workflow::default(), 0) {
+                            match self.try_task(&task, &cur_state, Workflow::default(), 0) {
                                 Ok(Workflow { dag, pending }) if !pending.is_empty() => {
                                     // Apply resulting changes to a cloned system state
                                     let mut new_sys = cur_state.clone();
@@ -338,14 +337,13 @@ impl Planner {
 
                                     // Record scoped task workflows for parallel fork candidates
                                     if let Some(workflows) = non_conflicting.get_mut(&path) {
-                                        if task_is_scoped {
+                                        if task.is_scoped() {
                                             workflows.push(Workflow { dag, pending });
                                         }
                                     }
 
                                     // Add updated plan/state to the search stack
-
-                                    candidates.push(task_description);
+                                    candidates.push(task.to_string());
                                     stack.push((new_sys, new_plan, depth + 1));
                                 }
 
@@ -365,7 +363,7 @@ impl Planner {
                                     if cfg!(debug_assertions) {
                                         return Err(task::Error::from(err))?;
                                     }
-                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task_id, err);
+                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task.id(), err);
                                 }
 
                                 // Other task failure (non-debug: warn and skip)
@@ -373,7 +371,7 @@ impl Planner {
                                     if cfg!(debug_assertions) {
                                         return Err(err)?;
                                     }
-                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task_id, err);
+                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task.id(), err);
                                 }
 
                                 _ => {}

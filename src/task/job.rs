@@ -62,7 +62,7 @@ impl Job {
     /// Set job priority.
     ///
     /// This defines search priority when looking for jobs
-    /// the lower the value, the higher the priority
+    /// the higher the value, the higher the priority
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self
