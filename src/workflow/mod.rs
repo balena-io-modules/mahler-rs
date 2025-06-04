@@ -36,7 +36,7 @@ struct WorkUnitId<'s> {
     state: &'s Value,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 /// Utility type to encode a single work unit in a workflow
 pub(crate) struct WorkUnit {
     /// Unique id for the action. This is calculed by hashing a WorkUnitId

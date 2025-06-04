@@ -322,6 +322,32 @@ impl<T> Default for Dag<T> {
     }
 }
 
+impl<T: PartialEq> PartialEq for Dag<T> {
+    fn eq(&self, other: &Self) -> bool {
+        for (left, rght) in self.iter().zip(other.iter()) {
+            if let (
+                Node::Item {
+                    value: left_value, ..
+                },
+                Node::Item {
+                    value: rght_value, ..
+                },
+            ) = (&*left.read().unwrap(), &*rght.read().unwrap())
+            {
+                if left_value != rght_value {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl<T: Eq> Eq for Dag<T> {}
+
 impl<T> From<T> for Dag<T> {
     /// Create a single element `Dag<T>` for any value of type `T`
     fn from(value: T) -> Self {
@@ -442,14 +468,6 @@ impl<T> Dag<T> {
     /// ```
     pub fn is_empty(&self) -> bool {
         self.tail.is_none()
-    }
-
-    pub(crate) fn is_forking(&self) -> bool {
-        if let Some(head) = &self.head {
-            matches!(*head.read().unwrap(), Node::Fork { .. })
-        } else {
-            false
-        }
     }
 
     /// Join two DAGs

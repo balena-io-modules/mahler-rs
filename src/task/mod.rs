@@ -58,6 +58,14 @@ pub struct Action {
     describe: Describe,
 }
 
+impl PartialEq for Action {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.scoped == other.scoped && self.context == other.context
+    }
+}
+
+impl Eq for Action {}
+
 impl fmt::Debug for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Action")
@@ -202,18 +210,6 @@ impl Display for Method {
     }
 }
 
-/// The Task degree denotes its cardinality or its position in a search tree
-///
-/// - Atomic tasks are the leafs in the search tree, they define the work to be
-///   executed and cannot be expanded
-/// - Composite tasks define work in terms of other tasks, they are expanded recursively
-///   in order to get to a list of atoms
-#[derive(Clone, PartialEq, PartialOrd, Eq, Ord, Debug)]
-pub(crate) enum Degree {
-    Composite,
-    Atomic,
-}
-
 #[derive(Debug, Clone)]
 /// Utility type to operate either with atomic or compound tasks
 ///
@@ -248,18 +244,16 @@ impl Task {
         }
     }
 
+    /// Return true if the task is a method
+    pub fn is_method(&self) -> bool {
+        matches!(self, Task::Method(_))
+    }
+
     /// Get the internal path that the task applies to
     pub(crate) fn path(&self) -> &Path {
         match self {
             Self::Action(Action { context, .. }) => &context.path,
             Self::Method(Method { context, .. }) => &context.path,
-        }
-    }
-
-    pub(crate) fn degree(&self) -> Degree {
-        match self {
-            Self::Action(_) => Degree::Atomic,
-            Self::Method(_) => Degree::Composite,
         }
     }
 
