@@ -178,13 +178,14 @@ impl Planner {
         &self.0
     }
 
-    #[instrument(level = "trace", skip_all, fields(task=?task, changes=field::Empty, selected=field::Empty), err(level=Level::TRACE))]
+    #[instrument(level = "trace", skip_all, fields(task=?task, changes=?pending_changes, selected=field::Empty), err(level=Level::TRACE))]
     fn try_task(
         &self,
         task: &Task,
         cur_state: &System,
         cur_plan: Workflow,
         stack_len: u32,
+        pending_changes: &mut Vec<PatchOperation>,
     ) -> Result<Workflow, SearchFailed> {
         match task {
             Task::Action(action) => {
@@ -202,17 +203,16 @@ impl Planner {
                     return Err(SearchFailed::EmptyTask);
                 }
 
-                let Workflow { dag, pending } = cur_plan;
+                let Workflow(dag) = cur_plan;
 
                 // Append a new node to the workflow, include a copy
                 // of the changes for validation during runtime
                 let dag = dag + WorkUnit::new(work_id, action.clone(), changes.clone());
 
-                Span::current().record("changes", format!("{:?}", changes));
-                let pending = [pending, changes].concat();
+                pending_changes.extend(changes);
 
                 Span::current().record("selected", true);
-                Ok(Workflow { dag, pending })
+                Ok(Workflow(dag))
             }
             Task::Method(method) => {
                 // Get the list of referenced tasks
@@ -266,7 +266,6 @@ impl Planner {
                     }
                 }
 
-                let mut changes = vec![];
                 let mut cur_plan = cur_plan;
 
                 if parallelizable {
@@ -274,18 +273,19 @@ impl Planner {
 
                     // Create a branch for each task
                     for task in extended_tasks {
-                        let Workflow { dag, pending } =
-                            self.try_task(&task, cur_state, Workflow::default(), stack_len + 1)?;
+                        let Workflow(dag) = self.try_task(
+                            &task,
+                            cur_state,
+                            Workflow::default(),
+                            stack_len + 1,
+                            pending_changes,
+                        )?;
 
-                        changes.extend(pending);
                         branches.push(dag);
                     }
 
                     // Extend the current plan with the forking dag
-                    cur_plan = Workflow {
-                        dag: cur_plan.dag.concat(Dag::new(branches)),
-                        pending: vec![],
-                    }
+                    cur_plan = Workflow(cur_plan.0 + Dag::new(branches));
                 } else {
                     // Clone the state in order to apply sequential changes
                     let mut cur_state = cur_state.clone();
@@ -293,23 +293,27 @@ impl Planner {
                     // If the task is not parallelizable, run tasks in sequence making
                     // sure to apply changes before calling the next task
                     for task in extended_tasks {
-                        let Workflow { dag, pending } =
-                            self.try_task(&task, &cur_state, cur_plan, stack_len + 1)?;
+                        let mut changes = vec![];
+                        let Workflow(dag) = self.try_task(
+                            &task,
+                            &cur_state,
+                            cur_plan,
+                            stack_len + 1,
+                            &mut changes,
+                        )?;
 
-                        cur_state
-                            .patch(Patch(pending.clone()))
-                            .with_context(|| format!("failed to apply patch {pending:?}"))?;
+                        // Apply changes before the next task
+                        cur_state.patch(Patch(changes.clone())).with_context(|| {
+                            format!("failed to apply patch {pending_changes:?}")
+                        })?;
 
-                        changes.extend(pending);
-                        cur_plan = Workflow {
-                            dag,
-                            pending: vec![],
-                        };
+                        // Add the changes to the pending list
+                        pending_changes.extend(changes);
+                        cur_plan = Workflow(dag);
                     }
                 }
 
                 // Include changes in the returned plan
-                cur_plan.pending = changes;
                 Ok(cur_plan)
             }
         }
@@ -370,16 +374,20 @@ impl Planner {
                     for job in jobs.filter(|j| j.operation() != &Operation::None) {
                         if op.matches(job.operation()) || job.operation() == &Operation::Any {
                             let task = job.new_task(context.clone());
+                            let mut changes = Vec::new();
 
                             // Try applying this task to the current state
-                            match self.try_task(&task, &cur_state, Workflow::default(), 0) {
-                                Ok(Workflow {
-                                    dag: workflow,
-                                    pending,
-                                }) if !pending.is_empty() => {
+                            match self.try_task(
+                                &task,
+                                &cur_state,
+                                Workflow::default(),
+                                0,
+                                &mut changes,
+                            ) {
+                                Ok(Workflow(workflow)) if !changes.is_empty() => {
                                     candidates.push(Candidate {
                                         workflow,
-                                        changes: pending,
+                                        changes,
                                         path: path.clone(),
                                         parallelizable: task.is_scoped(),
                                         is_method: task.is_method(),
@@ -490,10 +498,8 @@ impl Planner {
                     .map_err(InternalError::from)?;
 
                 // Extend current plan
-                let new_plan = Workflow {
-                    dag: cur_plan.dag.clone().concat(workflow.clone()),
-                    pending: vec![],
-                };
+                let Workflow(cur_plan) = cur_plan.clone();
+                let new_plan = Workflow(cur_plan + workflow);
 
                 // Add updated plan/state to the search stack
                 stack.push((new_sys, new_plan, depth + 1));

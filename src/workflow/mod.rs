@@ -134,13 +134,7 @@ impl Task for WorkUnit {
 /// Workflow implements [`Display`], using the [string representation defined for
 /// Dag](`Dag#string-representation-of-a-dag`), where each task is rendered from its provided
 /// [description](`crate::task::Job::with_description`).
-pub struct Workflow {
-    /// Internal graph for this Workflow
-    pub(crate) dag: Dag<WorkUnit>,
-
-    /// List of changes not yet applied
-    pub(crate) pending: Vec<PatchOperation>,
-}
+pub struct Workflow(pub(crate) Dag<WorkUnit>);
 
 /// Runtime status of a workflow execution
 pub(crate) enum WorkflowStatus {
@@ -162,12 +156,12 @@ impl From<ExecutionStatus> for WorkflowStatus {
 
 impl Workflow {
     pub(crate) fn as_dag(&self) -> &Dag<WorkUnit> {
-        &self.dag
+        &self.0
     }
 
     /// Return `true` if the Workflow's internal graph has no elements
     pub fn is_empty(&self) -> bool {
-        self.dag.is_empty()
+        self.0.is_empty()
     }
 
     #[instrument(name = "run_workflow", skip_all, err)]
@@ -177,7 +171,7 @@ impl Workflow {
         channel: Sender<Patch>,
         interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
-        self.dag
+        self.0
             .execute(system, channel, interrupt)
             .await
             .map(|s| s.into())
@@ -186,6 +180,6 @@ impl Workflow {
 
 impl Display for Workflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.dag.fmt(f)
+        self.0.fmt(f)
     }
 }
