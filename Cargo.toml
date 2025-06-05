@@ -2,7 +2,7 @@
 name = "mahler"
 version = "0.14.2"
 edition = "2021"
-description = "An automated job orchestration library to build and execute dynamic workflows"
+description = "An automated job orchestration library that builds and executes dynamic workflows"
 
 [features]
 
