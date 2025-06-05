@@ -1,4 +1,42 @@
 - commits:
+    - subject: Simplify Workflow type to wrap DAG only
+      hash: 50736a4c2d06061c0bd82e0eb6ced469ad803732
+      body: |
+        Remove the pending field from Workflow since it was only used during
+        planning. Workflow should just be about execution, not planning state.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Make planner candidate selection deterministic
+      hash: 08b6f51dd112253851911bc96fb2c8f1af787970
+      body: |
+        Replace implicit ordering with explicit Candidate struct and sorting.
+        This makes planning behavior predictable and easier to debug.
+
+        - Add Candidate struct with clear fields
+        - Remove 54 lines of complex domain logic
+        - Sort candidates explicitly before applying changes
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Reduce memory allocations in planner search
+      hash: 2729a3070cc43184e9927466dd2bedbf5ba88b1c
+      body: |
+        Avoid cloning states early by using references in try_task and only
+        cloning when needed. This reduces memory pressure during planning.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.14.2
+  title: ""
+  date: 2025-06-05T19:39:14.746Z
+- commits:
     - subject: Update code documentation
       hash: a261c087395f323b03e290aea15e4c9c9b16ca81
       body: |
