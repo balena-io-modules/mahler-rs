@@ -4,7 +4,7 @@ use serde_json::Value;
 use super::errors::Error;
 use crate::path::{Path, PathArgs};
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 /// Describes the Task applicability context
 pub struct Context {
     pub(crate) target: Value,

@@ -217,15 +217,6 @@ mod tests {
         counter
     }
 
-    fn minus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
-        if *counter < *tgt {
-            *counter -= 1;
-        }
-
-        // Update implements IntoResult
-        counter
-    }
-
     fn plus_two(counter: View<i32>, tgt: Target<i32>) -> Vec<Task> {
         if *tgt - *counter < 2 {
             // Returning an empty result tells the planner
@@ -234,51 +225,6 @@ mod tests {
         }
 
         vec![plus_one.with_target(*tgt), plus_one.with_target(*tgt)]
-    }
-
-    #[test]
-    fn it_finds_jobs_ordered_by_degree() {
-        let domain = Domain::new()
-            .job("/counters/{counter}", update(plus_one))
-            .job("/counters/{counter}", update(plus_two));
-
-        let jobs: Vec<&str> = domain
-            .find_matching_jobs("/counters/{counter}")
-            .map(|(_, iter)| iter.map(|j| j.id()).collect())
-            .unwrap();
-
-        // It should return compound jobs first
-        assert_eq!(jobs, vec![plus_two.id(), plus_one.id()]);
-    }
-
-    #[test]
-    fn it_finds_jobs_ordered_by_operation() {
-        let domain = Domain::new()
-            .job("/counters/{counter}", any(plus_one))
-            .job("/counters/{counter}", update(minus_one));
-
-        let jobs: Vec<&str> = domain
-            .find_matching_jobs("/counters/{counter}")
-            .map(|(_, iter)| iter.map(|j| j.id()).collect())
-            .unwrap();
-
-        // It should return compound jobs first
-        assert_eq!(jobs, vec![minus_one.id(), plus_one.id()]);
-    }
-
-    #[test]
-    fn it_finds_jobs_ordered_by_priority() {
-        let domain = Domain::new()
-            .job("/counters/{counter}", update(plus_one).with_priority(8))
-            .job("/counters/{counter}", update(minus_one).with_priority(16));
-
-        let jobs: Vec<&str> = domain
-            .find_matching_jobs("/counters/{counter}")
-            .map(|(_, iter)| iter.map(|j| j.id()).collect())
-            .unwrap();
-
-        // It should return compound jobs first
-        assert_eq!(jobs, vec![minus_one.id(), plus_one.id()]);
     }
 
     #[test]

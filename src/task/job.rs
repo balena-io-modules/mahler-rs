@@ -7,18 +7,18 @@ use std::cmp::Ordering;
 #[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Clone)]
 /// The operation a Job is applicable to
 pub enum Operation {
-    /// Tells the `Worker` the job is assignable to an [add](https://datatracker.ietf.org/doc/html/rfc6902#section-4.1) operation
-    Create,
-    /// Tells the `Worker` the job is assignable to a [replace](https://datatracker.ietf.org/doc/html/rfc6902#section-4.3) operation
-    Update,
-    /// Tells the `Worker` the job is assignable to a [remove](https://datatracker.ietf.org/doc/html/rfc6902#section-4.2) operation
-    Delete,
-    /// Tells the `Worker` the job is assignable to any operation
-    Any,
     /// Tells the `Worker` the job is not to be automatically selected for any operation
     ///
     /// `None` jobs can still be used as part of compound tasks
     None,
+    /// Tells the `Worker` the job is assignable to any operation
+    Any,
+    /// Tells the `Worker` the job is assignable to a [remove](https://datatracker.ietf.org/doc/html/rfc6902#section-4.2) operation
+    Delete,
+    /// Tells the `Worker` the job is assignable to an [add](https://datatracker.ietf.org/doc/html/rfc6902#section-4.1) operation
+    Create,
+    /// Tells the `Worker` the job is assignable to a [replace](https://datatracker.ietf.org/doc/html/rfc6902#section-4.3) operation
+    Update,
 }
 
 /// Encodes a generic repeatable system operation
@@ -59,10 +59,15 @@ impl Job {
         &self.operation
     }
 
+    // Get the job priority
+    pub fn priority(&self) -> u8 {
+        self.priority
+    }
+
     /// Set job priority.
     ///
     /// This defines search priority when looking for jobs
-    /// the lower the value, the higher the priority
+    /// the higher the value, the higher the priority
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self
@@ -145,12 +150,6 @@ impl PartialOrd for Job {
 
 impl Ord for Job {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.task
-            .degree()
-            .cmp(&other.task.degree())
-            .then(self.operation.cmp(&other.operation))
-            // lower priority is better
-            .then(other.priority.cmp(&self.priority))
-            .then(self.task.id().cmp(other.task.id()))
+        self.task.id().cmp(other.task.id())
     }
 }

@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 use anyhow::{anyhow, Context as AnyhowCtx};
-use json_patch::Patch;
+use json_patch::{Patch, PatchOperation};
+use jsonptr::PointerBuf;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
-use tracing::{debug, debug_span, error, field, instrument, warn, Level, Span};
+use tracing::{debug_span, error, field, instrument, warn, Level, Span};
 
 use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
@@ -45,21 +46,6 @@ enum SearchFailed {
     Internal(#[from] anyhow::Error),
 }
 
-#[derive(Debug, Error)]
-pub(crate) enum Error {
-    #[error(transparent)]
-    Serialization(#[from] SerializationError),
-
-    #[error(transparent)]
-    Task(#[from] task::Error),
-
-    #[error("workflow not found")]
-    NotFound,
-
-    #[error(transparent)]
-    Internal(#[from] InternalError),
-}
-
 /// Returns the longest (maximum cardinality) subset of non‐conflicting paths
 /// from the input. Two paths are considered to conflict if one is a prefix
 /// of the other. In such a case, we choose to keep the path that is not a prefix
@@ -86,7 +72,7 @@ fn longest_non_conflicting(paths: Vec<Path>) -> Vec<Path> {
                 continue;
             }
             // If p is a proper prefix of q, then skip p.
-            if q.to_str().starts_with(p.to_str()) {
+            if q.starts_with(p.as_str()) {
                 p_is_prefix = true;
                 break;
             }
@@ -98,6 +84,91 @@ fn longest_non_conflicting(paths: Vec<Path>) -> Vec<Path> {
     result
 }
 
+/// Computes the longest common prefix over a list of `Path`
+fn longest_common_prefix<'a, I>(paths: I) -> Path
+where
+    I: IntoIterator<Item = &'a Path>,
+{
+    let mut iter = paths.into_iter();
+
+    // Get the first path to use as the base for comparison
+    let first = match iter.next() {
+        Some(path) => path.as_ref().tokens().collect::<Vec<_>>(),
+        None => return Path::default(),
+    };
+
+    let mut prefix = first;
+
+    for path in iter {
+        let tokens = path.as_ref().tokens().collect::<Vec<_>>();
+        let mut new_prefix = vec![];
+
+        for (a, b) in prefix.iter().zip(tokens.iter()) {
+            if a == b {
+                new_prefix.push(a.clone());
+            } else {
+                break;
+            }
+        }
+
+        prefix = new_prefix;
+        if prefix.is_empty() {
+            break;
+        }
+    }
+
+    let buf = PointerBuf::from_tokens(&prefix);
+
+    Path::new(&buf)
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct Candidate {
+    workflow: Dag<WorkUnit>,
+    changes: Vec<PatchOperation>,
+    path: Path,
+    operation: Operation,
+    priority: u8,
+    parallelizable: bool,
+    is_method: bool,
+}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Sort by path ordering first
+        self.path
+            .cmp(&other.path)
+            // User defined methods vs actions and automatically generated
+            // workflows
+            .then(self.is_method.cmp(&other.is_method))
+            // Sort by operation (`Any` is after all other)
+            .then(self.operation.cmp(&other.operation))
+            // Finally sort by job priority
+            .then(self.priority.cmp(&other.priority))
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum Error {
+    #[error(transparent)]
+    Serialization(#[from] SerializationError),
+
+    #[error(transparent)]
+    Task(#[from] task::Error),
+
+    #[error("workflow not found")]
+    NotFound,
+
+    #[error(transparent)]
+    Internal(#[from] InternalError),
+}
+
 impl Planner {
     pub fn new(domain: Domain) -> Self {
         Self(domain)
@@ -107,17 +178,18 @@ impl Planner {
         &self.0
     }
 
-    #[instrument(level = "trace", skip_all, fields(task=?task, changes=field::Empty), err(level=Level::TRACE))]
+    #[instrument(level = "trace", skip_all, fields(task=?task, changes=?pending_changes, selected=field::Empty), err(level=Level::TRACE))]
     fn try_task(
         &self,
-        task: Task,
+        task: &Task,
         cur_state: &System,
         cur_plan: Workflow,
         stack_len: u32,
+        pending_changes: &mut Vec<PatchOperation>,
     ) -> Result<Workflow, SearchFailed> {
         match task {
             Task::Action(action) => {
-                let work_id = WorkUnit::new_id(&action, cur_state.root());
+                let work_id = WorkUnit::new_id(action, cur_state.root());
 
                 // Detect loops first, if the same action is being applied to the same
                 // state then abort this search branch
@@ -131,17 +203,16 @@ impl Planner {
                     return Err(SearchFailed::EmptyTask);
                 }
 
-                let Workflow { dag, pending } = cur_plan;
+                let Workflow(dag) = cur_plan;
 
                 // Append a new node to the workflow, include a copy
                 // of the changes for validation during runtime
-                let dag = dag + WorkUnit::new(work_id, action, changes.clone());
+                let dag = dag + WorkUnit::new(work_id, action.clone(), changes.clone());
 
-                Span::current().record("changes", format!("{:?}", changes));
-                let pending = [pending, changes].concat();
+                pending_changes.extend(changes);
 
                 Span::current().record("selected", true);
-                Ok(Workflow { dag, pending })
+                Ok(Workflow(dag))
             }
             Task::Method(method) => {
                 // Get the list of referenced tasks
@@ -195,8 +266,6 @@ impl Planner {
                     }
                 }
 
-                let mut changes = vec![];
-                let mut cur_state = cur_state.clone();
                 let mut cur_plan = cur_plan;
 
                 if parallelizable {
@@ -204,39 +273,47 @@ impl Planner {
 
                     // Create a branch for each task
                     for task in extended_tasks {
-                        let Workflow { dag, pending } =
-                            self.try_task(task, &cur_state, Workflow::default(), stack_len + 1)?;
+                        let Workflow(dag) = self.try_task(
+                            &task,
+                            cur_state,
+                            Workflow::default(),
+                            stack_len + 1,
+                            pending_changes,
+                        )?;
 
-                        changes.extend(pending);
                         branches.push(dag);
                     }
 
                     // Extend the current plan with the forking dag
-                    cur_plan = Workflow {
-                        dag: cur_plan.dag.concat(Dag::new(branches)),
-                        pending: vec![],
-                    }
+                    cur_plan = Workflow(cur_plan.0 + Dag::new(branches));
                 } else {
+                    // Clone the state in order to apply sequential changes
+                    let mut cur_state = cur_state.clone();
+
                     // If the task is not parallelizable, run tasks in sequence making
                     // sure to apply changes before calling the next task
                     for task in extended_tasks {
-                        let Workflow { dag, pending } =
-                            self.try_task(task, &cur_state, cur_plan, stack_len + 1)?;
+                        let mut changes = vec![];
+                        let Workflow(dag) = self.try_task(
+                            &task,
+                            &cur_state,
+                            cur_plan,
+                            stack_len + 1,
+                            &mut changes,
+                        )?;
 
-                        cur_state
-                            .patch(Patch(pending.clone()))
-                            .with_context(|| format!("failed to apply patch {pending:?}"))?;
+                        // Apply changes before the next task
+                        cur_state.patch(Patch(changes.clone())).with_context(|| {
+                            format!("failed to apply patch {pending_changes:?}")
+                        })?;
 
-                        changes.extend(pending);
-                        cur_plan = Workflow {
-                            dag,
-                            pending: vec![],
-                        };
+                        // Add the changes to the pending list
+                        pending_changes.extend(changes);
+                        cur_plan = Workflow(dag);
                     }
                 }
 
                 // Include changes in the returned plan
-                cur_plan.pending = changes;
                 Ok(cur_plan)
             }
         }
@@ -272,32 +349,18 @@ impl Planner {
                 return Ok(cur_plan);
             }
 
-            // Compute a maximal set of non-overlapping (non-prefix) paths for parallelism
-            let non_conflicting_paths =
-                longest_non_conflicting(distance.iter().map(|op| Path::new(op.path())).collect());
-
-            // For each path, store the best-scoped task workflow that can be used in a parallel branch
-            let mut non_conflicting = BTreeMap::new();
-            for path in non_conflicting_paths {
-                non_conflicting.insert(path, Vec::<Workflow>::new());
-            }
-
-            // Prioritize forking paths coming from methods instead of
-            // parallelism from non conflicting paths
-            // TODO: we probably need a way to prioritize candidates, perhaps
-            // by number of changes rather than by degree or job priority
-            let mut has_parallel = false;
-
             let next_span = debug_span!("find_next", cur = %&cur_state.root());
             let _enter = next_span.enter();
-            let mut candidates = Vec::new();
 
-            // Iterate over distance operations in reverse (deeper paths first for proper task ordering)
-            for op in distance.iter().rev() {
+            // List of candidate plans at this level in the stack
+            let mut candidates: Vec<Candidate> = Vec::new();
+
+            // Iterate over distance operations and jobs to find possible candidates
+            for op in distance.iter() {
                 let path = Path::new(op.path());
 
                 // Retrieve matching jobs at this path
-                if let Some((args, jobs)) = self.0.find_matching_jobs(path.to_str()) {
+                if let Some((args, jobs)) = self.0.find_matching_jobs(path.as_str()) {
                     let pointer = path.as_ref();
                     let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
 
@@ -307,46 +370,30 @@ impl Planner {
                         target: target.clone(),
                     };
 
-                    // Reverse job list to put higher priority jobs at the top of the
-                    // stack first
-                    for job in jobs.filter(|j| j.operation() != &Operation::None).rev() {
+                    // Filter `None` jobs from the list
+                    for job in jobs.filter(|j| j.operation() != &Operation::None) {
                         if op.matches(job.operation()) || job.operation() == &Operation::Any {
                             let task = job.new_task(context.clone());
-                            let task_id = task.id().to_string();
-                            let task_is_scoped = task.is_scoped();
-                            let task_description = task.to_string();
+                            let mut changes = Vec::new();
 
                             // Try applying this task to the current state
-                            match self.try_task(task.clone(), &cur_state, Workflow::default(), 0) {
-                                Ok(Workflow { dag, pending }) if !pending.is_empty() => {
-                                    // Apply resulting changes to a cloned system state
-                                    let mut new_sys = cur_state.clone();
-                                    new_sys
-                                        .patch(Patch(pending.clone()))
-                                        .with_context(|| "failed to apply patch")
-                                        .map_err(InternalError::from)?;
-
-                                    if dag.is_forking() {
-                                        has_parallel = dag.is_forking();
-                                    }
-
-                                    // Extend current plan with new task
-                                    let new_plan = Workflow {
-                                        dag: cur_plan.dag.clone().concat(dag.clone()),
-                                        pending: vec![],
-                                    };
-
-                                    // Record scoped task workflows for parallel fork candidates
-                                    if let Some(workflows) = non_conflicting.get_mut(&path) {
-                                        if task_is_scoped {
-                                            workflows.push(Workflow { dag, pending });
-                                        }
-                                    }
-
-                                    // Add updated plan/state to the search stack
-
-                                    candidates.push(task_description);
-                                    stack.push((new_sys, new_plan, depth + 1));
+                            match self.try_task(
+                                &task,
+                                &cur_state,
+                                Workflow::default(),
+                                0,
+                                &mut changes,
+                            ) {
+                                Ok(Workflow(workflow)) if !changes.is_empty() => {
+                                    candidates.push(Candidate {
+                                        workflow,
+                                        changes,
+                                        path: path.clone(),
+                                        parallelizable: task.is_scoped(),
+                                        is_method: task.is_method(),
+                                        operation: job.operation().clone(),
+                                        priority: job.priority(),
+                                    });
                                 }
 
                                 // Non-critical errors are ignored (loop, empty, condition failure)
@@ -365,7 +412,7 @@ impl Planner {
                                     if cfg!(debug_assertions) {
                                         return Err(task::Error::from(err))?;
                                     }
-                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task_id, err);
+                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task.id(), err);
                                 }
 
                                 // Other task failure (non-debug: warn and skip)
@@ -373,7 +420,7 @@ impl Planner {
                                     if cfg!(debug_assertions) {
                                         return Err(err)?;
                                     }
-                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task_id, err);
+                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task.id(), err);
                                 }
 
                                 _ => {}
@@ -383,48 +430,78 @@ impl Planner {
                 }
             }
 
-            // Log task candidates (with branch ordering) if debugging
-            if tracing::event_enabled!(Level::DEBUG) {
-                let joined = candidates
-                    .iter()
-                    .map(ToString::to_string)
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                debug!(parent: &next_span, candidates = %joined);
+            // Compute a maximal set of non-overlapping (non-prefix) paths for parallelism
+            let non_conflicting_paths =
+                longest_non_conflicting(distance.iter().map(|op| Path::new(op.path())).collect());
+
+            // Find candidates that can be parallelized
+            let mut parallelizable: BTreeMap<Path, Candidate> = BTreeMap::new();
+            for candidate in candidates.iter() {
+                // If the candidate is scoped and the path belongs to the non conflicting path list
+                // then add the candidate to the parallelizable list if there isn't a path already
+                if candidate.parallelizable
+                    && !parallelizable.contains_key(&candidate.path)
+                    && non_conflicting_paths.iter().any(|p| p == &candidate.path)
+                {
+                    parallelizable.insert(candidate.path.clone(), candidate.clone());
+                }
             }
 
-            // Combine all parallel-compatible workflows into a forked DAG
-            let parallel: Vec<Workflow> = non_conflicting
-                .values()
-                .filter_map(|v| v.first().cloned())
-                .collect();
-
-            // Only add parallel option if there is no parallel method in
-            // the generated list
-            if !has_parallel && parallel.len() > 1 {
-                let mut changes = Vec::new();
+            if parallelizable.len() > 1 {
                 let mut branches = Vec::new();
-
-                for Workflow { dag, pending } in parallel {
+                let mut changes = Vec::new();
+                let mut total_priority = 0;
+                // The path for the candidate is the longest common prefix between child paths
+                // XXX: maybe we need to skip the candidate if there is a method for the
+                // same path?
+                let path = longest_common_prefix(parallelizable.keys());
+                for Candidate {
+                    workflow,
+                    changes: pending,
+                    priority,
+                    ..
+                } in parallelizable.into_values()
+                {
+                    branches.push(workflow);
                     changes.extend(pending);
-                    branches.push(dag);
+                    // Aggregate each branch priority
+                    total_priority += priority;
                 }
 
-                let mut new_sys = cur_state;
+                // Construct a new candidate using the parallel branches
+                // NOTE: we could keep adding branches to the DAG as long as there are non conflicting
+                // paths with the candidate path. For now we just do this operation once
+                candidates.push(Candidate {
+                    workflow: Dag::new(branches),
+                    changes,
+                    parallelizable: true,
+                    path,
+                    // If there is a method for the same path, give more priority to the method
+                    is_method: false,
+                    operation: Operation::Update,
+                    priority: total_priority,
+                })
+            }
+
+            // sort candidates
+            candidates.sort();
+
+            // For each candidate add a new plan to the stack
+            for Candidate {
+                workflow, changes, ..
+            } in candidates.into_iter()
+            {
+                let mut new_sys = cur_state.clone();
                 new_sys
                     .patch(Patch(changes))
-                    .with_context(|| "failed to apply parallel patch")
+                    .with_context(|| "failed to apply patch")
                     .map_err(InternalError::from)?;
 
-                // Construct a new DAG with parallel branches joined via `Dag::new`
-                let dag = Dag::new(branches);
-                let new_plan = Workflow {
-                    dag: cur_plan.dag.concat(dag),
-                    pending: vec![],
-                };
+                // Extend current plan
+                let Workflow(cur_plan) = cur_plan.clone();
+                let new_plan = Workflow(cur_plan + workflow);
 
-                // Push the parallel workflow candidate to the stack
+                // Add updated plan/state to the search stack
                 stack.push((new_sys, new_plan, depth + 1));
             }
         }
@@ -438,7 +515,7 @@ impl Planner {
 mod tests {
     use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::fmt::Display;
 
     use super::*;
@@ -737,7 +814,7 @@ mod tests {
             )
             .job("/counters/{counter}", update(plus_two))
             .job("/counters", update(chunker))
-            .job("/counters", update(multi_increment));
+            .job("/counters", none(multi_increment));
 
         let initial = MyState {
             counters: BTreeMap::from([

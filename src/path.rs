@@ -1,11 +1,30 @@
 use jsonptr::{Pointer, PointerBuf};
+use std::cmp::Ordering;
 use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-#[derive(Clone, Default, PartialEq, PartialOrd, Eq, Ord, Debug)]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Path(PointerBuf);
 
+impl PartialOrd for Path {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Path {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Compare first by path length (number of tokens)
+        // shorter paths have higher ordering
+        other
+            .0
+            .count()
+            .cmp(&self.0.count())
+            // Then lexicographically
+            .then(self.0.cmp(&other.0))
+    }
+}
 impl Path {
     pub(crate) fn new(pointer: &Pointer) -> Self {
         Self(pointer.to_buf())
@@ -20,7 +39,8 @@ impl Path {
         Path(Pointer::from_static(s).to_buf())
     }
 
-    pub fn to_str(&self) -> &str {
+    /// Get the internal string representation for the Path
+    pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
 }
@@ -46,6 +66,14 @@ impl From<Path> for PointerBuf {
 impl AsRef<Pointer> for Path {
     fn as_ref(&self) -> &Pointer {
         &self.0
+    }
+}
+
+impl Deref for Path {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
     }
 }
 

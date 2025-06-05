@@ -251,14 +251,4 @@ mod tests {
             ],
         );
     }
-
-    #[test]
-    fn it_allows_filtering_some_paths_from_calculation() {
-        // TODO
-        // we not only need to calculate the operations to the target but we need to be able
-        // to ignore some elements from the difference. This is so we can use the same structure
-        // for both current and target state. For instance, there might be a runtime value that
-        // encodes the creation date of an entity, but we may not really want to compare based on
-        // creation date when calculating the distance
-    }
 }
