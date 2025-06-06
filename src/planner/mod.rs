@@ -184,7 +184,6 @@ impl Planner {
         task: &Task,
         cur_state: &System,
         cur_plan: Workflow,
-        stack_len: u32,
         pending_changes: &mut Vec<PatchOperation>,
     ) -> Result<Workflow, SearchFailed> {
         match task {
@@ -273,13 +272,8 @@ impl Planner {
 
                     // Create a branch for each task
                     for task in extended_tasks {
-                        let Workflow(dag) = self.try_task(
-                            &task,
-                            cur_state,
-                            Workflow::default(),
-                            stack_len + 1,
-                            pending_changes,
-                        )?;
+                        let Workflow(dag) =
+                            self.try_task(&task, cur_state, Workflow::default(), pending_changes)?;
 
                         branches.push(dag);
                     }
@@ -294,13 +288,8 @@ impl Planner {
                     // sure to apply changes before calling the next task
                     for task in extended_tasks {
                         let mut changes = vec![];
-                        let Workflow(dag) = self.try_task(
-                            &task,
-                            &cur_state,
-                            cur_plan,
-                            stack_len + 1,
-                            &mut changes,
-                        )?;
+                        let Workflow(dag) =
+                            self.try_task(&task, &cur_state, cur_plan, &mut changes)?;
 
                         // Apply changes before the next task
                         cur_state.patch(Patch(changes.clone())).with_context(|| {
@@ -381,7 +370,6 @@ impl Planner {
                                 &task,
                                 &cur_state,
                                 Workflow::default(),
-                                0,
                                 &mut changes,
                             ) {
                                 Ok(Workflow(workflow)) if !changes.is_empty() => {
