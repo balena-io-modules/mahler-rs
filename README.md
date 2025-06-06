@@ -1,34 +1,38 @@
 # mahler
 
-`mahler` is an automated job orchestration library to build and execute dynamic workflows.
+`mahler` is an automated job orchestration library that builds and executes dynamic workflows.
+
+[![Build status](https://github.com/balena-io-modules/mahler-rs/actions/workflows/flowzone.yml/badge.svg?branch=main)](https://github.com/balena-io-modules/mahler-rs/actions/workflows/flowzone.yml)
+[![Crates.io](https://img.shields.io/crates/v/mahler)](https://crates.io/crates/mahler)
+[![Documentation](https://docs.rs/mahler/badge.svg)](https://docs.rs/mahler)
 
 More information about this crate can be found in the [crate documentation](https://docs.rs/mahler/latest/mahler/).
 
 > [!WARNING]  
-> This project is still quite experimental, while the API reaching a relatively stable state, it may still be subjected to change.
+> This project is still quite experimental, while the API is reaching a relatively stable state, it may still be subjected to change.
 > Same thing with the internal planning and execution model, it is very much still in a _make it work_ stage and there are still
 > a lot of optimizations that can be made.
 
 ## Overview
 
-In the tech industry we are increasingly reliant on automation for deployment and configuration of systems. As infrastructures grows, so does the need for intelligence in these automated workflows to reduce downtime and the need of human intervention. In the context of the Internet of Things, the scale (thousands of devices) means systems need to be able operate with little to no human intervention: [self-heal, self-configure and self-protect](https://en.wikipedia.org/wiki/Autonomic_computing). When human intervention is needed, fixes should propagate to the fleet so devices can self-correct the problem next time it happens.
+Modern infrastructure requires intelligent automation that can adapt to changing conditions. Traditional static workflows become unmanageable as system complexity grows - you end up with brittle scripts that break when conditions change.
 
-Static workflow definition tools do not scale well for this purpose as the diversity of conditions means workflow complexity quickly becomes unmanageable and hard to test. For this reason, Mahler uses [automated planning](https://en.wikipedia.org/wiki/Automated_planning_and_scheduling) for automated workflow generation. Users just need to define jobs and their execution contraints and the planner finds a workflow that applicable to a desired system state.
+Mahler solves this by using [automated planning](https://en.wikipedia.org/wiki/Automated_planning_and_scheduling) to generate workflows dynamically. Instead of writing complex conditional logic, you define simple jobs with their constraints. The planner automatically discovers the right sequence of operations to reach your target state.
 
 ## Core Features
 
-- Simple API. Jobs can be targeted to specific paths and operations within the state model for targeted operations.
-- Declaratively access System state and resources using extractors.
-- Intelligent planner. Automatically discover a workflow to transition from the current system state to a given target state.
-- Concurrent execution of jobs. The planner automatically detects when operations can be performed in parallel and adjusts the execution graph for concurrency.
-- Observable runtime. Monitor the evolving state of the system from the Worker API. For more detailed logging, the library uses the [tracing crate](https://github.com/tokio-rs/tracing/).
-- Easy to debug. Agent observable state and known goals allow easy replicability when issues occur.
+- **Job-based architecture** - Define operations as Rust functions that operate on typed state
+- **Parallel execution** - Planner detects when jobs can run concurrently based on state paths
+- **JSON state model** - System state represented as JSON with path-based job targeting
+- **Effect isolation** - Jobs separate planning logic from actual I/O operations  
+- **Automatic re-planning** - Re-computes workflow when runtime conditions change
+- **Structured logging** - Built-in tracing integration for workflow execution monitoring
 
 ## Basic Usage
 
-In Mahler, the term Job is used for a generic operation defined via a Rust function. The term Task, refers to the job being applied on a specific context. For instance the Job may be a way to "write a file", while the task is "write 'true' to '/etc/myconf'".
+In Mahler, a **Job** is a reusable operation you define (like "increment counter"). A **Task** is that job applied to a specific context (like "increment counter 'a' to value 5").
 
-Jobs are evaluated during planning to determine applicability to a given target and later executed at runtime. This duality needs to be built into the job definition.
+This separation lets the planner compose your jobs into workflows that achieve complex state transitions. Jobs are evaluated during planning to determine applicability to a given target and later executed at runtime. This duality needs to be built into the job definition.
 
 We'll create a system controller for a simple counting system. Let's define a job that operates on i32
 
@@ -65,7 +69,7 @@ fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Update<i32> {
 }
 ```
 
-The job above updates the counter if it is below the target, otherwise it returs the same value that it currently has. When planning, a job/task that perform no changes on the system state is not selected, which allows us to control when the job is considered applicable.
+The job above updates the counter if it is below the target, otherwise it returns the same value that it currently has. When planning, a job/task that perform no changes on the system state is not selected, which allows us to control when the job is considered applicable.
 
 The job above defines an atomic task, but we can also define compound tasks, that allow to bias the planner to certain workflows depending on the conditions. Let's define job to increase the counter by `two`.
 
@@ -101,14 +105,37 @@ use serde::{Deserialize, Serialize};
 struct Counters(HashMap<String, i32>);
 ```
 
-Finally in order to create and run workflows we need a `Worker`
+Finally in order to create and run workflows we need a `Worker`:
+
+```rust
+use mahler::worker::Worker;
+use mahler::task::prelude::*;
+
+let worker = Worker::new()
+    .job("/{counter}", update(plus_one))
+    .job("/{counter}", update(plus_two))
+    .initial_state(Counters(HashMap::from([
+        ("a".to_string(), 0),
+        ("b".to_string(), 0),
+    ])))
+    .seek_target(Counters(HashMap::from([
+        ("a".to_string(), 1),
+        ("b".to_string(), 2),
+    ])))
+    .await?;
+
+println!("Final state: {:?}", worker.state().await?);
+```
+
+### Complete Example
+
+Here's the full runnable example with logging and error handling:
 
 ```rust
 use anyhow::{Context, Result};
-
 use mahler::worker::{Worker, init_logging};
 use mahler::task::prelude::*;
-use mahler::extract::{Args};
+use mahler::extract::Args;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -117,7 +144,6 @@ async fn main() -> Result<()> {
 
     // Show logs on stdout
     env_logger::builder().format_target(false).init();
-    env_logger::init();
 
     let worker = Worker::new()
         // The jobs are applicable to `UPDATE` operations
