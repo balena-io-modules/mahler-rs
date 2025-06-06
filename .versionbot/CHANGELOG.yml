@@ -1,4 +1,28 @@
 - commits:
+    - subject: Remove unused `stack_len` arg in Planner try_task
+      hash: 106586472b58f7f3de5970117ea2a81576621134
+      body: |
+        This was leftover from some refactor and is not used anymore which was
+        causing Clippy to throw an error.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Update README
+      hash: b57f373c7c94603ebd4ad0fe038ee406b609ddf6
+      body: |
+        Adds documentation badges, fixes some typos and modifies a few texts for
+        clarity.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.14.3
+  title: ""
+  date: 2025-06-06T18:01:59.926Z
+- commits:
     - subject: Simplify Workflow type to wrap DAG only
       hash: 50736a4c2d06061c0bd82e0eb6ced469ad803732
       body: |
