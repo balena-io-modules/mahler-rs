@@ -111,8 +111,8 @@ struct AutoInterrupt(Interrupt);
 
 impl Drop for AutoInterrupt {
     fn drop(&mut self) {
-        // Set the interrupt flag to true when the worker is dropped
-        self.0.set();
+        // Trigger the interrupt flag when the worker is dropped
+        self.0.trigger();
     }
 }
 
