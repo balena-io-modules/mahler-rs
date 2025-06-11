@@ -1239,7 +1239,7 @@ mod tests {
         // Set interrupt after 50ms
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            interrupt_clone.set();
+            interrupt_clone.trigger();
         });
 
         let exec_result = dag.execute(&input, tx, interrupt).await;

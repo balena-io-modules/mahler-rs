@@ -21,7 +21,7 @@ mod interrupt;
 pub(crate) use aggregate_error::*;
 pub(crate) use channel::*;
 pub use dag::*;
-pub(crate) use interrupt::*;
+pub use interrupt::*;
 
 #[derive(Hash)]
 /// Unique reqpresentation of a task acting on a specific path and system state.
