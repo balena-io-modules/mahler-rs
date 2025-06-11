@@ -636,21 +636,32 @@ impl<O, I> Worker<O, Ready, I> {
         &self.inner.status
     }
 
-    #[instrument(skip_all, fields(return=field::Empty), err)]
-    /// Trigger system changes by providing a new target state for the worker
+    #[instrument(name = "seek_target", skip_all, fields(return=field::Empty), err)]
+    /// Trigger system changes by providing a new target state and interrupt signal
     ///
     /// When called, this method tells the worker to look for a plan for the given
     /// target. If a plan is found, the worker then will try to execute the resulting workflow and
     /// and terminate if interrupted or a runtime error occurs. If a requirement changes between
     /// planning and runtime, the Worker triggers a re-plan.
     ///
+    /// The provided `interrupt` allows external cancellation of the worker execution.
+    /// When triggered, the worker will gracefully terminate and return [`SeekStatus::Interrupted`].
+    ///
     /// If no plan is found, the search terminates with a [`SeekStatus::NotFound`].
+    ///
+    /// # Parameters
+    /// - `tgt`: The target state to seek
+    /// - `interrupt`: User-controlled interrupt for canceling the operation
     ///
     /// # Errors
     /// The method will result in a [`FatalError`] if a serialization issue occurs while converting
     /// between state types, if the worker runtime panics or there is an unexpected error during
     /// planning.
-    pub async fn seek_target(self, tgt: I) -> Result<Worker<O, Ready, I>, FatalError>
+    pub async fn seek_with_interrupt(
+        self,
+        tgt: I,
+        interrupt: Interrupt,
+    ) -> Result<Worker<O, Ready, I>, FatalError>
     where
         I: Serialize + DeserializeOwned,
     {
@@ -663,7 +674,7 @@ impl<O, I> Worker<O, Ready, I> {
             updates,
             writer_closed,
             patches,
-            interrupt,
+            interrupt: drop_interrupt,
             ..
         } = self.inner;
 
@@ -710,10 +721,10 @@ impl<O, I> Worker<O, Ready, I> {
 
         let err_rx = writer_closed.clone();
 
-        // Main seek_target planning and execution loop
+        // Main seek_with_interrupt planning and execution loop
         let handle: JoinHandle<Result<(Planner, SeekStatus), FatalError>> = {
-            let task_int = interrupt.0.clone();
-            let workflow_int = task_int.clone();
+            let drop_interrupt_signal = drop_interrupt.0.clone();
+            let workflow_interrupt = interrupt.clone();
             let sys_reader = Arc::clone(&system);
             let changes = patches.clone();
             tokio::spawn(async move {
@@ -725,12 +736,19 @@ impl<O, I> Worker<O, Ready, I> {
                             return Err(InternalError::from(anyhow!("state patch failed, worker state possibly tainted")))?;
                         }
 
-                        _ = workflow_int.wait() => {
+                        _ = workflow_interrupt.wait() => {
                             cur_span.record("return", "interrupted");
                             return Ok((planner, SeekStatus::Interrupted));
                         }
 
-                        res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &changes, &task_int) => {
+                        _ = drop_interrupt_signal.wait() => {
+                            // Trigger the workflow interrupt to propagate cancellation to running tasks
+                            workflow_interrupt.trigger();
+                            cur_span.record("return", "interrupted");
+                            return Ok((planner, SeekStatus::Interrupted));
+                        }
+
+                        res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &changes, &workflow_interrupt) => {
                             match res {
                                 Ok(SeekResult::TargetReached) => {
                                     cur_span.record("return", "success");
@@ -798,6 +816,29 @@ impl<O, I> Worker<O, Ready, I> {
             interrupt: AutoInterrupt::default(),
             status,
         }))
+    }
+
+    /// Trigger system changes by providing a new target state for the worker
+    ///
+    /// This is a convenience method that calls [`seek_with_interrupt`](Self::seek_with_interrupt)
+    /// with a new default interrupt that will never be triggered externally.
+    ///
+    /// When called, this method tells the worker to look for a plan for the given
+    /// target. If a plan is found, the worker then will try to execute the resulting workflow and
+    /// and terminate if interrupted or a runtime error occurs. If a requirement changes between
+    /// planning and runtime, the Worker triggers a re-plan.
+    ///
+    /// If no plan is found, the search terminates with a [`SeekStatus::NotFound`].
+    ///
+    /// # Errors
+    /// The method will result in a [`FatalError`] if a serialization issue occurs while converting
+    /// between state types, if the worker runtime panics or there is an unexpected error during
+    /// planning.
+    pub async fn seek_target(self, tgt: I) -> Result<Worker<O, Ready, I>, FatalError>
+    where
+        I: Serialize + DeserializeOwned,
+    {
+        self.seek_with_interrupt(tgt, Interrupt::new()).await
     }
 }
 
@@ -1062,5 +1103,68 @@ mod tests {
 
         let results = results.read().await;
         assert_eq!(*results, vec![Some(1), None]);
+    }
+
+    #[tokio::test]
+    async fn test_seek_with_interrupt_user_interrupt() {
+        init();
+
+        fn sleepy_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
+            if *counter < tgt {
+                *counter += 1;
+            }
+
+            Effect::of(counter).with_io(|counter| async {
+                sleep(Duration::from_millis(100)).await;
+                Ok(counter)
+            })
+        }
+
+        let worker = Worker::new()
+            .job("", update(sleepy_plus_one))
+            .initial_state(0)
+            .unwrap();
+
+        let interrupt = Interrupt::new();
+        let interrupt_clone = interrupt.clone();
+
+        // Trigger interrupt after a short delay
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(50)).await;
+            interrupt_clone.trigger();
+        });
+
+        let worker = worker.seek_with_interrupt(10, interrupt).await.unwrap();
+        assert_eq!(worker.status(), &SeekStatus::Interrupted);
+
+        // Should not have reached the target due to interrupt
+        let state: i32 = worker.state().await.unwrap();
+        assert!(state < 10, "Expected state {} to be less than 10", state);
+    }
+
+    #[tokio::test]
+    async fn test_seek_with_interrupt_vs_seek_target() {
+        init();
+
+        let worker1 = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .unwrap();
+
+        let worker2 = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .unwrap();
+
+        // Test seek_target (no external interrupt)
+        let result1 = worker1.seek_target(3).await.unwrap();
+        assert_eq!(result1.status(), &SeekStatus::Success);
+        assert_eq!(result1.state().await.unwrap(), 3);
+
+        // Test seek_with_interrupt (no external interrupt triggered)
+        let interrupt = Interrupt::new();
+        let result2 = worker2.seek_with_interrupt(3, interrupt).await.unwrap();
+        assert_eq!(result2.status(), &SeekStatus::Success);
+        assert_eq!(result2.state().await.unwrap(), 3);
     }
 }
