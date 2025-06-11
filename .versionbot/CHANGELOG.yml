@@ -1,4 +1,40 @@
 - commits:
+    - subject: Add seek_with_interrupt method for user-controlled worker cancellation
+      hash: 519ec0b784fc0584bc62a15cc8c28bb249926955
+      body: >
+        Adds seek_with_interrupt that accepts an Interrupt parameter for
+        external
+
+        cancellation. The existing seek_target method now delegates to this new
+        method
+
+        with a default interrupt, maintaining backward compatibility.
+
+
+        When interrupted (either by user or worker drop), cancellation is
+        properly
+
+        propagated to running workflow tasks.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Make Interrupt struct public
+      hash: b6cf117c4c5816acc6131f25cd918f0d7b1794ff
+      body: |
+        This interface already existed for internal usage, but this now makes it
+        available extenrLly for use in the upcoming seek_with_interrupt Worker
+        method.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.15.0
+  title: ""
+  date: 2025-06-11T20:27:17.046Z
+- commits:
     - subject: Remove unused `stack_len` arg in Planner try_task
       hash: 106586472b58f7f3de5970117ea2a81576621134
       body: |
