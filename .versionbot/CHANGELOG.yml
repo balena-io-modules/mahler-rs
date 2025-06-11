@@ -1,4 +1,19 @@
 - commits:
+    - subject: Remove flowzone build status from README
+      hash: 79f2965c116330024cdd84451943b7eff99bb3da
+      body: |
+        This will always show `no status` since the `PR closed` event is always
+        the last to run and that only performs changes when closing the PR
+        without merging.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.15.1
+  title: ""
+  date: 2025-06-11T21:46:11.119Z
+- commits:
     - subject: Add seek_with_interrupt method for user-controlled worker cancellation
       hash: 519ec0b784fc0584bc62a15cc8c28bb249926955
       body: >
