@@ -2,7 +2,6 @@
 
 `mahler` is an automated job orchestration library that builds and executes dynamic workflows.
 
-[![Build status](https://github.com/balena-io-modules/mahler-rs/actions/workflows/flowzone.yml/badge.svg?branch=main)](https://github.com/balena-io-modules/mahler-rs/actions/workflows/flowzone.yml)
 [![Crates.io](https://img.shields.io/crates/v/mahler)](https://crates.io/crates/mahler)
 [![Documentation](https://docs.rs/mahler/badge.svg)](https://docs.rs/mahler)
 
@@ -24,7 +23,7 @@ Mahler solves this by using [automated planning](https://en.wikipedia.org/wiki/A
 - **Job-based architecture** - Define operations as Rust functions that operate on typed state
 - **Parallel execution** - Planner detects when jobs can run concurrently based on state paths
 - **JSON state model** - System state represented as JSON with path-based job targeting
-- **Effect isolation** - Jobs separate planning logic from actual I/O operations  
+- **Effect isolation** - Jobs separate planning logic from actual I/O operations
 - **Automatic re-planning** - Re-computes workflow when runtime conditions change
 - **Structured logging** - Built-in tracing integration for workflow execution monitoring
 
