@@ -3,6 +3,12 @@ name = "mahler"
 version = "0.15.1"
 edition = "2021"
 description = "An automated job orchestration library that builds and executes dynamic workflows"
+homepage = "https://github.com/balena-io-modules/mahler-rs"
+keywords = ["job", "orchestration", "workflow", "library"]
+documentation = "https://docs.rs/mahler-rs"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/balena-io-modules/mahler-rs"
 
 [features]
 
