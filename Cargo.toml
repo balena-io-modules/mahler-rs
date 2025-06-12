@@ -1,6 +1,6 @@
 [package]
 name = "mahler"
-version = "0.15.1"
+version = "0.15.2"
 edition = "2021"
 description = "An automated job orchestration library that builds and executes dynamic workflows"
 homepage = "https://github.com/balena-io-modules/mahler-rs"

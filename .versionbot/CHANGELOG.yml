@@ -1,4 +1,17 @@
 - commits:
+    - subject: Update metadata in Cargo.toml
+      hash: ae8014ddcddf7a5b2e74242a159bc286c4636b61
+      body: |
+        The metadata is necessary to publish the module in crates.io
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.15.2
+  title: ""
+  date: 2025-06-12T15:13:11.508Z
+- commits:
     - subject: Remove flowzone build status from README
       hash: 79f2965c116330024cdd84451943b7eff99bb3da
       body: |
