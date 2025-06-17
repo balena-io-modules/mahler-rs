@@ -3,10 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::time::sleep;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::EnvFilter;
 
 use mahler::extract::{Args, Target, View};
 use mahler::task::prelude::*;
-use mahler::worker::{init_logging, Worker};
+use mahler::worker::Worker;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 // The state model needs to be Serializable and Deserializable
 // since the library uses JSON internally to access parts
@@ -54,11 +57,16 @@ fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Convert tracing logs into `log` crate logs
-    init_logging();
-
-    // Show logs on stdout
-    env_logger::builder().format_target(false).init();
+    // Initialize tracing subscriber with custom formatting
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_span_events(FmtSpan::CLOSE)
+                .event_format(fmt::format().compact().with_target(false)),
+        )
+        .init();
 
     let worker = Worker::new()
         // The jobs are applicable to `UPDATE` operations

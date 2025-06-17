@@ -431,24 +431,30 @@
 //!
 //! # Observability
 //!
-//! For detailed Worker observability, mahler uses the [tracing](https://crates.io/crates/tracing)
+//! For detailed Worker observability, mahler is instrumented with the [tracing](https://crates.io/crates/tracing)
 //! crate to report on the operation and progress of the Worker planning and workflow execution
-//! stages. These events can be processed using the [tracing_subscriber](https://crates.io/crates/tracing_subscriber) crate.
+//! stages. These events can be processed using the [tracing_subscriber](https://crates.io/crates/tracing_subscriber) crate
+//! to produce structured or human readable logs.
 //!
-//! For human readable logs, mahler also provides a convenience conversion to [log](https://crates.io/crates/log) crate logs.
-//! To use this, make sure to install mahler with the `logging` feature, and set-up your preferred
-//! logger. For instance, with the [env_logger](https://crates.io/crates/env_logger) crate.
+//! Key log levels:
+//! - **INFO**: Workflow events, task execution
+//! - **DEBUG**: Detailed planning information, state changes
+//! - **WARN**: Task failures, interruptions
+//! - **ERROR**: Fatal errors
+//! - **TRACE**: Planner and internal worker operation
 //!
 //! ```rust,no_run
-//! // This is available with the `logging` feature
-//! use mahler::worker::init_logging;
+//! use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 //!
-//! // Convert tracing logs into `log` crate logs
-//! init_logging();
-//!
-//! // Configure env_logger to show logs to stdout
-//! env_logger::builder().format_target(false).init();
-//! env_logger::init();
+//! // Initialize tracing subscriber with recommended formatting
+//! tracing_subscriber::registry()
+//!     .with(EnvFilter::from_default_env())
+//!     .with(
+//!         fmt::layer()
+//!             .with_span_events(FmtSpan::CLOSE)
+//!             .event_format(fmt::format().compact().with_target(false)),
+//!     )
+//!     .init();
 //! ```
 //!
 //! # Testing

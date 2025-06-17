@@ -676,23 +676,21 @@ mod tests {
     use mahler::{seq, Dag};
     use pretty_assertions::assert_eq;
     use serde_json::json;
-    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::fmt::{self, format::FmtSpan};
     use tracing_subscriber::{prelude::*, EnvFilter};
 
     use super::*;
 
     fn before() {
+        // Initialize tracing subscriber with custom formatting
         tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .pretty()
-                    .with_target(false)
-                    .with_thread_names(true)
-                    .with_thread_ids(true)
-                    .with_line_number(true)
-                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE),
-            )
             .with(EnvFilter::from_default_env())
+            .with(
+                fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_span_events(FmtSpan::CLOSE)
+                    .event_format(fmt::format().compact().with_target(false)),
+            )
             .try_init()
             .unwrap_or(());
     }
