@@ -89,8 +89,7 @@ impl Job {
     /// [FromContext](`super::FromContext`)
     ///
     /// The description will be used to describe the tasks used by the crate
-    /// [observability features](`crate#observability`) and for [human readable
-    /// logs](`crate::worker::init_logging`)
+    /// [observability features](`crate#observability`) and for human readable logs
     ///
     /// ```rust
     /// use mahler::task::{Job, Description, update};
