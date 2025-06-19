@@ -13,18 +13,6 @@ use crate::task::Operation as JobOperation;
 #[derive(Debug)]
 pub struct Distance(BTreeSet<Operation>);
 
-impl Display for Distance {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[")?;
-        for (i, op) in self.0.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", op.0)?;
-        }
-        write!(f, "]")
-    }
-}
 impl Distance {
     /// Calculate the distance between some state and target
     ///
@@ -161,6 +149,12 @@ impl Operation {
             PatchOperation::Remove(..) => op == &JobOperation::Delete,
             _ => false,
         }
+    }
+}
+
+impl Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
