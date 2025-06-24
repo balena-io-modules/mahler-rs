@@ -1,4 +1,25 @@
 - commits:
+    - subject: Remove log crate conversion layer and simplify logging architecture
+      hash: ecd11753b6d4aabb65320f0222f743dea24568fc
+      body: |
+        - Delete src/worker/logging.rs conversion layer (300 lines removed)
+        - Replace conditional logging feature with direct tracing integration
+        - Update examples and README to use tracing-subscriber directly
+        - Add structured logging with span context and proper log levels
+        - Remove logging feature flag and optional dependencies
+        - Improve log message clarity and consistency
+
+        This reduces complexity by eliminating the log crate intermediary
+        while providing better structured logging capabilities.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.16.0
+  title: ""
+  date: 2025-06-24T17:55:20.079Z
+- commits:
     - subject: Update metadata in Cargo.toml
       hash: ae8014ddcddf7a5b2e74242a159bc286c4636b61
       body: |
