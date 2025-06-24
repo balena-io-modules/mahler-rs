@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
-use tracing::{debug_span, error, field, instrument, warn, Level, Span};
+use tracing::{debug, error, field, info, instrument, trace, trace_span, warn, Level, Span};
 
 use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
@@ -178,7 +178,7 @@ impl Planner {
         &self.0
     }
 
-    #[instrument(level = "trace", skip_all, fields(task=?task, changes=?pending_changes, selected=field::Empty), err(level=Level::TRACE))]
+    #[instrument(level="trace", skip_all, fields(id=%task.id(), path=%task.path(), is_method=%task.is_method()), err(level=Level::TRACE))]
     fn try_task(
         &self,
         task: &Task,
@@ -197,11 +197,15 @@ impl Planner {
                 }
 
                 // Simulate the task and get the list of changes
-                let Patch(changes) = action.dry_run(cur_state).map_err(SearchFailed::BadTask)?;
-                if changes.is_empty() {
+                let patch = action.dry_run(cur_state).map_err(SearchFailed::BadTask)?;
+                if patch.is_empty() {
                     return Err(SearchFailed::EmptyTask);
                 }
 
+                // The task has been selected
+                trace!(is_candidate=true, changes=%patch);
+
+                let Patch(changes) = patch;
                 let Workflow(dag) = cur_plan;
 
                 // Append a new node to the workflow, include a copy
@@ -210,7 +214,6 @@ impl Planner {
 
                 pending_changes.extend(changes);
 
-                Span::current().record("selected", true);
                 Ok(Workflow(dag))
             }
             Task::Method(method) => {
@@ -308,11 +311,26 @@ impl Planner {
         }
     }
 
-    #[instrument(skip_all, fields(ini=%system.root(), tgt=%tgt), err, ret(Display))]
+    #[instrument(skip_all)]
     pub(crate) fn find_workflow<T>(&self, system: &System, tgt: &Value) -> Result<Workflow, Error>
     where
         T: Serialize + DeserializeOwned,
     {
+        info!("searching workflow");
+
+        // Show pending changes at debug level
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let changes = json_patch::diff(system.root(), tgt);
+            if !changes.0.is_empty() {
+                debug!("pending changes");
+                for change in &changes.0 {
+                    debug!("- {}", change);
+                }
+            } else {
+                debug!("nothing to do: target state reached");
+            }
+        }
+
         // The search stack stores (current_state, current_plan, depth)
         let mut stack = vec![(system.clone(), Workflow::default(), 0)];
         let find_workflow_span = Span::current();
@@ -338,7 +356,7 @@ impl Planner {
                 return Ok(cur_plan);
             }
 
-            let next_span = debug_span!("find_next", cur = %&cur_state.root());
+            let next_span = trace_span!("lookup_candidates", cur = %&cur_state.root(), tgt=%tgt, candidates=field::Empty);
             let _enter = next_span.enter();
 
             // List of candidate plans at this level in the stack
@@ -400,7 +418,12 @@ impl Planner {
                                     if cfg!(debug_assertions) {
                                         return Err(task::Error::from(err))?;
                                     }
-                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task.id(), err);
+                                    warn!(
+                                        parent: &find_workflow_span,
+                                        "task {} failed: {} ... ignoring",
+                                        task.id(),
+                                        err
+                                    );
                                 }
 
                                 // Other task failure (non-debug: warn and skip)
@@ -408,7 +431,12 @@ impl Planner {
                                     if cfg!(debug_assertions) {
                                         return Err(err)?;
                                     }
-                                    warn!(parent: &find_workflow_span, "task {} failed: {} ... ignoring", task.id(), err);
+                                    warn!(
+                                        parent: &find_workflow_span,
+                                        "task {} failed: {} ... ignoring",
+                                        task.id(),
+                                        err
+                                    );
                                 }
 
                                 _ => {}
@@ -473,6 +501,9 @@ impl Planner {
 
             // sort candidates
             candidates.sort();
+
+            // Record candidates found for this planning step
+            next_span.record("candidates", candidates.len());
 
             // For each candidate add a new plan to the stack
             for Candidate {

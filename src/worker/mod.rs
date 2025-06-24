@@ -13,20 +13,13 @@ use tokio::task::JoinHandle;
 use tokio::{select, sync::RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
-use tracing::{debug, error, field, instrument, span, Instrument, Level, Span};
-
-#[cfg(feature = "logging")]
-mod logging;
+use tracing::{error, field, info, instrument, span, trace, warn, Instrument, Level, Span};
 
 #[cfg(debug_assertions)]
 mod testing;
 
 #[cfg(debug_assertions)]
 pub use testing::*;
-
-#[cfg(feature = "logging")]
-#[cfg_attr(docsrs, doc(cfg(feature = "logging")))]
-pub use logging::init as init_logging;
 
 use crate::errors::{IOError, InternalError, SerializationError};
 use crate::planner::{Domain, Error as PlannerError, Planner};
@@ -328,6 +321,7 @@ impl<O> Worker<O, Uninitialized> {
     /// fn bar() {}
     ///
     /// let worker: Worker<StateModel, Uninitialized> = Worker::new()
+    ///
     ///         .jobs("/{foo}", [update(foo), update(bar)]);
     /// ```
     pub fn jobs<const N: usize>(mut self, route: &'static str, list: [Job; N]) -> Self {
@@ -428,17 +422,18 @@ impl<O> Worker<O, Uninitialized> {
                 async move {
                     while let Some(mut msg) = rx.recv().await {
                         let changes = std::mem::take(&mut msg.data);
-                        debug!("received changes: {:?}", changes);
+                        trace!(received=%changes);
 
                         let mut system = sys_writer.write().await;
                         if let Err(e) = system.patch(changes) {
                             // we need to abort on patch failure a this means the
                             // internal state may have become inconsistent and we cannot continue
                             // applying changes
-                            error!("system patch failed: {e}");
+                            error!("patch failed: {e}");
                             notify.notify_one();
                             break;
                         }
+                        trace!("patch successful");
 
                         // Notify the change over the broadcast channel
                         let _ = broadcast.send(UpdateEvent);
@@ -447,7 +442,7 @@ impl<O> Worker<O, Uninitialized> {
                         msg.ack();
                     }
                 }
-                .instrument(span!(Level::DEBUG, "system_writer")),
+                .instrument(span!(Level::TRACE, "sync_changes",)),
             );
         }
 
@@ -636,7 +631,7 @@ impl<O, I> Worker<O, Ready, I> {
         &self.inner.status
     }
 
-    #[instrument(name = "seek_target", skip_all, fields(return=field::Empty), err)]
+    #[instrument(name = "seek_target", skip_all, fields(result=field::Empty) err)]
     /// Trigger system changes by providing a new target state and interrupt signal
     ///
     /// When called, this method tells the worker to look for a plan for the given
@@ -665,7 +660,8 @@ impl<O, I> Worker<O, Ready, I> {
     where
         I: Serialize + DeserializeOwned,
     {
-        let cur_span = Span::current();
+        info!("applying target state");
+        let seek_span = Span::current();
         let tgt = serde_json::to_value(tgt).map_err(SerializationError::from)?;
 
         let Ready {
@@ -727,6 +723,7 @@ impl<O, I> Worker<O, Ready, I> {
             let workflow_interrupt = interrupt.clone();
             let sys_reader = Arc::clone(&system);
             let changes = patches.clone();
+            let seek_span = seek_span.clone();
             tokio::spawn(async move {
                 loop {
                     select! {
@@ -737,29 +734,28 @@ impl<O, I> Worker<O, Ready, I> {
                         }
 
                         _ = workflow_interrupt.wait() => {
-                            cur_span.record("return", "interrupted");
                             return Ok((planner, SeekStatus::Interrupted));
                         }
 
                         _ = drop_interrupt_signal.wait() => {
                             // Trigger the workflow interrupt to propagate cancellation to running tasks
                             workflow_interrupt.trigger();
-                            cur_span.record("return", "interrupted");
+                            seek_span.record("result", "interrupted");
                             return Ok((planner, SeekStatus::Interrupted));
                         }
 
                         res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &changes, &workflow_interrupt) => {
                             match res {
                                 Ok(SeekResult::TargetReached) => {
-                                    cur_span.record("return", "success");
                                     return Ok((planner, SeekStatus::Success));
                                 }
                                 Ok(SeekResult::WorkflowCompleted) => {}
                                 Ok(SeekResult::Interrupted) => {
-                                    cur_span.record("return", "interrupted");
                                     return Ok((planner, SeekStatus::Interrupted));
                                 }
-                                Err(SeekError::Planning(PlannerError::NotFound)) =>  return Ok((planner, SeekStatus::NotFound)),
+                                Err(SeekError::Planning(PlannerError::NotFound)) =>  {
+                                        return Ok((planner, SeekStatus::NotFound));
+                                }
                                 Err(SeekError::Planning(PlannerError::Serialization(e))) =>  return Err(e)?,
                                 Err(SeekError::Planning(PlannerError::Internal(e))) =>  return Err(e)?,
                                 Err(SeekError::Planning(PlannerError::Task(e))) => return Err(e)?,
@@ -785,7 +781,6 @@ impl<O, I> Worker<O, Ready, I> {
                                     // Abort if there are any runtime errors as those
                                     // should be recoverable
                                     if !io.is_empty() {
-                                        cur_span.record("return", "aborted");
                                         return Ok((planner, SeekStatus::Aborted(io)));
                                     }
 
@@ -806,6 +801,24 @@ impl<O, I> Worker<O, Ready, I> {
             Ok(Err(e)) => Err(e),
             Err(e) => Err(Panicked(e))?,
         }?;
+
+        match &status {
+            SeekStatus::Success => {
+                info!("target state applied");
+                seek_span.record("result", "success");
+            }
+            SeekStatus::Interrupted => {
+                warn!("target state apply interrupted by user request");
+                seek_span.record("result", "interrupted");
+            }
+            SeekStatus::Aborted(_) => {
+                warn!("target state apply interrupted due to error");
+                seek_span.record("result", "aborted_with_errors");
+            }
+            SeekStatus::NotFound => {
+                seek_span.record("result", "worklow_not_found");
+            }
+        }
 
         Ok(Worker::from_inner(Ready {
             planner,

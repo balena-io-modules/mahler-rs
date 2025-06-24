@@ -8,7 +8,7 @@ use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::instrument;
+use tracing::{debug, info, instrument};
 
 use crate::system::System;
 use crate::task::{Action, Error as TaskError};
@@ -99,8 +99,9 @@ impl Task for WorkUnit {
     type Changes = Patch;
     type Error = TaskError;
 
-    #[instrument(name="run_task", skip_all, fields(id=%self.action.id(), task=%self.action, state=%system.root()), err)]
+    #[instrument(name = "step", skip_all, fields(task=%self.action), err)]
     async fn run(&self, system: &System) -> Result<Patch, TaskError> {
+        info!("running");
         // dry-run the task to test that conditions hold
         // before executing the action should not really fail at this point
         let Patch(changes) = self.action.dry_run(system)?;
@@ -110,7 +111,11 @@ impl Task for WorkUnit {
             return Err(TaskError::ConditionFailed);
         }
 
-        self.action.run(system).await
+        let result = self.action.run(system).await;
+        if result.is_ok() {
+            info!("finished");
+        }
+        result
     }
 }
 
@@ -171,10 +176,23 @@ impl Workflow {
         channel: Sender<Patch>,
         interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
-        self.0
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            debug!("will execute the following tasks:");
+            for line in self.to_string().lines() {
+                debug!("{}", line);
+            }
+        }
+
+        let res = self
+            .0
             .execute(system, channel, interrupt)
             .await
-            .map(|s| s.into())
+            .map(|s| s.into());
+
+        if res.is_ok() {
+            info!("all tasks completed");
+        }
+        res
     }
 }
 

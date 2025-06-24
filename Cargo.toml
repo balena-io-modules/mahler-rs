@@ -10,11 +10,6 @@ license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/balena-io-modules/mahler-rs"
 
-[features]
-
-default = []
-logging = ["tracing-subscriber", "log"]
-
 [dependencies]
 anyhow = "1.0.97"
 json-patch = "4"
@@ -35,15 +30,9 @@ tokio-stream = { version = "0.1.17", default-features = false, features = [
 async-trait = "0.1.88"
 futures = "0.3.31"
 
-# only required by the `logging` feature
-log = { version = "0.4.25", optional = true }
-tracing-subscriber = { version = "0.3.19", default-features = false, optional = true, features = [
-  "registry",
-] }
 
 [dev-dependencies]
-# configure mahler with the logging feature to ensure documentation tests pass
-mahler = { path = ".", features = ["logging"] }
+mahler = { path = "." }
 tracing-subscriber = { version = "0.3.19", default-features = false, features = [
   "ansi",
   "registry",
@@ -51,8 +40,6 @@ tracing-subscriber = { version = "0.3.19", default-features = false, features = 
   "env-filter",
 ] }
 dedent = "0.1.1"
-env_logger = "0.11.8"
-log = "0.4.25"
 tokio = { version = "1.36.0", features = ["rt-multi-thread", "time"] }
 pretty_assertions = "1.4.1"
 tokio-test = "0.4.4"
