@@ -8,7 +8,7 @@ use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 use crate::system::System;
 use crate::task::{Action, Error as TaskError};
@@ -99,9 +99,9 @@ impl Task for WorkUnit {
     type Changes = Patch;
     type Error = TaskError;
 
-    #[instrument(name = "step", skip_all, fields(task=%self.action), err)]
+    #[instrument(name = "run_task", skip_all, fields(task=%self.action), err)]
     async fn run(&self, system: &System) -> Result<Patch, TaskError> {
-        info!("running");
+        info!("starting");
         // dry-run the task to test that conditions hold
         // before executing the action should not really fail at this point
         let Patch(changes) = self.action.dry_run(system)?;
@@ -169,30 +169,16 @@ impl Workflow {
         self.0.is_empty()
     }
 
-    #[instrument(name = "run_workflow", skip_all, err)]
     pub(crate) async fn execute(
         self,
         system: &Arc<RwLock<System>>,
         channel: Sender<Patch>,
         interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            debug!("will execute the following tasks:");
-            for line in self.to_string().lines() {
-                debug!("{}", line);
-            }
-        }
-
-        let res = self
-            .0
+        self.0
             .execute(system, channel, interrupt)
             .await
-            .map(|s| s.into());
-
-        if res.is_ok() {
-            info!("all tasks completed");
-        }
-        res
+            .map(|s| s.into())
     }
 }
 

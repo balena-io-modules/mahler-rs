@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
-use tracing::{debug, error, field, info, instrument, trace, trace_span, warn, Level, Span};
+use tracing::{error, field, instrument, trace, trace_span, warn, Level, Span};
 
 use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
@@ -178,7 +178,7 @@ impl Planner {
         &self.0
     }
 
-    #[instrument(level="trace", skip_all, fields(id=%task.id(), path=%task.path(), is_method=%task.is_method()), err(level=Level::TRACE))]
+    #[instrument(level="trace", skip_all, fields(id=%task.id(), path=%task.path()), err(level=Level::TRACE))]
     fn try_task(
         &self,
         task: &Task,
@@ -203,7 +203,7 @@ impl Planner {
                 }
 
                 // The task has been selected
-                trace!(is_candidate=true, changes=%patch);
+                trace!(selected=true, changes=%patch);
 
                 let Patch(changes) = patch;
                 let Workflow(dag) = cur_plan;
@@ -311,26 +311,11 @@ impl Planner {
         }
     }
 
-    #[instrument(skip_all)]
+    #[instrument(level = "trace", skip_all)]
     pub(crate) fn find_workflow<T>(&self, system: &System, tgt: &Value) -> Result<Workflow, Error>
     where
         T: Serialize + DeserializeOwned,
     {
-        info!("searching workflow");
-
-        // Show pending changes at debug level
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            let changes = json_patch::diff(system.root(), tgt);
-            if !changes.0.is_empty() {
-                debug!("pending changes");
-                for change in &changes.0 {
-                    debug!("- {}", change);
-                }
-            } else {
-                debug!("nothing to do: target state reached");
-            }
-        }
-
         // The search stack stores (current_state, current_plan, depth)
         let mut stack = vec![(system.clone(), Workflow::default(), 0)];
         let find_workflow_span = Span::current();
@@ -356,7 +341,7 @@ impl Planner {
                 return Ok(cur_plan);
             }
 
-            let next_span = trace_span!("lookup_candidates", cur = %&cur_state.root(), tgt=%tgt, candidates=field::Empty);
+            let next_span = trace_span!("find_next", cur = %&cur_state.root(), tgt=%tgt, candidates=field::Empty);
             let _enter = next_span.enter();
 
             // List of candidate plans at this level in the stack

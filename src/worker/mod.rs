@@ -7,13 +7,14 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::{broadcast, Notify};
 use tokio::task::JoinHandle;
 use tokio::{select, sync::RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
-use tracing::{error, field, info, instrument, span, trace, warn, Instrument, Level, Span};
+use tracing::{debug, error, field, info, info_span, span, trace, warn, Instrument, Level, Span};
 
 #[cfg(debug_assertions)]
 mod testing;
@@ -442,7 +443,7 @@ impl<O> Worker<O, Uninitialized> {
                         msg.ack();
                     }
                 }
-                .instrument(span!(Level::TRACE, "sync_changes",)),
+                .instrument(span!(Level::TRACE, "worker_sync",)),
             );
         }
 
@@ -631,7 +632,7 @@ impl<O, I> Worker<O, Ready, I> {
         &self.inner.status
     }
 
-    #[instrument(name = "seek_target", skip_all, fields(result=field::Empty) err)]
+    // #[instrument(name = "seek_target", skip_all, fields(result=field::Empty) err)]
     /// Trigger system changes by providing a new target state and interrupt signal
     ///
     /// When called, this method tells the worker to look for a plan for the given
@@ -660,8 +661,6 @@ impl<O, I> Worker<O, Ready, I> {
     where
         I: Serialize + DeserializeOwned,
     {
-        info!("applying target state");
-        let seek_span = Span::current();
         let tgt = serde_json::to_value(tgt).map_err(SerializationError::from)?;
 
         let Ready {
@@ -692,21 +691,62 @@ impl<O, I> Worker<O, Ready, I> {
             channel: &Sender<Patch>,
             sigint: &Interrupt,
         ) -> Result<SeekResult, SeekError> {
+            info!("searching workflow");
+            let now = Instant::now();
+            // Show pending changes at debug level
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let system = sys.read().await;
+                // We need to compare the state by first serializing the
+                // current state to I, removing any internal variables.
+                // This is also done by the planner to avoid comparing
+                // properties that are not part of the target state model.
+                // We throw a planning error immediately if this process fails as
+                // it will fail in planning anyway
+                let system = system
+                    .state::<I>()
+                    .and_then(System::try_from)
+                    .map_err(SerializationError::from)
+                    .map_err(PlannerError::from)
+                    .map_err(SeekError::Planning)?;
+                let changes = json_patch::diff(system.root(), tgt);
+                if !changes.0.is_empty() {
+                    debug!("pending changes:");
+                    for change in &changes.0 {
+                        debug!("- {}", change);
+                    }
+                }
+            }
+
             let workflow = {
                 let system = sys.read().await;
-                planner
-                    .find_workflow::<I>(&system, tgt)
-                    .map_err(SeekError::Planning)?
+                let res = planner.find_workflow::<I>(&system, tgt);
+
+                if let Err(PlannerError::NotFound) = res {
+                    warn!(time = ?now.elapsed(), "workflow not found");
+                }
+                res.map_err(SeekError::Planning)?
             };
 
             if workflow.is_empty() {
+                debug!("nothing to do");
                 return Ok(SeekResult::TargetReached);
             }
+            info!(time = ?now.elapsed(), "workflow found");
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                debug!("will execute the following tasks:");
+                for line in workflow.to_string().lines() {
+                    debug!("{}", line);
+                }
+            }
 
+            let now = Instant::now();
+            info!("executing workflow");
             let status = workflow
                 .execute(sys, channel.clone(), sigint.clone())
                 .await
                 .map_err(SeekError::Runtime)?;
+
+            info!(time = ?now.elapsed(), "workflow executed successfully");
 
             if matches!(status, WorkflowStatus::Interrupted) {
                 return Ok(SeekResult::Interrupted);
@@ -723,8 +763,12 @@ impl<O, I> Worker<O, Ready, I> {
             let workflow_interrupt = interrupt.clone();
             let sys_reader = Arc::clone(&system);
             let changes = patches.clone();
-            let seek_span = seek_span.clone();
+
+            // We spawn a task rather than looping directly so we can catch panics happening
+            // within the loop
             tokio::spawn(async move {
+                let seek_span = Span::current();
+                info!("applying target state");
                 loop {
                     select! {
                         biased;
@@ -747,14 +791,19 @@ impl<O, I> Worker<O, Ready, I> {
                         res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &changes, &workflow_interrupt) => {
                             match res {
                                 Ok(SeekResult::TargetReached) => {
+                                    info!("target state applied");
+                                    seek_span.record("result", "success");
                                     return Ok((planner, SeekStatus::Success));
                                 }
                                 Ok(SeekResult::WorkflowCompleted) => {}
                                 Ok(SeekResult::Interrupted) => {
+                                    warn!("target state apply interrupted by user request");
+                                    seek_span.record("result", "interrupted");
                                     return Ok((planner, SeekStatus::Interrupted));
                                 }
                                 Err(SeekError::Planning(PlannerError::NotFound)) =>  {
-                                        return Ok((planner, SeekStatus::NotFound));
+                                    seek_span.record("result", "workflow_not_found");
+                                    return Ok((planner, SeekStatus::NotFound));
                                 }
                                 Err(SeekError::Planning(PlannerError::Serialization(e))) =>  return Err(e)?,
                                 Err(SeekError::Planning(PlannerError::Internal(e))) =>  return Err(e)?,
@@ -781,6 +830,8 @@ impl<O, I> Worker<O, Ready, I> {
                                     // Abort if there are any runtime errors as those
                                     // should be recoverable
                                     if !io.is_empty() {
+                                        warn!("target state apply interrupted due to error");
+                                        seek_span.record("result", "aborted");
                                         return Ok((planner, SeekStatus::Aborted(io)));
                                     }
 
@@ -793,7 +844,7 @@ impl<O, I> Worker<O, Ready, I> {
                         }
                     }
                 }
-            })
+            }.instrument(info_span!("seek_target", result=field::Empty)))
         };
 
         let (planner, status) = match handle.await {
@@ -801,24 +852,6 @@ impl<O, I> Worker<O, Ready, I> {
             Ok(Err(e)) => Err(e),
             Err(e) => Err(Panicked(e))?,
         }?;
-
-        match &status {
-            SeekStatus::Success => {
-                info!("target state applied");
-                seek_span.record("result", "success");
-            }
-            SeekStatus::Interrupted => {
-                warn!("target state apply interrupted by user request");
-                seek_span.record("result", "interrupted");
-            }
-            SeekStatus::Aborted(_) => {
-                warn!("target state apply interrupted due to error");
-                seek_span.record("result", "aborted_with_errors");
-            }
-            SeekStatus::NotFound => {
-                seek_span.record("result", "worklow_not_found");
-            }
-        }
 
         Ok(Worker::from_inner(Ready {
             planner,
