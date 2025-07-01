@@ -316,7 +316,7 @@ mod tests {
                 sleep(Duration::from_millis(10)).await;
                 Ok(x + 1) as Result<i32, ()>
             })
-            .map(|x| format!("result: {}", x));
+            .map(|x| format!("result: {x}"));
 
         assert_eq!(effect.run().await, Ok("result: 2".to_string()))
     }
@@ -329,7 +329,7 @@ mod tests {
                 sleep(Duration::from_millis(10)).await;
                 Ok(x + 1) as Result<i32, ()>
             })
-            .map(|x| format!("result: {}", x));
+            .map(|x| format!("result: {x}"));
 
         assert_eq!(effect.pure(), Ok("result: 1".to_string()))
     }

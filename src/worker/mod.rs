@@ -1185,7 +1185,7 @@ mod tests {
 
         // Should not have reached the target due to interrupt
         let state: i32 = worker.state().await.unwrap();
-        assert!(state < 10, "Expected state {} to be less than 10", state);
+        assert!(state < 10, "Expected state {state} to be less than 10");
     }
 
     #[tokio::test]

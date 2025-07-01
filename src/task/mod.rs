@@ -138,7 +138,7 @@ impl Display for Action {
             warn!("failed to expand description for task {}: {}", self.id, e);
             default_description(self.id, self.context())
         });
-        write!(f, "{}", description)
+        write!(f, "{description}")
     }
 }
 
@@ -206,7 +206,7 @@ impl Display for Method {
             warn!("failed to expand description for task {}: {}", self.id, e);
             default_description(self.id, self.context())
         });
-        write!(f, "{}", description)
+        write!(f, "{description}")
     }
 }
 

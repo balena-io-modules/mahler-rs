@@ -105,11 +105,11 @@ impl Display for PathArgs {
         let entries = self
             .0
             .iter()
-            .map(|(key, value)| format!("\"{}\": \"{}\"", key, value))
+            .map(|(key, value)| format!("\"{key}\": \"{value}\""))
             .collect::<Vec<_>>()
             .join(", ");
 
-        write!(f, "{{{}}}", entries)
+        write!(f, "{{{entries}}}")
     }
 }
 
