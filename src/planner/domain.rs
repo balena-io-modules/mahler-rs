@@ -53,8 +53,7 @@ impl Domain {
         // runtime
         if queue.iter().any(|j| j.id() == job_id) {
             panic!(
-                "cannot assign job '{}' to operation '{:?}', a previous assignment exists",
-                job_id, operation
+                "cannot assign job '{job_id}' to operation '{operation:?}', a previous assignment exists"
             )
         }
 
@@ -71,8 +70,7 @@ impl Domain {
                 index.insert(job_id.clone().into_boxed_str(), String::from(route))
             {
                 panic!(
-                    "cannot assign job '{}' to route '{}', a previous assignment exists to '{}'",
-                    job_id, route, oldroute
+                    "cannot assign job '{job_id}' to route '{route}', a previous assignment exists to '{oldroute}'"
                 )
             }
         }
@@ -102,12 +100,12 @@ impl Domain {
 
             // Step 1: Replace `{param}` and `{*param}` placeholders
             for (k, v) in args.iter() {
-                let param = format!("{{{}}}", k);
-                let wildcard_param = format!("{{*{}}}", k);
-                let escaped_param = format!("{{{{{}}}}}", k);
+                let param = format!("{{{k}}}");
+                let wildcard_param = format!("{{*{k}}}");
+                let escaped_param = format!("{{{{{k}}}}}");
 
                 // Replace escaped parameters with a temp placeholder, but do not mark as used
-                let placeholder = format!("__ESCAPED_{}__", k);
+                let placeholder = format!("__ESCAPED_{k}__");
                 route = route.replace(&escaped_param, &placeholder);
 
                 // Only mark as used if actual replacement occurs
@@ -164,8 +162,8 @@ impl Domain {
 
             // Restore escaped parameters
             for (k, _) in args.iter() {
-                let placeholder = format!("__ESCAPED_{}__", k);
-                let param = format!("{{{}}}", k);
+                let placeholder = format!("__ESCAPED_{k}__");
+                let param = format!("{{{k}}}");
                 final_route = final_route.replace(&placeholder, &param);
             }
 

@@ -16,7 +16,7 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for e in &self.0 {
-            writeln!(f, "- {}", e)?;
+            writeln!(f, "- {e}")?;
         }
         Ok(())
     }

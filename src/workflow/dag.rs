@@ -579,7 +579,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
             match node {
                 Node::Item { value, next } => {
                     fmt_newline(f, indent, index > 0)?;
-                    write!(f, "- {}", value)?;
+                    write!(f, "- {value}")?;
 
                     if let Some(next_rc) = next {
                         fmt_node(f, &*next_rc.read().unwrap(), indent, index + 1, branching)?;

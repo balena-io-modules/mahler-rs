@@ -451,7 +451,7 @@
 //!     .with(EnvFilter::from_default_env())
 //!     .with(
 //!         fmt::layer()
-//!             .with_span_events(FmtSpan::CLOSE)
+//!             .with_span_events(fmt::format::FmtSpan::CLOSE)
 //!             .event_format(fmt::format().compact().with_target(false)),
 //!     )
 //!     .init();

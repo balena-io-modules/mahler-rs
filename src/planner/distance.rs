@@ -48,8 +48,7 @@ impl Distance {
                 // always exist. If it doesn't there is a bug (probbly in jsonptr)
                 let value = newparent.resolve(tgt).unwrap_or_else(|e| {
                     panic!(
-                        "[BUG] Path `{}` should be resolvable on the target, but got error: {}",
-                        newparent, e
+                        "[BUG] Path `{newparent}` should be resolvable on the target, but got error: {e}"
                     )
                 });
 
@@ -69,8 +68,7 @@ impl Distance {
                 // resolvable on the left side of the diff
                 let value = path.resolve(src).unwrap_or_else(|e| {
                     panic!(
-                        "[BUG] Path `{}` should be resolvable on the state, but got error: {}",
-                        path, e
+                        "[BUG] Path `{path}` should be resolvable on the state, but got error: {e}"
                     )
                 });
 
@@ -105,7 +103,7 @@ impl Distance {
             if value.is_object() {
                 let obj = value.as_object().unwrap();
                 for (k, v) in obj.iter() {
-                    let path = path.concat(Pointer::parse(&format!("/{}", k)).unwrap());
+                    let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
                     // Insert a remove operation for each child
                     self.insert(Operation::from(PatchOperation::Remove(RemoveOperation {
                         path: path.clone(),
@@ -119,7 +117,7 @@ impl Distance {
             if value.is_array() {
                 let obj = value.as_array().unwrap();
                 for (k, v) in obj.iter().enumerate() {
-                    let path = path.concat(Pointer::parse(&format!("/{}", k)).unwrap());
+                    let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
 
                     // Insert a remove operation for each child
                     self.insert(Operation::from(PatchOperation::Remove(RemoveOperation {
