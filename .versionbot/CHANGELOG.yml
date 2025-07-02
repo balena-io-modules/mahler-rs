@@ -1,4 +1,30 @@
 - commits:
+    - subject: Refactor logging architecture and improve span instrumentation
+      hash: ec3fc86216e4a17cc19c5e117f5cf4f8b4c582ce
+      body: >
+        Restructure tracing spans and log levels across planner, worker, and
+        workflow
+
+        modules to reduce log verbosity.
+
+
+        - `seek_target` logs now show within the async task context, keeping the
+
+        call hierarchy.
+
+        - moved debugging and information for planning and runt logs to
+          `seek_target` to remove one level of hierarchy.
+        - Fixed debugging of state differences that was comparing current state
+          with target state.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.16.1
+  title: ""
+  date: 2025-07-02T05:18:14.294Z
+- commits:
     - subject: Remove log crate conversion layer and simplify logging architecture
       hash: ecd11753b6d4aabb65320f0222f743dea24568fc
       body: |
