@@ -8,10 +8,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use tokio::{select, sync::RwLock};
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::{debug, error, field, info, info_span, span, trace, warn, Instrument, Level, Span};
 
@@ -27,10 +27,6 @@ use crate::system::{Resources, System};
 use crate::task::{Error as TaskError, Job};
 use crate::workflow::{channel, AggregateError, AutoInterrupt, Interrupt, Sender, WorkflowStatus};
 
-pub mod prelude {
-    //! Types and traits for setting up a Worker
-}
-
 /// A panic happened in the Worker runtime
 #[derive(Debug, Error)]
 #[error(transparent)]
@@ -38,7 +34,7 @@ pub struct Panicked(#[from] tokio::task::JoinError);
 
 /// Unrecoverable error during the worker runtime
 #[derive(Debug, Error)]
-pub enum FatalError {
+pub enum SeekError {
     #[error(transparent)]
     /// Failed to serialize or deserialize the Worker current/target state
     Serialization(#[from] SerializationError),
@@ -90,10 +86,6 @@ impl PartialEq for SeekStatus {
 
 impl Eq for SeekStatus {}
 
-#[derive(Debug, Clone)]
-/// Helper type to indicate that a state change happened on the worker
-struct UpdateEvent;
-
 /// Helper trait to implement the Typestate pattern for Worker
 pub trait WorkerState {}
 
@@ -114,10 +106,10 @@ pub struct Uninitialized {
 #[derive(Clone)]
 pub struct Ready {
     planner: Planner,
-    system: Arc<RwLock<System>>,
-    updates: broadcast::Sender<UpdateEvent>,
-    patches: Sender<Patch>,
-    writer_closed: Arc<Notify>,
+    system_rwlock: Arc<RwLock<System>>,
+    update_event_channel: watch::Sender<()>,
+    patch_tx: Sender<Patch>,
+    notify_writer_closed: Arc<Notify>,
 }
 
 /// Final state of a Worker
@@ -382,44 +374,52 @@ impl<O> Worker<O, Uninitialized> {
             ..
         } = self.inner;
 
+        // Create a new system with an initial state and the previously
+        // defined resources
         let system = System::try_from(state).map(|s| s.with_resources(env))?;
 
         // Shared system protected by RwLock
-        let system = Arc::new(RwLock::new(system));
+        let system_rwlock = Arc::new(RwLock::new(system));
 
-        // Create the messaging channel
-        let (tx, mut rx) = channel::<Patch>(100);
+        // Create the state changes synchronization channel
+        // XXX: should the channel size configurable? Or should we make it unbounded at risk of running
+        // out of memory
+        let (patch_tx, mut patch_rx) = channel::<Patch>(100);
 
         // Patch error signal (notify)
-        let notify = Arc::new(Notify::new());
-        let writer_closed = notify.clone();
+        let notify_writer_closed = Arc::new(Notify::new());
 
         // Broadcast channel for state updates
-        let (updates, _) = broadcast::channel(1);
+        let (update_event_channel, _) = watch::channel(());
 
         // Spawn system writer task
         {
-            let sys_writer = Arc::clone(&system);
-            let broadcast = updates.clone();
+            let notify_writer_closed = notify_writer_closed.clone();
+            let system_writer = Arc::clone(&system_rwlock);
+            let update_event_tx = update_event_channel.clone();
             tokio::spawn(
                 async move {
-                    while let Some(mut msg) = rx.recv().await {
+                    // If the worker is dropped, then patch_tx will get dropped and
+                    // this task will terminate, causing update_event_tx to get dropped
+                    // and notifying the broadcast channel followers
+                    while let Some(mut msg) = patch_rx.recv().await {
                         let changes = std::mem::take(&mut msg.data);
                         trace!(received=%changes);
 
-                        let mut system = sys_writer.write().await;
+                        let mut system = system_writer.write().await;
                         if let Err(e) = system.patch(changes) {
                             // we need to abort on patch failure a this means the
                             // internal state may have become inconsistent and we cannot continue
                             // applying changes
                             error!("patch failed: {e}");
-                            notify.notify_one();
+                            notify_writer_closed.notify_one();
                             break;
                         }
                         trace!("patch successful");
 
-                        // Notify the change over the broadcast channel
-                        let _ = broadcast.send(UpdateEvent);
+                        // Notify watchers, ignore errors if no receivers
+                        // exist
+                        let _ = update_event_tx.send(());
 
                         // yield back to the workflow
                         msg.ack();
@@ -431,10 +431,10 @@ impl<O> Worker<O, Uninitialized> {
 
         Ok(Worker::from_inner(Ready {
             planner: Planner::new(domain),
-            system,
-            updates,
-            patches: tx,
-            writer_closed,
+            system_rwlock,
+            update_event_channel,
+            patch_tx,
+            notify_writer_closed,
         }))
     }
 }
@@ -444,11 +444,11 @@ impl<O> Worker<O, Uninitialized> {
 /// Helper type to receive Worker state changes
 ///
 /// See [`Worker::follow`]
-struct FollowStream<T> {
+struct WorkerStream<T> {
     inner: Pin<Box<dyn Stream<Item = T> + Send + 'static>>,
 }
 
-impl<T> FollowStream<T> {
+impl<T> WorkerStream<T> {
     /// Create a new FollowStream from a Stream
     fn new<S>(stream: S) -> Self
     where
@@ -460,7 +460,7 @@ impl<T> FollowStream<T> {
     }
 }
 
-impl<T> Stream for FollowStream<T> {
+impl<T> Stream for WorkerStream<T> {
     type Item = T;
 
     fn poll_next(
@@ -475,21 +475,18 @@ impl<T> Stream for FollowStream<T> {
 ///
 /// The stream is best effort, meaning updates may be missed if the receiver lags behind.
 fn follow_worker<T>(
-    updates: broadcast::Sender<UpdateEvent>,
-    syslock: Arc<RwLock<System>>,
+    channel: watch::Sender<()>,
+    system_rwlock: Arc<RwLock<System>>,
 ) -> impl Stream<Item = T>
 where
     T: DeserializeOwned,
 {
-    let rx = updates.subscribe();
-    FollowStream::new(
-        BroadcastStream::new(rx)
-            .then(move |res| {
-                let sys_reader = Arc::clone(&syslock);
+    let rx = channel.subscribe();
+    WorkerStream::new(
+        WatchStream::from_changes(rx)
+            .then(move |_| {
+                let sys_reader = Arc::clone(&system_rwlock);
                 async move {
-                    if res.is_err() {
-                        return None;
-                    }
                     // Read the system state
                     let system = sys_reader.read().await;
                     system.state::<T>().ok()
@@ -513,7 +510,7 @@ impl<O, I> Worker<O, Ready, I> {
     where
         O: DeserializeOwned,
     {
-        let system = self.inner.system.read().await;
+        let system = self.inner.system_rwlock.read().await;
         let state = system.state()?;
         Ok(state)
     }
@@ -562,7 +559,7 @@ impl<O, I> Worker<O, Ready, I> {
     where
         I: DeserializeOwned,
     {
-        let system = self.inner.system.read().await;
+        let system = self.inner.system_rwlock.read().await;
         let state = system.state()?;
         Ok(state)
     }
@@ -604,7 +601,10 @@ impl<O, I> Worker<O, Ready, I> {
     where
         O: DeserializeOwned,
     {
-        follow_worker(self.inner.updates.clone(), Arc::clone(&self.inner.system))
+        follow_worker(
+            self.inner.update_event_channel.clone(),
+            Arc::clone(&self.inner.system_rwlock),
+        )
     }
 
     /// Trigger system changes by providing a new target state and interrupt signal
@@ -626,14 +626,14 @@ impl<O, I> Worker<O, Ready, I> {
     /// - `interrupt`: User-controlled interrupt for canceling the operation
     ///
     /// # Errors
-    /// The method will result in a [`FatalError`] if a serialization issue occurs while converting
+    /// The method will result in a [`SeekError`] if a serialization issue occurs while converting
     /// between state types, if the worker runtime panics or there is an unexpected error during
     /// planning.
     pub async fn seek_with_interrupt(
         &mut self,
         tgt: I,
         interrupt: Interrupt,
-    ) -> Result<SeekStatus, FatalError>
+    ) -> Result<SeekStatus, SeekError>
     where
         I: Serialize + DeserializeOwned,
     {
@@ -641,35 +641,35 @@ impl<O, I> Worker<O, Ready, I> {
 
         let Ready {
             planner,
-            system,
-            writer_closed,
-            patches,
+            system_rwlock,
+            notify_writer_closed,
+            patch_tx,
             ..
         } = self.inner.clone();
 
-        enum SeekResult {
+        enum InnerSeekResult {
             TargetReached,
             WorkflowCompleted,
             Interrupted,
         }
 
-        enum SeekError {
+        enum InnerSeekError {
             Runtime(AggregateError<TaskError>),
             Planning(PlannerError),
         }
 
         async fn find_and_run_workflow<I: Serialize + DeserializeOwned>(
             planner: &Planner,
-            sys: &Arc<RwLock<System>>,
+            sys_reader: &Arc<RwLock<System>>,
             tgt: &Value,
-            channel_tx: &Sender<Patch>,
+            patch_tx: &Sender<Patch>,
             sigint: &Interrupt,
-        ) -> Result<SeekResult, SeekError> {
+        ) -> Result<InnerSeekResult, InnerSeekError> {
             info!("searching workflow");
             let now = Instant::now();
             // Show pending changes at debug level
             if tracing::enabled!(tracing::Level::DEBUG) {
-                let system = sys.read().await;
+                let system = sys_reader.read().await;
                 // We need to compare the state by first serializing the
                 // current state to I, removing any internal variables.
                 // This is also done by the planner to avoid comparing
@@ -681,7 +681,7 @@ impl<O, I> Worker<O, Ready, I> {
                     .and_then(System::try_from)
                     .map_err(SerializationError::from)
                     .map_err(PlannerError::from)
-                    .map_err(SeekError::Planning)?;
+                    .map_err(InnerSeekError::Planning)?;
                 let changes = json_patch::diff(system.root(), tgt);
                 if !changes.0.is_empty() {
                     debug!("pending changes:");
@@ -692,18 +692,18 @@ impl<O, I> Worker<O, Ready, I> {
             }
 
             let workflow = {
-                let system = sys.read().await;
+                let system = sys_reader.read().await;
                 let res = planner.find_workflow::<I>(&system, tgt);
 
                 if let Err(PlannerError::NotFound) = res {
                     warn!(time = ?now.elapsed(), "workflow not found");
                 }
-                res.map_err(SeekError::Planning)?
+                res.map_err(InnerSeekError::Planning)?
             };
 
             if workflow.is_empty() {
                 debug!("nothing to do");
-                return Ok(SeekResult::TargetReached);
+                return Ok(InnerSeekResult::TargetReached);
             }
             info!(time = ?now.elapsed(), "workflow found");
             if tracing::enabled!(tracing::Level::DEBUG) {
@@ -716,28 +716,29 @@ impl<O, I> Worker<O, Ready, I> {
             let now = Instant::now();
             info!("executing workflow");
             let status = workflow
-                .execute(sys, channel_tx.clone(), sigint.clone())
+                .execute(sys_reader, patch_tx.clone(), sigint.clone())
                 .await
-                .map_err(SeekError::Runtime)?;
+                .map_err(InnerSeekError::Runtime)?;
 
             info!(time = ?now.elapsed(), "workflow executed successfully");
 
             if matches!(status, WorkflowStatus::Interrupted) {
-                return Ok(SeekResult::Interrupted);
+                return Ok(InnerSeekResult::Interrupted);
             }
 
-            Ok(SeekResult::WorkflowCompleted)
+            Ok(InnerSeekResult::WorkflowCompleted)
         }
 
-        let err_rx = writer_closed.clone();
         // Make sure dropping the future will interrupt the search
         let drop_interrupt = AutoInterrupt::from(interrupt);
 
         // Main seek_with_interrupt planning and execution loop
-        let handle: JoinHandle<Result<SeekStatus, FatalError>> = {
+        let handle: JoinHandle<Result<SeekStatus, SeekError>> = {
+            let err_rx = notify_writer_closed;
             let interrupt = drop_interrupt.clone();
-            let sys_reader = Arc::clone(&system);
-            let changes_tx = patches.clone();
+            // No writing allowed on this copy of the system lock
+            let sys_reader = system_rwlock;
+            let patch_tx = patch_tx;
 
             // We spawn a task rather than looping directly so we can catch panics happening
             // within the loop
@@ -752,33 +753,27 @@ impl<O, I> Worker<O, Ready, I> {
                             return Err(InternalError::from(anyhow!("state patch failed, worker state possibly tainted")))?;
                         }
 
-                        _ = interrupt.wait() => {
-                            // Trigger the workflow interrupt to propagate cancellation to running tasks
-                            seek_span.record("result", "interrupted");
-                            return Ok(SeekStatus::Interrupted);
-                        }
-
-                        res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &changes_tx, &interrupt) => {
+                        res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &patch_tx, &interrupt) => {
                             match res {
-                                Ok(SeekResult::TargetReached) => {
+                                Ok(InnerSeekResult::TargetReached) => {
                                     info!("target state applied");
                                     seek_span.record("result", "success");
                                     return Ok(SeekStatus::Success);
                                 }
-                                Ok(SeekResult::WorkflowCompleted) => {}
-                                Ok(SeekResult::Interrupted) => {
+                                Ok(InnerSeekResult::WorkflowCompleted) => {}
+                                Ok(InnerSeekResult::Interrupted) => {
                                     warn!("target state apply interrupted by user request");
                                     seek_span.record("result", "interrupted");
                                     return Ok(SeekStatus::Interrupted);
                                 }
-                                Err(SeekError::Planning(PlannerError::NotFound)) =>  {
+                                Err(InnerSeekError::Planning(PlannerError::NotFound)) =>  {
                                     seek_span.record("result", "workflow_not_found");
                                     return Ok(SeekStatus::NotFound);
                                 }
-                                Err(SeekError::Planning(PlannerError::Serialization(e))) =>  return Err(e)?,
-                                Err(SeekError::Planning(PlannerError::Internal(e))) =>  return Err(e)?,
-                                Err(SeekError::Planning(PlannerError::Task(e))) => return Err(e)?,
-                                Err(SeekError::Runtime(err)) => {
+                                Err(InnerSeekError::Planning(PlannerError::Serialization(e))) =>  return Err(e)?,
+                                Err(InnerSeekError::Planning(PlannerError::Internal(e))) =>  return Err(e)?,
+                                Err(InnerSeekError::Planning(PlannerError::Task(e))) => return Err(e)?,
+                                Err(InnerSeekError::Runtime(err)) => {
                                     let mut io = Vec::new();
                                     let mut other = Vec::new();
                                     let AggregateError (all) = err;
@@ -841,7 +836,7 @@ impl<O, I> Worker<O, Ready, I> {
     /// The method will result in a [`SeekError`] if a serialization issue occurs while converting
     /// between state types, if the worker runtime panics or there is an unexpected error during
     /// planning.
-    pub async fn seek_target(&mut self, tgt: I) -> Result<SeekStatus, FatalError>
+    pub async fn seek_target(&mut self, tgt: I) -> Result<SeekStatus, SeekError>
     where
         I: Serialize + DeserializeOwned,
     {
@@ -1102,5 +1097,74 @@ mod tests {
 
         let results = results.read().await;
         assert_eq!(*results, vec![Some(1), None]);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_streams_receive_all_changes() {
+        init();
+        let mut worker = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .unwrap();
+
+        // Create multiple streams
+        let mut stream1 = worker.follow();
+        let mut stream2 = worker.follow();
+        let mut stream3 = worker.follow();
+
+        let results1 = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let results2 = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let results3 = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+        // Spawn tasks to collect updates from each stream
+        let task1 = {
+            let results = Arc::clone(&results1);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                while let Some(update) = stream1.next().await {
+                    res.push(update);
+                }
+            })
+        };
+
+        let task2 = {
+            let results = Arc::clone(&results2);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                while let Some(update) = stream2.next().await {
+                    res.push(update);
+                }
+            })
+        };
+
+        let task3 = {
+            let results = Arc::clone(&results3);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                while let Some(update) = stream3.next().await {
+                    res.push(update);
+                }
+            })
+        };
+
+        // Execute the worker to generate state changes
+        let status = worker.seek_target(3).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
+
+        // Stop the worker to terminate streams
+        worker.stop();
+
+        // Wait for all tasks to complete
+        let _ = tokio::join!(task1, task2, task3);
+
+        // Verify all streams received the same updates
+        let results1 = results1.read().await;
+        let results2 = results2.read().await;
+        let results3 = results3.read().await;
+
+        let expected = vec![1, 2, 3];
+        assert_eq!(*results1, expected);
+        assert_eq!(*results2, expected);
+        assert_eq!(*results3, expected);
     }
 }

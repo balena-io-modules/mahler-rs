@@ -414,7 +414,7 @@
 //!
 //! When calling [Worker::seek_target](`worker::Worker::seek_target`), there are two types of
 //! errors that may happen.
-//! - A [FatalError](`worker::FatalError`) is an unrecoverable error that occurs if there is some
+//! - A [SeekError](`worker::SeekError`) is an unrecoverable error that occurs if there is some
 //!   [issue serializing](`errors::SerializationError`) the current or target state, there is a problem
 //!   when [initializing extractors](`errors::ExtractionError`), or [expanding a method](`errors::MethodError`)
 //!   or there is an unexpected [internal error](`errors::InternalError`).

@@ -83,7 +83,7 @@ impl<O, I> Worker<O, Ready, I> {
     where
         I: Serialize + DeserializeOwned,
     {
-        find_workflow::<I>(&self.inner.system, &self.inner.planner, tgt).await
+        find_workflow::<I>(&self.inner.system_rwlock, &self.inner.planner, tgt).await
     }
 
     async fn run_task_with_system(
@@ -167,7 +167,7 @@ impl<O, I> Worker<O, Ready, I> {
     where
         O: Serialize + DeserializeOwned,
     {
-        let mut system = self.inner.system.read().await.clone();
+        let mut system = self.inner.system_rwlock.read().await.clone();
         let task_id = task.id().to_string();
         let Context { args, .. } = task.context_mut();
         let path = self

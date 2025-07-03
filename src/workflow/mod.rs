@@ -173,12 +173,12 @@ impl Workflow {
 
     pub(crate) async fn execute(
         self,
-        system: &Arc<RwLock<System>>,
-        channel: Sender<Patch>,
+        sys_reader: &Arc<RwLock<System>>,
+        patch_tx: Sender<Patch>,
         interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
         self.0
-            .execute(system, channel, interrupt)
+            .execute(sys_reader, patch_tx, interrupt)
             .await
             .map(|s| s.into())
     }
