@@ -36,7 +36,7 @@
 //! #[derive(Serialize, Deserialize)]
 //! struct StateModel;
 //!
-//! let worker = Worker::new()
+//! let mut worker = Worker::new()
 //!         // assign possible jobs to worker
 //!         .job("", update(global))
 //!         .job("/{foo}", update(foo))
@@ -51,7 +51,7 @@
 //!
 //! # tokio_test::block_on(async {
 //! // Control the system by providing a new target state
-//! let worker = worker.seek_target(StateModel { /* .. */ }).await.unwrap();
+//! worker.seek_target(StateModel { /* .. */ }).await.unwrap();
 //! # })
 //! ```
 //!

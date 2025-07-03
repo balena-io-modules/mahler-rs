@@ -1,7 +1,6 @@
 //! Automated planning and execution of task workflows
 
 use anyhow::anyhow;
-use async_trait::async_trait;
 use json_patch::Patch;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -26,11 +25,10 @@ use crate::errors::{IOError, InternalError, SerializationError};
 use crate::planner::{Domain, Error as PlannerError, Planner};
 use crate::system::{Resources, System};
 use crate::task::{Error as TaskError, Job};
-use crate::workflow::{channel, AggregateError, Interrupt, Sender, WorkflowStatus};
+use crate::workflow::{channel, AggregateError, AutoInterrupt, Interrupt, Sender, WorkflowStatus};
 
 pub mod prelude {
     //! Types and traits for setting up a Worker
-    pub use super::SeekTarget;
 }
 
 /// A panic happened in the Worker runtime
@@ -90,25 +88,7 @@ impl PartialEq for SeekStatus {
     }
 }
 
-#[async_trait]
-/// Helper trait to chain worker calls
-pub trait SeekTarget<O, I = O> {
-    /// Look for a workflow for the given target and execute it
-    async fn seek_target(self, tgt: I) -> Result<Worker<O, Ready, I>, FatalError>;
-}
-
 impl Eq for SeekStatus {}
-
-#[derive(Default)]
-/// Helper type to interrupt the Worker on Drop
-struct AutoInterrupt(Interrupt);
-
-impl Drop for AutoInterrupt {
-    fn drop(&mut self) {
-        // Trigger the interrupt flag when the worker is dropped
-        self.0.trigger();
-    }
-}
 
 #[derive(Debug, Clone)]
 /// Helper type to indicate that a state change happened on the worker
@@ -131,14 +111,13 @@ pub struct Uninitialized {
 /// This is the state where the `Worker` moves to after receiving an initial state.
 ///
 /// At this point the Worker is ready to start seeking a target state
+#[derive(Clone)]
 pub struct Ready {
     planner: Planner,
     system: Arc<RwLock<System>>,
     updates: broadcast::Sender<UpdateEvent>,
     patches: Sender<Patch>,
     writer_closed: Arc<Notify>,
-    interrupt: AutoInterrupt,
-    status: SeekStatus,
 }
 
 /// Final state of a Worker
@@ -173,7 +152,7 @@ impl WorkerState for Stopped {}
 /// use std::collections::HashMap;
 /// use serde::{Deserialize, Serialize};
 ///
-/// use mahler::worker::{Worker, SeekTarget, SeekStatus};
+/// use mahler::worker::{Worker, SeekStatus};
 /// use mahler::task::prelude::*;
 ///
 /// #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -188,7 +167,7 @@ impl WorkerState for Stopped {}
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     // create a new uninitialized worker
-///     let worker = Worker::new()
+///     let mut worker = Worker::new()
 ///         // configure jobs
 ///         .job("/{counter}", update(plus_one))
 ///         .job("/{counter}", update(plus_two))
@@ -197,17 +176,20 @@ impl WorkerState for Stopped {}
 ///             ("a".to_string(), 0),
 ///             ("b".to_string(), 0),
 ///         ])))
-///         // start searching for a target
-///         .seek_target(Counters(HashMap::from([
-///             ("a".to_string(), 1),
-///             ("b".to_string(), 2),
-///         ])))
-///         // wait for a result
-///         .await
 ///         // fail if something bad happens
-///         .with_context(|| "failed to reach target state")?;
+///         .with_context(|| "failed to initialize worker")?;
 ///
-///     if matches!(worker.status(), SeekStatus::Success) {
+///     // start searching for a target
+///     let status = worker.seek_target(Counters(HashMap::from([
+///         ("a".to_string(), 1),
+///         ("b".to_string(), 2),
+///     ])))
+///     // wait for a result
+///     .await
+///     // fail if something bad happens
+///     .with_context(|| "failed to reach target state")?;
+///
+///     if matches!(status, SeekStatus::Success) {
 ///         println!("SUCCESS!");
 ///     }
 ///
@@ -453,8 +435,6 @@ impl<O> Worker<O, Uninitialized> {
             updates,
             patches: tx,
             writer_closed,
-            interrupt: AutoInterrupt::default(),
-            status: SeekStatus::Success,
         }))
     }
 }
@@ -546,7 +526,7 @@ impl<O, I> Worker<O, Ready, I> {
     ///
     /// ```rust,no_run
     /// use serde::{Deserialize, Serialize};
-    /// use mahler::worker::{Worker, SeekTarget};
+    /// use mahler::worker::Worker;
     ///
     /// #[derive(Debug, Serialize, Deserialize)]
     /// struct SystemState;
@@ -555,10 +535,12 @@ impl<O, I> Worker<O, Ready, I> {
     /// struct TargetState;
     ///
     /// # tokio_test::block_on(async move {
-    /// let worker = Worker::new()
+    /// let mut worker = Worker::new()
     ///     // todo: configure jobs
     ///     .initial_state(SystemState {/* .. */})
-    ///     .seek_target(TargetState {/* .. */})
+    ///     .unwrap();
+    ///
+    /// worker.seek_target(TargetState {/* .. */})
     ///     .await
     ///     .unwrap();
     ///
@@ -568,7 +550,7 @@ impl<O, I> Worker<O, Ready, I> {
     /// let new_target = state;
     ///
     /// // trigger new search
-    /// worker.seek_target(new_target);
+    /// worker.seek_target(new_target).await.unwrap();
     /// # })
     /// ```
     ///
@@ -593,14 +575,14 @@ impl<O, I> Worker<O, Ready, I> {
     ///
     /// ```rust,no_run
     /// use serde::{Deserialize, Serialize};
-    /// use mahler::worker::{Worker, SeekTarget};
+    /// use mahler::worker::Worker;
     /// use tokio_stream::StreamExt;
     ///
     /// #[derive(Debug, Serialize, Deserialize)]
     /// struct SystemState;
     ///
     /// # tokio_test::block_on(async move {
-    /// let worker = Worker::new()
+    /// let mut worker = Worker::new()
     ///     // todo: configure jobs
     ///     .initial_state(SystemState {/* .. */}).unwrap();
     ///
@@ -613,7 +595,7 @@ impl<O, I> Worker<O, Ready, I> {
     /// });
     ///
     /// // Start state search
-    /// let worker = worker.seek_target(SystemState {/* .. */})
+    /// worker.seek_target(SystemState {/* .. */})
     ///     .await
     ///     .unwrap();
     /// # })
@@ -625,14 +607,6 @@ impl<O, I> Worker<O, Ready, I> {
         follow_worker(self.inner.updates.clone(), Arc::clone(&self.inner.system))
     }
 
-    /// Return the result of the last worker run
-    ///
-    /// It will return `SeekStatus::Success` for a newly initialized `Worker`
-    pub fn status(&self) -> &SeekStatus {
-        &self.inner.status
-    }
-
-    // #[instrument(name = "seek_target", skip_all, fields(result=field::Empty) err)]
     /// Trigger system changes by providing a new target state and interrupt signal
     ///
     /// When called, this method tells the worker to look for a plan for the given
@@ -642,6 +616,8 @@ impl<O, I> Worker<O, Ready, I> {
     ///
     /// The provided `interrupt` allows external cancellation of the worker execution.
     /// When triggered, the worker will gracefully terminate and return [`SeekStatus::Interrupted`].
+    ///
+    /// The worker will also be interrupted if the future is dropped, providing automatic cancellation.
     ///
     /// If no plan is found, the search terminates with a [`SeekStatus::NotFound`].
     ///
@@ -654,10 +630,10 @@ impl<O, I> Worker<O, Ready, I> {
     /// between state types, if the worker runtime panics or there is an unexpected error during
     /// planning.
     pub async fn seek_with_interrupt(
-        self,
+        &mut self,
         tgt: I,
         interrupt: Interrupt,
-    ) -> Result<Worker<O, Ready, I>, FatalError>
+    ) -> Result<SeekStatus, FatalError>
     where
         I: Serialize + DeserializeOwned,
     {
@@ -666,12 +642,10 @@ impl<O, I> Worker<O, Ready, I> {
         let Ready {
             planner,
             system,
-            updates,
             writer_closed,
             patches,
-            interrupt: drop_interrupt,
             ..
-        } = self.inner;
+        } = self.inner.clone();
 
         enum SeekResult {
             TargetReached,
@@ -688,7 +662,7 @@ impl<O, I> Worker<O, Ready, I> {
             planner: &Planner,
             sys: &Arc<RwLock<System>>,
             tgt: &Value,
-            channel: &Sender<Patch>,
+            channel_tx: &Sender<Patch>,
             sigint: &Interrupt,
         ) -> Result<SeekResult, SeekError> {
             info!("searching workflow");
@@ -742,7 +716,7 @@ impl<O, I> Worker<O, Ready, I> {
             let now = Instant::now();
             info!("executing workflow");
             let status = workflow
-                .execute(sys, channel.clone(), sigint.clone())
+                .execute(sys, channel_tx.clone(), sigint.clone())
                 .await
                 .map_err(SeekError::Runtime)?;
 
@@ -756,13 +730,14 @@ impl<O, I> Worker<O, Ready, I> {
         }
 
         let err_rx = writer_closed.clone();
+        // Make sure dropping the future will interrupt the search
+        let drop_interrupt = AutoInterrupt::from(interrupt);
 
         // Main seek_with_interrupt planning and execution loop
-        let handle: JoinHandle<Result<(Planner, SeekStatus), FatalError>> = {
-            let drop_interrupt_signal = drop_interrupt.0.clone();
-            let workflow_interrupt = interrupt.clone();
+        let handle: JoinHandle<Result<SeekStatus, FatalError>> = {
+            let interrupt = drop_interrupt.clone();
             let sys_reader = Arc::clone(&system);
-            let changes = patches.clone();
+            let changes_tx = patches.clone();
 
             // We spawn a task rather than looping directly so we can catch panics happening
             // within the loop
@@ -777,33 +752,28 @@ impl<O, I> Worker<O, Ready, I> {
                             return Err(InternalError::from(anyhow!("state patch failed, worker state possibly tainted")))?;
                         }
 
-                        _ = workflow_interrupt.wait() => {
-                            return Ok((planner, SeekStatus::Interrupted));
-                        }
-
-                        _ = drop_interrupt_signal.wait() => {
+                        _ = interrupt.wait() => {
                             // Trigger the workflow interrupt to propagate cancellation to running tasks
-                            workflow_interrupt.trigger();
                             seek_span.record("result", "interrupted");
-                            return Ok((planner, SeekStatus::Interrupted));
+                            return Ok(SeekStatus::Interrupted);
                         }
 
-                        res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &changes, &workflow_interrupt) => {
+                        res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &changes_tx, &interrupt) => {
                             match res {
                                 Ok(SeekResult::TargetReached) => {
                                     info!("target state applied");
                                     seek_span.record("result", "success");
-                                    return Ok((planner, SeekStatus::Success));
+                                    return Ok(SeekStatus::Success);
                                 }
                                 Ok(SeekResult::WorkflowCompleted) => {}
                                 Ok(SeekResult::Interrupted) => {
                                     warn!("target state apply interrupted by user request");
                                     seek_span.record("result", "interrupted");
-                                    return Ok((planner, SeekStatus::Interrupted));
+                                    return Ok(SeekStatus::Interrupted);
                                 }
                                 Err(SeekError::Planning(PlannerError::NotFound)) =>  {
                                     seek_span.record("result", "workflow_not_found");
-                                    return Ok((planner, SeekStatus::NotFound));
+                                    return Ok(SeekStatus::NotFound);
                                 }
                                 Err(SeekError::Planning(PlannerError::Serialization(e))) =>  return Err(e)?,
                                 Err(SeekError::Planning(PlannerError::Internal(e))) =>  return Err(e)?,
@@ -832,7 +802,7 @@ impl<O, I> Worker<O, Ready, I> {
                                     if !io.is_empty() {
                                         warn!("target state apply interrupted due to error");
                                         seek_span.record("result", "aborted");
-                                        return Ok((planner, SeekStatus::Aborted(io)));
+                                        return Ok(SeekStatus::Aborted(io))
                                     }
 
                                     // If we got here, all errors were of type ConditionNotMet
@@ -847,54 +817,35 @@ impl<O, I> Worker<O, Ready, I> {
             }.instrument(info_span!("seek_target", result=field::Empty)))
         };
 
-        let (planner, status) = match handle.await {
+        let status = match handle.await {
             Ok(Ok(res)) => Ok(res),
             Ok(Err(e)) => Err(e),
             Err(e) => Err(Panicked(e))?,
         }?;
 
-        Ok(Worker::from_inner(Ready {
-            planner,
-            system,
-            updates,
-            patches,
-            writer_closed,
-            interrupt: AutoInterrupt::default(),
-            status,
-        }))
+        Ok(status)
     }
 
     /// Trigger system changes by providing a new target state for the worker
-    ///
-    /// This is a convenience method that calls [`seek_with_interrupt`](Self::seek_with_interrupt)
-    /// with a new default interrupt that will never be triggered externally.
     ///
     /// When called, this method tells the worker to look for a plan for the given
     /// target. If a plan is found, the worker then will try to execute the resulting workflow and
     /// and terminate if interrupted or a runtime error occurs. If a requirement changes between
     /// planning and runtime, the Worker triggers a re-plan.
     ///
+    /// The worker will be interrupted if the future is dropped, providing automatic cancellation.
+    ///
     /// If no plan is found, the search terminates with a [`SeekStatus::NotFound`].
     ///
     /// # Errors
-    /// The method will result in a [`FatalError`] if a serialization issue occurs while converting
+    /// The method will result in a [`SeekError`] if a serialization issue occurs while converting
     /// between state types, if the worker runtime panics or there is an unexpected error during
     /// planning.
-    pub async fn seek_target(self, tgt: I) -> Result<Worker<O, Ready, I>, FatalError>
+    pub async fn seek_target(&mut self, tgt: I) -> Result<SeekStatus, FatalError>
     where
         I: Serialize + DeserializeOwned,
     {
         self.seek_with_interrupt(tgt, Interrupt::new()).await
-    }
-}
-
-#[async_trait]
-impl<O: Send, I: Serialize + DeserializeOwned + Send> SeekTarget<O, I>
-    for Result<Worker<O, Ready, I>, SerializationError>
-{
-    async fn seek_target(self, tgt: I) -> Result<Worker<O, Ready, I>, FatalError> {
-        let worker = self?;
-        worker.seek_target(tgt).await
     }
 }
 
@@ -958,12 +909,15 @@ mod tests {
     #[tokio::test]
     async fn test_worker_complex_state() {
         init();
-        let worker = Worker::new()
+        let mut worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .initial_state(Counters(HashMap::from([
                 ("one".to_string(), 0),
                 ("two".to_string(), 0),
             ])))
+            .unwrap();
+
+        let status = worker
             .seek_target(Counters(HashMap::from([
                 ("one".to_string(), 2),
                 ("two".to_string(), 0),
@@ -971,7 +925,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(worker.status(), &SeekStatus::Success);
+        assert_eq!(status, SeekStatus::Success);
         let state = worker.state().await.unwrap();
         assert_eq!(
             state,
@@ -985,20 +939,19 @@ mod tests {
     #[tokio::test]
     async fn test_worker_bug() {
         init();
-        let res = Worker::new()
+        let mut worker = Worker::new()
             .job("", update(buggy_plus_one))
             .initial_state(0)
-            .seek_target(2)
-            .await
             .unwrap();
 
-        assert!(matches!(res.status(), &SeekStatus::NotFound))
+        let status = worker.seek_target(2).await.unwrap();
+        assert!(matches!(status, SeekStatus::NotFound));
     }
 
     #[tokio::test]
     async fn test_worker_follow_updates() {
         init();
-        let worker = Worker::new()
+        let mut worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
             .unwrap();
@@ -1020,8 +973,8 @@ mod tests {
         }
 
         // Wait for worker to finish
-        let worker = worker.seek_target(2).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::Success);
+        let status = worker.seek_target(2).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
 
         let results = results.read().await;
         assert_eq!(*results, vec![Some(1), Some(2)]);
@@ -1030,7 +983,7 @@ mod tests {
     #[tokio::test]
     async fn test_worker_follow_best_effort_loss() {
         init();
-        let worker = Worker::new()
+        let mut worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
             .unwrap();
@@ -1056,8 +1009,8 @@ mod tests {
         }
 
         // Wait for worker to finish
-        let worker = worker.seek_target(100).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::Success);
+        let status = worker.seek_target(100).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
 
         let results = results.read().await;
         assert_eq!(
@@ -1089,7 +1042,7 @@ mod tests {
             })
         }
 
-        let worker = Worker::new()
+        let mut worker = Worker::new()
             .job("", update(sleepy_plus_one))
             .initial_state(0)
             .unwrap();
@@ -1118,7 +1071,7 @@ mod tests {
     #[tokio::test]
     async fn test_follow_stream_closes_on_worker_end() {
         init();
-        let worker = Worker::new()
+        let mut worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
             .unwrap();
@@ -1139,78 +1092,15 @@ mod tests {
             });
         }
 
-        let worker = worker.seek_target(1).await.unwrap();
+        let status = worker.seek_target(1).await.unwrap();
 
         // Wait for worker to finish
-        assert_eq!(worker.status(), &SeekStatus::Success);
+        assert_eq!(status, SeekStatus::Success);
 
         // Close the stream
         worker.stop();
 
         let results = results.read().await;
         assert_eq!(*results, vec![Some(1), None]);
-    }
-
-    #[tokio::test]
-    async fn test_seek_with_interrupt_user_interrupt() {
-        init();
-
-        fn sleepy_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
-            if *counter < tgt {
-                *counter += 1;
-            }
-
-            Effect::of(counter).with_io(|counter| async {
-                sleep(Duration::from_millis(100)).await;
-                Ok(counter)
-            })
-        }
-
-        let worker = Worker::new()
-            .job("", update(sleepy_plus_one))
-            .initial_state(0)
-            .unwrap();
-
-        let interrupt = Interrupt::new();
-        let interrupt_clone = interrupt.clone();
-
-        // Trigger interrupt after a short delay
-        tokio::spawn(async move {
-            sleep(Duration::from_millis(50)).await;
-            interrupt_clone.trigger();
-        });
-
-        let worker = worker.seek_with_interrupt(10, interrupt).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::Interrupted);
-
-        // Should not have reached the target due to interrupt
-        let state: i32 = worker.state().await.unwrap();
-        assert!(state < 10, "Expected state {state} to be less than 10");
-    }
-
-    #[tokio::test]
-    async fn test_seek_with_interrupt_vs_seek_target() {
-        init();
-
-        let worker1 = Worker::new()
-            .job("", update(plus_one))
-            .initial_state(0)
-            .unwrap();
-
-        let worker2 = Worker::new()
-            .job("", update(plus_one))
-            .initial_state(0)
-            .unwrap();
-
-        // Test seek_target (no external interrupt)
-        let result1 = worker1.seek_target(3).await.unwrap();
-        assert_eq!(result1.status(), &SeekStatus::Success);
-        assert_eq!(result1.state().await.unwrap(), 3);
-
-        // Test seek_with_interrupt (no external interrupt triggered)
-        let interrupt = Interrupt::new();
-        let result2 = worker2.seek_with_interrupt(3, interrupt).await.unwrap();
-        assert_eq!(result2.status(), &SeekStatus::Success);
-        assert_eq!(result2.state().await.unwrap(), 3);
     }
 }
