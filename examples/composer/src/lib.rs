@@ -712,7 +712,7 @@ mod tests {
                         c.names.iter().any(|names| {
                             names
                                 .iter()
-                                .any(|name| name.starts_with(&format!("/{}_", PROJECT_NAME)))
+                                .any(|name| name.starts_with(&format!("/{PROJECT_NAME}_")))
                         })
                     })
                     .collect()
@@ -794,7 +794,7 @@ mod tests {
         assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
 
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await
             .unwrap();
         assert_eq!(container.id, state.services.get("my-service").unwrap().id);
@@ -952,7 +952,7 @@ mod tests {
         assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
 
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await
             .unwrap();
         assert_eq!(container.id, state.services.get("my-service").unwrap().id);
@@ -984,7 +984,7 @@ mod tests {
 
         // The container ids should match
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await
             .unwrap();
         assert_eq!(old_container_id, container.id);
@@ -1011,7 +1011,7 @@ mod tests {
 
         // The container ids should match
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await
             .unwrap();
         assert_eq!(old_container_id, container.id);
@@ -1032,7 +1032,7 @@ mod tests {
 
         // The container should no longer exist
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await;
         assert!(matches!(
             container,

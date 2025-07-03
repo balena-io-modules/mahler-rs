@@ -111,6 +111,6 @@ async fn main() -> Result<()> {
         ))
     );
 
-    println!("The system state is now {:?}", state);
+    println!("The system state is now {state:?}");
     Ok(())
 }
