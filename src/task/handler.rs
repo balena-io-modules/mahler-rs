@@ -2,7 +2,7 @@ use json_patch::Patch;
 use serde::Serialize;
 
 use super::from_system::FromSystem;
-use super::{Action, Context, Effect, Error, Method, Task};
+use super::{Action, Context, Effect, Error, Expansion, Method, Task};
 use crate::system::System;
 
 /// Trait for functions that can be used as worker jobs
@@ -122,6 +122,13 @@ macro_rules! impl_action_handler {
     };
 }
 
+/// Trait for labeling Method outputs
+pub trait WithExpansion {
+    fn expansion() -> Expansion {
+        Expansion::default()
+    }
+}
+
 impl_action_handler!(T1,);
 impl_action_handler!(T1, T2);
 impl_action_handler!(T1, T2, T3);
@@ -147,7 +154,7 @@ macro_rules! impl_method_handler {
         impl<F, $($ty,)* Res> Handler<($($ty,)*), Vec<Task>> for F
         where
             F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
-            Res: Into<Effect<Vec<Task>, Error>>,
+            Res: Into<Effect<Vec<Task>, Error>> + WithExpansion,
             $($ty: FromSystem,)*
         {
 
@@ -173,7 +180,7 @@ macro_rules! impl_method_handler {
             }
 
             fn into_task(self) -> Task {
-                Method::new(self, Context::default()).into()
+                Method::new(self, Context::default(), Res::expansion()).into()
             }
         }
     };
