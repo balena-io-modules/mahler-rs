@@ -357,7 +357,7 @@
 //! }
 //! ```
 //!
-//! ## Compound Jobs
+//! ## Methods
 //!
 //! Sometimes it may be desirable to re-use jobs in different contexts, or combine multiple jobs in
 //! order to guide the planner. This can be achieved by the use of compound jobs, called
@@ -409,6 +409,34 @@
 //! a reverse search for the paths corresponding to the tasks returned by the
 //! method. Failing to do this will result in an failure when planning.
 //! </div>
+//!
+//! ### Controlling method expansion
+//!
+//! Methods can control how their returned tasks are expanded for execution using wrapper types
+//! [`task::Sequence`] and [`task::Set`]
+//!
+//! ```rust
+//! use mahler::extract::{View, Target};
+//! use mahler::task::{Task, Sequence, Set, Handler};
+//!
+//! // Force sequential execution
+//! fn sequential_ops() -> Sequence {
+//!     vec![task_one.into_task(), task_two.into_task()].into()
+//! }
+//!
+//! // Allow concurrent execution regardless of task scoping
+//! fn independent_ops() -> Set {
+//!     vec![task_one.into_task(), task_two.into_task()].into()
+//! }
+//!
+//! // Use automatic detection based on task scoping (default)
+//! fn auto_ops() -> Vec<Task> {
+//!     vec![task_one.into_task(), task_two.into_task()]
+//! }
+//!
+//! fn task_one() {}
+//! fn task_two() {}
+//! ```
 //!
 //! # Error handling
 //!

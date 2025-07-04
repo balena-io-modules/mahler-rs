@@ -122,7 +122,11 @@ macro_rules! impl_action_handler {
     };
 }
 
-/// Trait for labeling Method outputs
+/// Trait for controlling method task expansion behavior
+///
+/// This trait allows method return types to specify how their tasks
+/// should be expanded for execution. The default behavior is to detect
+/// concurrency automatically based on task scoping.
 pub trait WithExpansion {
     fn expansion() -> Expansion {
         Expansion::default()

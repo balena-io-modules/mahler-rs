@@ -72,7 +72,7 @@ impl<const N: usize> From<[Task; N]> for Effect<Vec<Task>, Error> {
     }
 }
 
-impl<const N: usize> WithExpansion for Vec<[Task; N]> {}
+impl<const N: usize> WithExpansion for [Task; N] {}
 
 // Allow methods to return a single task
 impl From<Task> for Effect<Vec<Task>, Error> {

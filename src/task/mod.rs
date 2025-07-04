@@ -1,4 +1,12 @@
 //! Types and traits for declaring and operating with Jobs and Tasks
+//!
+//! ## Method Expansion Control
+//!
+//! Methods can control how their tasks are expanded for execution using wrapper types:
+//!
+//! - [`Sequence`]: Forces sequential execution regardless of task scoping
+//! - [`Set`]: Allows concurrent execution regardless of task scoping
+//! - [`Vec<Task>`]: Uses automatic detection based on task scoping (default)
 mod context;
 mod description;
 mod effect;
@@ -38,7 +46,7 @@ pub mod prelude {
     pub use super::handler::*;
     pub use super::job::{any, create, delete, none, update};
     pub use super::with_io::*;
-    pub use super::Task;
+    pub use super::{Sequence, Set, Task};
 }
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
@@ -143,14 +151,75 @@ impl Display for Action {
 }
 
 #[derive(Clone, Debug, Default)]
+/// Controls how method tasks are expanded for execution
 pub enum Expansion {
     #[default]
-    /// Detect the expansion from the scoping of the tasks
+    /// Detect concurrency from task scoping automatically
     Detect,
-    /// Tasks must be executed in sequence
+    /// Force sequential execution regardless of task scoping
     Sequential,
-    /// Tasks can be executed concurrently independent of their scoping
+    /// Allow concurrent execution regardless of task scoping
     Independent,
+}
+
+/// Wrapper type that forces sequential execution of tasks
+///
+/// Use this when you need to guarantee that tasks execute in order,
+/// even if they would normally support concurrency based on their scoping.
+pub struct Sequence(Vec<Task>);
+
+impl From<Vec<Task>> for Sequence {
+    fn from(vec: Vec<Task>) -> Self {
+        Self(vec)
+    }
+}
+
+impl<const N: usize> From<[Task; N]> for Sequence {
+    fn from(arr: [Task; N]) -> Self {
+        Self(Vec::from(arr))
+    }
+}
+
+impl From<Sequence> for Effect<Vec<Task>, Error> {
+    fn from(seq: Sequence) -> Effect<Vec<Task>, Error> {
+        Effect::of(seq.0)
+    }
+}
+
+impl WithExpansion for Sequence {
+    fn expansion() -> Expansion {
+        Expansion::Sequential
+    }
+}
+
+/// Wrapper type that allows concurrent execution of tasks
+///
+/// Use this when you want to enable concurrent execution of tasks
+/// regardless of their individual scoping requirements.
+pub struct Set(Vec<Task>);
+
+impl From<Vec<Task>> for Set {
+    fn from(vec: Vec<Task>) -> Self {
+        Self(vec)
+    }
+}
+
+impl<const N: usize> From<[Task; N]> for Set {
+    fn from(arr: [Task; N]) -> Self {
+        Self(Vec::from(arr))
+    }
+}
+
+impl From<Set> for Effect<Vec<Task>, Error> {
+    fn from(par: Set) -> Effect<Vec<Task>, Error> {
+        Effect::of(par.0)
+    }
+}
+
+impl WithExpansion for Set {
+    fn expansion() -> Expansion {
+        Expansion::Independent
+    }
 }
 
 #[derive(Clone)]
