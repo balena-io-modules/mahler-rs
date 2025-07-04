@@ -38,7 +38,7 @@ pub mod prelude {
     pub use super::handler::*;
     pub use super::job::{any, create, delete, none, update};
     pub use super::with_io::*;
-    pub use super::Task;
+    pub use super::{Pool, Sequence, Task};
 }
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
@@ -151,6 +151,60 @@ pub enum Expansion {
     Sequential,
     /// Tasks can be executed in parallel independent of their scoping
     Independent,
+}
+
+/// A sequence of tasks to execute in order
+pub struct Sequence(Vec<Task>);
+
+impl From<Vec<Task>> for Sequence {
+    fn from(vec: Vec<Task>) -> Self {
+        Self(vec)
+    }
+}
+
+impl<const N: usize> From<[Task; N]> for Sequence {
+    fn from(arr: [Task; N]) -> Self {
+        Self(Vec::from(arr))
+    }
+}
+
+impl From<Sequence> for Effect<Vec<Task>, Error> {
+    fn from(seq: Sequence) -> Effect<Vec<Task>, Error> {
+        Effect::of(seq.0)
+    }
+}
+
+impl WithExpansion for Sequence {
+    fn expansion() -> Expansion {
+        Expansion::Sequential
+    }
+}
+
+/// A pool of potentially parallelizable tasks independent of scoping
+pub struct Pool(Vec<Task>);
+
+impl From<Vec<Task>> for Pool {
+    fn from(vec: Vec<Task>) -> Self {
+        Self(vec)
+    }
+}
+
+impl<const N: usize> From<[Task; N]> for Pool {
+    fn from(arr: [Task; N]) -> Self {
+        Self(Vec::from(arr))
+    }
+}
+
+impl From<Pool> for Effect<Vec<Task>, Error> {
+    fn from(par: Pool) -> Effect<Vec<Task>, Error> {
+        Effect::of(par.0)
+    }
+}
+
+impl WithExpansion for Pool {
+    fn expansion() -> Expansion {
+        Expansion::Parallel
+    }
 }
 
 #[derive(Clone)]
