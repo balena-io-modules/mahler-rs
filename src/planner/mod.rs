@@ -252,12 +252,13 @@ impl Planner {
 
                 // The method tasks can be executed concurrently if no task paths conflict
                 // and are all scoped (i.e. none of them requires access to System)
-                let parallelizable = paths_are_non_conflicting(
-                    extended_tasks
-                        .iter()
-                        .map(|task| task.path().clone())
-                        .collect(),
-                ) && extended_tasks.iter().all(|task| task.is_scoped());
+                let parallelizable =
+                    paths_are_non_conflicting(
+                        extended_tasks
+                            .iter()
+                            .map(|task| task.path().clone())
+                            .collect(),
+                    ) && extended_tasks.iter().all(|task| task.is_scoped(cur_state));
 
                 let mut cur_plan = cur_plan;
 
@@ -371,7 +372,7 @@ impl Planner {
                                         workflow,
                                         changes,
                                         path: task.path().clone(),
-                                        parallelizable: task.is_scoped(),
+                                        parallelizable: task.is_scoped(&cur_state),
                                         is_method: task.is_method(),
                                         operation: job.operation().clone(),
                                         priority: job.priority(),
