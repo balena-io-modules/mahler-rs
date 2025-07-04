@@ -1,6 +1,6 @@
 use json_patch::Patch;
 
-use super::Task;
+use super::{Task, WithExpansion};
 
 use super::effect::Effect;
 use super::errors::Error;
@@ -62,6 +62,8 @@ impl From<Vec<Task>> for Effect<Vec<Task>, Error> {
     }
 }
 
+impl WithExpansion for Vec<Task> {}
+
 // Allow methods to return a task slice
 // and this will convert them into an effect
 impl<const N: usize> From<[Task; N]> for Effect<Vec<Task>, Error> {
@@ -69,6 +71,8 @@ impl<const N: usize> From<[Task; N]> for Effect<Vec<Task>, Error> {
         Effect::of(slice.into())
     }
 }
+
+impl<const N: usize> WithExpansion for Vec<[Task; N]> {}
 
 // Allow methods to return a single task
 impl From<Task> for Effect<Vec<Task>, Error> {
@@ -87,6 +91,8 @@ where
     }
 }
 
+impl<T> WithExpansion for Option<T> where T: Into<Effect<Vec<Task>, Error>> {}
+
 impl<T, E> From<Result<T, E>> for Effect<Vec<Task>, Error>
 where
     T: Into<Effect<Vec<Task>, Error>>,
@@ -97,3 +103,5 @@ where
             .unwrap_or_else(|e| Effect::from_error(MethodError::new(e).into()))
     }
 }
+
+impl<T, E> WithExpansion for Result<T, E> where T: Into<Effect<Vec<Task>, Error>> {}

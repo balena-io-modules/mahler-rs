@@ -13,7 +13,7 @@ use tracing::{error, field, instrument, trace, trace_span, warn, Level, Span};
 use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
 use crate::system::System;
-use crate::task::{self, Context, Operation, Task};
+use crate::task::{self, Context, Expansion, Operation, Task};
 use crate::workflow::{WorkUnit, Workflow};
 use crate::Dag;
 
@@ -258,15 +258,18 @@ impl Planner {
                     extended_tasks.iter().map(|t| t.path().clone()).collect(),
                 );
 
-                // The method is parallelizable if all task paths are in the non-conflicting list
-                // and are all scoped (i.e. none of them requires access to System)
-                let mut parallelizable = true;
-                for task in &extended_tasks {
-                    if !task.is_scoped(cur_state) || !non_conflicting_paths.contains(task.path()) {
-                        parallelizable = false;
-                        break;
-                    }
-                }
+                let parallelizable = if matches!(method.expansion(), Expansion::Sequential) {
+                    false
+                } else {
+                    // The method is parallelizable if all tasks are scoped (i.e. they don't need
+                    // access to System) or the method is labelled as independent and all paths are
+                    // in the non-conflicting list
+                    extended_tasks.iter().all(|task| {
+                        (task.is_scoped(cur_state)
+                            || matches!(method.expansion(), Expansion::Independent))
+                            && non_conflicting_paths.contains(task.path())
+                    })
+                };
 
                 let mut cur_plan = cur_plan;
 
