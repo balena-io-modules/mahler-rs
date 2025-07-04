@@ -146,7 +146,6 @@ impl Display for Action {
 /// A compound task, i.e. a task that can be expanded into child tasks
 pub struct Method {
     id: &'static str,
-    scoped: bool,
     context: Context,
     expand: Expand,
     describe: Describe,
@@ -157,7 +156,6 @@ impl fmt::Debug for Method {
         f.debug_struct("Method")
             .field("id", &self.id)
             .field("context", &self.context)
-            .field("scoped", &self.scoped)
             .finish()
     }
 }
@@ -170,7 +168,6 @@ impl Method {
         let id = method.id();
         Method {
             id,
-            scoped: method.is_scoped(),
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
                 method.call(system, context).pure()
@@ -274,10 +271,15 @@ impl Task {
     /// Return true if the task only operates within its assigned path
     ///
     /// A scoped task is parallelizable
-    pub fn is_scoped(&self) -> bool {
+    pub fn is_scoped(&self, system: &System) -> bool {
         match self {
             Self::Action(Action { scoped, .. }) => *scoped,
-            Self::Method(Method { scoped, .. }) => *scoped,
+            Self::Method(method) => method
+                .expand(system)
+                // Iterate over the result. Assume the method is not
+                // scoped if an error happens
+                .iter()
+                .all(|tasks| tasks.iter().all(|task| task.is_scoped(system))),
         }
     }
 
@@ -469,7 +471,7 @@ mod tests {
     #[test]
     fn it_identifies_task_scoping_based_on_args() {
         let task = plus_one.with_target(1);
-        assert!(task.is_scoped());
+        assert!(matches!(task, Task::Action(Action { scoped: true, .. })));
 
         #[derive(Serialize, Deserialize, Debug)]
         struct State {
@@ -492,7 +494,7 @@ mod tests {
         // The plus_one_sys uses the System extractor so
         // it is not scoped
         let task = plus_one_sys.with_target(1);
-        assert!(!task.is_scoped());
+        assert!(matches!(task, Task::Action(Action { scoped: false, .. })));
     }
 
     #[tokio::test]

@@ -262,7 +262,7 @@ impl Planner {
                 // and are all scoped (i.e. none of them requires access to System)
                 let mut parallelizable = true;
                 for task in &extended_tasks {
-                    if !task.is_scoped() || !non_conflicting_paths.contains(task.path()) {
+                    if !task.is_scoped(cur_state) || !non_conflicting_paths.contains(task.path()) {
                         parallelizable = false;
                         break;
                     }
@@ -380,7 +380,7 @@ impl Planner {
                                         workflow,
                                         changes,
                                         path: path.clone(),
-                                        parallelizable: task.is_scoped(),
+                                        parallelizable: task.is_scoped(&cur_state),
                                         is_method: task.is_method(),
                                         operation: job.operation().clone(),
                                         priority: job.priority(),
