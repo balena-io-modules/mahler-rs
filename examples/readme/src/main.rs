@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let worker = Worker::new()
+    let mut worker = Worker::new()
         // The jobs are applicable to `UPDATE` operations
         // on individual counters
         .job(
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
 
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
-    let worker = worker
+    let _status = worker
         .seek_target(Counters(BTreeMap::from([
             ("a".to_string(), 1),
             ("b".to_string(), 2),
@@ -111,6 +111,6 @@ async fn main() -> Result<()> {
         ))
     );
 
-    println!("The system state is now {:?}", state);
+    println!("The system state is now {state:?}");
     Ok(())
 }

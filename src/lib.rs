@@ -36,7 +36,7 @@
 //! #[derive(Serialize, Deserialize)]
 //! struct StateModel;
 //!
-//! let worker = Worker::new()
+//! let mut worker = Worker::new()
 //!         // assign possible jobs to worker
 //!         .job("", update(global))
 //!         .job("/{foo}", update(foo))
@@ -51,7 +51,7 @@
 //!
 //! # tokio_test::block_on(async {
 //! // Control the system by providing a new target state
-//! let worker = worker.seek_target(StateModel { /* .. */ }).await.unwrap();
+//! worker.seek_target(StateModel { /* .. */ }).await.unwrap();
 //! # })
 //! ```
 //!
@@ -414,7 +414,7 @@
 //!
 //! When calling [Worker::seek_target](`worker::Worker::seek_target`), there are two types of
 //! errors that may happen.
-//! - A [FatalError](`worker::FatalError`) is an unrecoverable error that occurs if there is some
+//! - A [SeekError](`worker::SeekError`) is an unrecoverable error that occurs if there is some
 //!   [issue serializing](`errors::SerializationError`) the current or target state, there is a problem
 //!   when [initializing extractors](`errors::ExtractionError`), or [expanding a method](`errors::MethodError`)
 //!   or there is an unexpected [internal error](`errors::InternalError`).

@@ -131,9 +131,8 @@ impl<T: DeserializeOwned> FromSystem for Pointer<T> {
                 ResolveError::OutOfBounds { .. } => (None, Value::Null),
                 _ => {
                     // XXX: how can this happen?
-                    return Err(
-                        anyhow!(e).context(format!("Failed to resolve path {}", context.path))
-                    )?;
+                    return Err(e)
+                        .with_context(|| format!("Failed to resolve path {}", context.path))?;
                 }
             },
         };

@@ -18,10 +18,12 @@ mod channel;
 mod dag;
 mod interrupt;
 
+pub use dag::*;
+pub use interrupt::Interrupt;
+
 pub(crate) use aggregate_error::*;
 pub(crate) use channel::*;
-pub use dag::*;
-pub use interrupt::*;
+pub(crate) use interrupt::*;
 
 #[derive(Hash)]
 /// Unique reqpresentation of a task acting on a specific path and system state.
@@ -171,12 +173,12 @@ impl Workflow {
 
     pub(crate) async fn execute(
         self,
-        system: &Arc<RwLock<System>>,
-        channel: Sender<Patch>,
+        sys_reader: &Arc<RwLock<System>>,
+        patch_tx: Sender<Patch>,
         interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
         self.0
-            .execute(system, channel, interrupt)
+            .execute(sys_reader, patch_tx, interrupt)
             .await
             .map(|s| s.into())
     }

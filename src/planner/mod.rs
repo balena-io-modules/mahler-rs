@@ -23,7 +23,7 @@ mod domain;
 use distance::*;
 pub use domain::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Planner(Domain);
 
 #[derive(Debug, Error)]

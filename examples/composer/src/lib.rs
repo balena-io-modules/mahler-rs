@@ -712,7 +712,7 @@ mod tests {
                         c.names.iter().any(|names| {
                             names
                                 .iter()
-                                .any(|name| name.starts_with(&format!("/{}_", PROJECT_NAME)))
+                                .any(|name| name.starts_with(&format!("/{PROJECT_NAME}_")))
                         })
                     })
                     .collect()
@@ -782,8 +782,9 @@ mod tests {
         .unwrap();
 
         // Seeking the target must succeed
-        let worker = worker.seek_target(target.clone()).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::Success);
+        let mut worker = worker;
+        let status = worker.seek_target(target.clone()).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
 
         // The alpine image must exist now
         let docker = Docker::connect_with_defaults().unwrap();
@@ -794,7 +795,7 @@ mod tests {
         assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
 
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await
             .unwrap();
         assert_eq!(container.id, state.services.get("my-service").unwrap().id);
@@ -940,8 +941,9 @@ mod tests {
         .unwrap();
 
         // Seeking the target must succeed
-        let worker = worker.seek_target(target).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::Success);
+        let mut worker = worker;
+        let status = worker.seek_target(target).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
 
         // The alpine image must exist now
         let docker = Docker::connect_with_defaults().unwrap();
@@ -952,7 +954,7 @@ mod tests {
         assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
 
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await
             .unwrap();
         assert_eq!(container.id, state.services.get("my-service").unwrap().id);
@@ -979,12 +981,13 @@ mod tests {
         assert_eq!(workflow.to_string(), expected.to_string());
 
         // Seeking the target must succeed
-        let worker = worker.seek_target(target).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::Success);
+        let mut worker = worker;
+        let status = worker.seek_target(target).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
 
         // The container ids should match
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await
             .unwrap();
         assert_eq!(old_container_id, container.id);
@@ -1006,12 +1009,12 @@ mod tests {
         .unwrap();
 
         // Seeking the target must succeed
-        let worker = worker.seek_target(target).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::Success);
+        let status = worker.seek_target(target).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
 
         // The container ids should match
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await
             .unwrap();
         assert_eq!(old_container_id, container.id);
@@ -1027,12 +1030,12 @@ mod tests {
         .unwrap();
 
         // Seeking the target must succeed
-        let worker = worker.seek_target(target).await.unwrap();
-        assert_eq!(worker.status(), &SeekStatus::Success);
+        let status = worker.seek_target(target).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
 
         // The container should no longer exist
         let container = docker
-            .inspect_container(&format!("{}_my-service", PROJECT_NAME), None)
+            .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
             .await;
         assert!(matches!(
             container,

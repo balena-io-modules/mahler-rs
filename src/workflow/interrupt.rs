@@ -1,10 +1,13 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    ops::Deref,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tokio::sync::Notify;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 /// An interrupt flag with notification capabilities
 ///  
 /// The `Interrupt` struct provides a thread-safe way to signal cancellation
@@ -43,18 +46,9 @@ pub struct Interrupt {
     notify: Arc<Notify>,
 }
 
-impl Default for Interrupt {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Interrupt {
     pub fn new() -> Self {
-        Self {
-            flag: Arc::new(AtomicBool::new(false)),
-            notify: Arc::new(Notify::new()),
-        }
+        Self::default()
     }
 
     /// Triggers the interrupt flag and notifies all waiting tasks
@@ -81,5 +75,33 @@ impl Interrupt {
 
         // Otherwise wait to be notified
         self.notify.notified().await;
+    }
+}
+
+/// An interrupt that gets triggered on drop
+///
+/// This purposely doesn't implement Clone, but implements Deref, meaning
+/// `.clone()` calls will return an interrupt. This means that interrupt copies will
+/// only get dropped when the original AutoInterrupt gets dropped
+pub struct AutoInterrupt(Interrupt);
+
+impl From<Interrupt> for AutoInterrupt {
+    fn from(interrupt: Interrupt) -> Self {
+        Self(interrupt)
+    }
+}
+
+impl Drop for AutoInterrupt {
+    fn drop(&mut self) {
+        // Trigger the interrupt flag when the worker is dropped
+        self.0.trigger();
+    }
+}
+
+impl Deref for AutoInterrupt {
+    type Target = Interrupt;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
