@@ -1,4 +1,12 @@
 //! Types and traits for declaring and operating with Jobs and Tasks
+//!
+//! ## Method Expansion Control
+//!
+//! Methods can control how their tasks are expanded for execution using wrapper types:
+//!
+//! - [`Sequence`]: Forces sequential execution regardless of task scoping
+//! - [`Pool`]: Allows parallel execution regardless of task scoping
+//! - [`Vec<Task>`]: Uses automatic detection based on task scoping (default)
 mod context;
 mod description;
 mod effect;
@@ -143,17 +151,21 @@ impl Display for Action {
 }
 
 #[derive(Clone, Debug, Default)]
+/// Controls how method tasks are expanded for execution
 pub enum Expansion {
     #[default]
-    /// Detect the expansion from the scoping of the tasks
+    /// Detect parallelization from task scoping automatically
     Detect,
-    /// Tasks must be executed in sequence
+    /// Force sequential execution regardless of task scoping
     Sequential,
-    /// Tasks can be executed in parallel independent of their scoping
+    /// Allow parallel execution regardless of task scoping
     Independent,
 }
 
-/// A sequence of tasks to execute in order
+/// Wrapper type that forces sequential execution of tasks
+///
+/// Use this when you need to guarantee that tasks execute in order,
+/// even if they would normally be parallelizable based on their scoping.
 pub struct Sequence(Vec<Task>);
 
 impl From<Vec<Task>> for Sequence {
@@ -180,7 +192,10 @@ impl WithExpansion for Sequence {
     }
 }
 
-/// A pool of potentially parallelizable tasks independent of scoping
+/// Wrapper type that allows parallel execution of tasks
+///
+/// Use this when you want to enable parallel execution of tasks
+/// regardless of their individual scoping requirements.
 pub struct Pool(Vec<Task>);
 
 impl From<Vec<Task>> for Pool {
@@ -203,7 +218,7 @@ impl From<Pool> for Effect<Vec<Task>, Error> {
 
 impl WithExpansion for Pool {
     fn expansion() -> Expansion {
-        Expansion::Parallel
+        Expansion::Independent
     }
 }
 
