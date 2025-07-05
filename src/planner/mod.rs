@@ -13,7 +13,7 @@ use tracing::{error, field, instrument, trace, trace_span, warn, Level, Span};
 use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
 use crate::system::System;
-use crate::task::{self, Context, Operation, Task};
+use crate::task::{self, Context, Expansion, Operation, Task};
 use crate::workflow::{WorkUnit, Workflow};
 use crate::Dag;
 
@@ -258,15 +258,18 @@ impl Planner {
                     extended_tasks.iter().map(|t| t.path().clone()).collect(),
                 );
 
-                // The method is parallelizable if all task paths are in the non-conflicting list
-                // and are all scoped (i.e. none of them requires access to System)
-                let mut parallelizable = true;
-                for task in &extended_tasks {
-                    if !task.is_scoped() || !non_conflicting_paths.contains(task.path()) {
-                        parallelizable = false;
-                        break;
-                    }
-                }
+                let parallelizable = if matches!(method.expansion(), Expansion::Sequential) {
+                    false
+                } else {
+                    // The method is parallelizable if all tasks are scoped (i.e. they don't need
+                    // access to System) or the method is labelled as independent and all paths are
+                    // in the non-conflicting list
+                    extended_tasks.iter().all(|task| {
+                        (task.is_scoped(cur_state)
+                            || matches!(method.expansion(), Expansion::Independent))
+                            && non_conflicting_paths.contains(task.path())
+                    })
+                };
 
                 let mut cur_plan = cur_plan;
 
@@ -380,7 +383,7 @@ impl Planner {
                                         workflow,
                                         changes,
                                         path: path.clone(),
-                                        parallelizable: task.is_scoped(),
+                                        parallelizable: task.is_scoped(&cur_state),
                                         is_method: task.is_method(),
                                         operation: job.operation().clone(),
                                         priority: job.priority(),
@@ -524,8 +527,8 @@ mod tests {
 
     use super::*;
     use crate::extract::{Args, System, Target, View};
-    use crate::{dag, par, task::*};
-    use crate::{seq, Dag};
+    use crate::task::prelude::*;
+    use crate::{dag, par, seq, Dag};
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
 
@@ -1096,5 +1099,238 @@ mod tests {
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
+    #[test]
+    fn test_sequential_expansion() {
+        init();
+
+        fn increment(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn double(mut counter: View<i32>) -> View<i32> {
+            *counter *= 2;
+            counter
+        }
+
+        fn sequential_ops() -> Sequence {
+            vec![increment.into_task(), double.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job("", update(increment).with_description(|| "increment"))
+            .job("", update(double).with_description(|| "double"))
+            .job("", update(sequential_ops));
+
+        let initial = 1;
+        let target = 4;
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!("increment", "double");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_parallel_expansion() {
+        init();
+
+        #[derive(Serialize, Deserialize, Debug, Clone)]
+        struct Counters {
+            a: i32,
+            b: i32,
+        }
+
+        fn increment_a(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn increment_b(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn parallel_ops() -> Pool {
+            vec![increment_a.into_task(), increment_b.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job("/a", update(increment_a).with_description(|| "increment_a"))
+            .job("/b", update(increment_b).with_description(|| "increment_b"))
+            .job("", update(parallel_ops));
+
+        let initial = Counters { a: 0, b: 0 };
+        let target = Counters { a: 1, b: 1 };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = par!("increment_a", "increment_b");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_parallel_expansion_with_clashing_tasks() {
+        init();
+
+        fn increment(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn double(mut counter: View<i32>) -> View<i32> {
+            *counter *= 2;
+            counter
+        }
+
+        // No matter if the method is labelled parallel, the planner
+        // should still return a sequential plan
+        fn parallel_ops() -> Pool {
+            vec![increment.into_task(), double.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job("", update(increment).with_description(|| "increment"))
+            .job("", update(double).with_description(|| "double"))
+            .job("", update(parallel_ops));
+
+        let initial = 1;
+        let target = 4;
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!("increment", "double");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_sequential_with_unscoped_tasks() {
+        init();
+
+        #[derive(Serialize, Deserialize, Debug, Clone)]
+        struct State {
+            counter: i32,
+            total: i32,
+        }
+
+        fn increment_counter(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn update_total(mut state: View<State>, System(sys): System<State>) -> View<State> {
+            state.total = sys.counter;
+            state
+        }
+
+        fn sequential_unscoped() -> Sequence {
+            vec![increment_counter.into_task(), update_total.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/counter",
+                update(increment_counter).with_description(|| "increment_counter"),
+            )
+            .job("", update(update_total).with_description(|| "update_total"))
+            .job("", update(sequential_unscoped));
+
+        let initial = State {
+            counter: 0,
+            total: 0,
+        };
+        let target = State {
+            counter: 1,
+            total: 1,
+        };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!("increment_counter", "update_total");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_detection_with_unscoped_tasks() {
+        init();
+
+        #[derive(Serialize, Deserialize, Debug, Clone)]
+        struct State {
+            a: i32,
+            b: i32,
+        }
+
+        fn increment_a(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn increment_b(mut counter: View<i32>, System(_sys): System<State>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn detect_unscoped() -> Vec<Task> {
+            vec![increment_a.into_task(), increment_b.into_task()]
+        }
+
+        let domain = Domain::new()
+            .job("/a", update(increment_a).with_description(|| "increment_a"))
+            .job("/b", update(increment_b).with_description(|| "increment_b"))
+            .job("", update(detect_unscoped));
+
+        let initial = State { a: 0, b: 0 };
+        let target = State { a: 1, b: 1 };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!("increment_a", "increment_b");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_parallel_with_unscoped_tasks() {
+        init();
+
+        #[derive(Serialize, Deserialize, Debug, Clone)]
+        struct State {
+            a: i32,
+            b: i32,
+        }
+
+        fn increment_a(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn increment_b(mut counter: View<i32>, System(_sys): System<State>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn parallel_unscoped() -> Pool {
+            vec![increment_a.into_task(), increment_b.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job("/a", update(increment_a).with_description(|| "increment_a"))
+            .job("/b", update(increment_b).with_description(|| "increment_b"))
+            .job("", update(parallel_unscoped));
+
+        let initial = State { a: 0, b: 0 };
+        let target = State { a: 1, b: 1 };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = par!("increment_a", "increment_b");
+        assert_eq!(workflow.to_string(), expected.to_string());
     }
 }

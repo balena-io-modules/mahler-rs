@@ -1,4 +1,12 @@
 //! Types and traits for declaring and operating with Jobs and Tasks
+//!
+//! ## Method Expansion Control
+//!
+//! Methods can control how their tasks are expanded for execution using wrapper types:
+//!
+//! - [`Sequence`]: Forces sequential execution regardless of task scoping
+//! - [`Pool`]: Allows parallel execution regardless of task scoping
+//! - [`Vec<Task>`]: Uses automatic detection based on task scoping (default)
 mod context;
 mod description;
 mod effect;
@@ -38,14 +46,14 @@ pub mod prelude {
     pub use super::handler::*;
     pub use super::job::{any, create, delete, none, update};
     pub use super::with_io::*;
-    pub use super::Task;
+    pub use super::{Pool, Sequence, Task};
 }
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
-type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch, Error> + Send + Sync>;
-type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
-type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>, Error> + Send + Sync>;
-type Describe = Arc<dyn Fn(&Context) -> Result<String, Error> + Send + Sync>;
+type DryRunFn = Arc<dyn Fn(&System, &Context) -> Result<Patch, Error> + Send + Sync>;
+type RunFn = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
+type ExpandFn = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>, Error> + Send + Sync>;
+type DescribeFn = Arc<dyn Fn(&Context) -> Result<String, Error> + Send + Sync>;
 
 #[derive(Clone)]
 /// An atomic task
@@ -53,9 +61,9 @@ pub struct Action {
     id: &'static str,
     scoped: bool,
     context: Context,
-    dry_run: DryRun,
-    run: Run,
-    describe: Describe,
+    dry_run: DryRunFn,
+    run: RunFn,
+    describe: DescribeFn,
 }
 
 impl PartialEq for Action {
@@ -142,14 +150,86 @@ impl Display for Action {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+/// Controls how method tasks are expanded for execution
+pub enum Expansion {
+    #[default]
+    /// Detect parallelization from task scoping automatically
+    Detect,
+    /// Force sequential execution regardless of task scoping
+    Sequential,
+    /// Allow parallel execution regardless of task scoping
+    Independent,
+}
+
+/// Wrapper type that forces sequential execution of tasks
+///
+/// Use this when you need to guarantee that tasks execute in order,
+/// even if they would normally be parallelizable based on their scoping.
+pub struct Sequence(Vec<Task>);
+
+impl From<Vec<Task>> for Sequence {
+    fn from(vec: Vec<Task>) -> Self {
+        Self(vec)
+    }
+}
+
+impl<const N: usize> From<[Task; N]> for Sequence {
+    fn from(arr: [Task; N]) -> Self {
+        Self(Vec::from(arr))
+    }
+}
+
+impl From<Sequence> for Effect<Vec<Task>, Error> {
+    fn from(seq: Sequence) -> Effect<Vec<Task>, Error> {
+        Effect::of(seq.0)
+    }
+}
+
+impl WithExpansion for Sequence {
+    fn expansion() -> Expansion {
+        Expansion::Sequential
+    }
+}
+
+/// Wrapper type that allows parallel execution of tasks
+///
+/// Use this when you want to enable parallel execution of tasks
+/// regardless of their individual scoping requirements.
+pub struct Pool(Vec<Task>);
+
+impl From<Vec<Task>> for Pool {
+    fn from(vec: Vec<Task>) -> Self {
+        Self(vec)
+    }
+}
+
+impl<const N: usize> From<[Task; N]> for Pool {
+    fn from(arr: [Task; N]) -> Self {
+        Self(Vec::from(arr))
+    }
+}
+
+impl From<Pool> for Effect<Vec<Task>, Error> {
+    fn from(par: Pool) -> Effect<Vec<Task>, Error> {
+        Effect::of(par.0)
+    }
+}
+
+impl WithExpansion for Pool {
+    fn expansion() -> Expansion {
+        Expansion::Independent
+    }
+}
+
 #[derive(Clone)]
 /// A compound task, i.e. a task that can be expanded into child tasks
 pub struct Method {
     id: &'static str,
-    scoped: bool,
     context: Context,
-    expand: Expand,
-    describe: Describe,
+    expand: ExpandFn,
+    describe: DescribeFn,
+    expansion: Expansion,
 }
 
 impl fmt::Debug for Method {
@@ -157,25 +237,25 @@ impl fmt::Debug for Method {
         f.debug_struct("Method")
             .field("id", &self.id)
             .field("context", &self.context)
-            .field("scoped", &self.scoped)
+            .field("expansion", &self.expansion)
             .finish()
     }
 }
 
 impl Method {
-    pub(crate) fn new<H, T>(method: H, context: Context) -> Self
+    pub(crate) fn new<H, T>(method: H, context: Context, expansion: Expansion) -> Self
     where
         H: Handler<T, Vec<Task>>,
     {
         let id = method.id();
         Method {
             id,
-            scoped: method.is_scoped(),
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
                 method.call(system, context).pure()
             }),
             describe: Arc::new(move |context: &Context| Ok(default_description(id, context))),
+            expansion,
         }
     }
 
@@ -197,6 +277,10 @@ impl Method {
             context, expand, ..
         } = self;
         (expand)(system, context)
+    }
+
+    pub fn expansion(&self) -> &Expansion {
+        &self.expansion
     }
 }
 
@@ -274,10 +358,15 @@ impl Task {
     /// Return true if the task only operates within its assigned path
     ///
     /// A scoped task is parallelizable
-    pub fn is_scoped(&self) -> bool {
+    pub fn is_scoped(&self, system: &System) -> bool {
         match self {
             Self::Action(Action { scoped, .. }) => *scoped,
-            Self::Method(Method { scoped, .. }) => *scoped,
+            Self::Method(method) => method
+                .expand(system)
+                // Iterate over the result. Assume the method is not
+                // scoped if an error happens
+                .iter()
+                .all(|tasks| tasks.iter().all(|task| task.is_scoped(system))),
         }
     }
 
@@ -370,7 +459,7 @@ impl Task {
     where
         D: Description<T>,
     {
-        let describe: Describe = Arc::new(move |ctx| description.call(ctx));
+        let describe: DescribeFn = Arc::new(move |ctx| description.call(ctx));
         match self {
             Self::Action(task) => Self::Action(Action { describe, ..task }),
             Self::Method(task) => Self::Method(Method { describe, ..task }),
@@ -469,7 +558,7 @@ mod tests {
     #[test]
     fn it_identifies_task_scoping_based_on_args() {
         let task = plus_one.with_target(1);
-        assert!(task.is_scoped());
+        assert!(matches!(task, Task::Action(Action { scoped: true, .. })));
 
         #[derive(Serialize, Deserialize, Debug)]
         struct State {
@@ -492,7 +581,7 @@ mod tests {
         // The plus_one_sys uses the System extractor so
         // it is not scoped
         let task = plus_one_sys.with_target(1);
-        assert!(!task.is_scoped());
+        assert!(matches!(task, Task::Action(Action { scoped: false, .. })));
     }
 
     #[tokio::test]
