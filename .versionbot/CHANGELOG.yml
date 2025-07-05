@@ -1,4 +1,33 @@
 - commits:
+    - subject: Refactor internal variables in Worker
+      hash: e4923b8b6a99c9f774765c1c91ce999442101bea
+      body: |
+        Make state variables more expressive for better readability
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Change Worker::seek_target to use mutable reference pattern
+      hash: ee10715af71feb6aa5038b94243c270ccc586336
+      body: >
+        Convert `seek_target` from consuming self to `&mut self` pattern,
+        returning
+
+        SeekStatus directly instead of Worker. This eliminates the need for
+
+        SeekTarget trait and simplifies the API by removing confusing ownership
+
+        transfers while maintaining all functionality.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.17.0
+  title: ""
+  date: 2025-07-05T18:12:23.870Z
+- commits:
     - subject: Refactor logging architecture and improve span instrumentation
       hash: ec3fc86216e4a17cc19c5e117f5cf4f8b4c582ce
       body: >
