@@ -5,7 +5,7 @@
 //! Methods can control how their tasks are expanded for execution using wrapper types:
 //!
 //! - [`Sequence`]: Forces sequential execution regardless of task scoping
-//! - [`Set`]: Allows parallel execution regardless of task scoping
+//! - [`Set`]: Allows concurrent execution regardless of task scoping
 //! - [`Vec<Task>`]: Uses automatic detection based on task scoping (default)
 mod context;
 mod description;
@@ -154,7 +154,7 @@ impl Display for Action {
 /// Controls how method tasks are expanded for execution
 pub enum Expansion {
     #[default]
-    /// Detect parallelization from task scoping automatically
+    /// Detect concurrency from task scoping automatically
     Detect,
     /// Force sequential execution regardless of task scoping
     Sequential,
@@ -165,7 +165,7 @@ pub enum Expansion {
 /// Wrapper type that forces sequential execution of tasks
 ///
 /// Use this when you need to guarantee that tasks execute in order,
-/// even if they would normally be parallelizable based on their scoping.
+/// even if they would normally support concurrency based on their scoping.
 pub struct Sequence(Vec<Task>);
 
 impl From<Vec<Task>> for Sequence {
@@ -357,7 +357,7 @@ impl Task {
 
     /// Return true if the task only operates within its assigned path
     ///
-    /// A scoped task is parallelizable
+    /// A scoped task can be executed concurrently with other tasks that have non conflicting paths
     pub fn is_scoped(&self, system: &System) -> bool {
         match self {
             Self::Action(Action { scoped, .. }) => *scoped,

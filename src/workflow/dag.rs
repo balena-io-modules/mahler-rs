@@ -1150,7 +1150,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_parallel_execution() {
+    async fn test_concurrent_execution() {
         let task_a = SleepyTask {
             name: "A",
             delay_ms: 100,
@@ -1193,10 +1193,10 @@ mod tests {
         let results = results.read().await;
         assert_eq!(*results, vec!["A", "B", "C"]);
 
-        // Because a and b run in parallel, total time should be just a bit over 100ms, not 200ms
+        // Because a and b run concurrently, total time should be just a bit over 100ms, not 200ms
         assert!(
             elapsed.as_millis() < 200,
-            "Execution took too long, not parallel!"
+            "Execution took too long, not concurrent!"
         );
     }
 

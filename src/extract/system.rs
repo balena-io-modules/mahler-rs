@@ -9,7 +9,7 @@ use crate::task::{Context, FromSystem};
 ///
 /// This extractor is useful for Jobs that need to *peek* into another part of the system state
 /// outside the scope given by the assigned path. Note that using this extractor makes the Job not
-/// parallelizable.
+/// able to run concurrently.
 ///
 /// # Example
 ///
@@ -57,8 +57,8 @@ impl<S: DeserializeOwned> FromSystem for System<S> {
     }
 
     // The System extractor allows a handler to read from anywhere
-    // in the state, breaking the scope of the handler and preventing
-    // parallelization
+    // in the state, breaking the scoping of the handler and preventing
+    // concurrency
     fn is_scoped() -> bool {
         false
     }
