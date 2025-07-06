@@ -270,7 +270,7 @@ impl Task {
 
     /// Return true if the task only operates within its assigned path
     ///
-    /// A scoped task is parallelizable
+    /// A scoped task can be executed concurrently with other tasks that have non conflicting paths
     pub fn is_scoped(&self, system: &System) -> bool {
         match self {
             Self::Action(Action { scoped, .. }) => *scoped,
