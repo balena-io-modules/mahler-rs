@@ -2,7 +2,7 @@ use json_patch::Patch;
 use serde::Serialize;
 
 use super::from_system::FromSystem;
-use super::{Action, Context, Effect, Error, Method, Task};
+use super::{Action, Context, Effect, Error, Expansion, Method, Task};
 use crate::system::System;
 
 /// Trait for functions that can be used as worker jobs
@@ -29,7 +29,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
 
     /// Return true if the handler requires scoped access to a partion of the system
     ///
-    /// A scoped handler is parallelizable.
+    /// A scoped handler supports concurrency.
     ///
     /// The scoping of the handler is determined from the extractor. If all extractors are scoped,
     /// then the handler is scoped.
@@ -122,6 +122,17 @@ macro_rules! impl_action_handler {
     };
 }
 
+/// Trait for controlling method task expansion behavior
+///
+/// This trait allows method return types to specify how their tasks
+/// should be expanded for execution. The default behavior is to detect
+/// concurrency automatically based on task scoping.
+pub trait WithExpansion {
+    fn expansion() -> Expansion {
+        Expansion::default()
+    }
+}
+
 impl_action_handler!(T1,);
 impl_action_handler!(T1, T2);
 impl_action_handler!(T1, T2, T3);
@@ -147,7 +158,7 @@ macro_rules! impl_method_handler {
         impl<F, $($ty,)* Res> Handler<($($ty,)*), Vec<Task>> for F
         where
             F: Fn($($ty,)*) -> Res + Clone + Send + Sync +'static,
-            Res: Into<Effect<Vec<Task>, Error>>,
+            Res: Into<Effect<Vec<Task>, Error>> + WithExpansion,
             $($ty: FromSystem,)*
         {
 
@@ -173,7 +184,7 @@ macro_rules! impl_method_handler {
             }
 
             fn into_task(self) -> Task {
-                Method::new(self, Context::default()).into()
+                Method::new(self, Context::default(), Res::expansion()).into()
             }
         }
     };

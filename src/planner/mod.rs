@@ -13,7 +13,7 @@ use tracing::{error, field, instrument, trace, trace_span, warn, Level, Span};
 use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
 use crate::system::System;
-use crate::task::{self, Context, Operation, Task};
+use crate::task::{self, Context, Expansion, Operation, Task};
 use crate::workflow::{WorkUnit, Workflow};
 use crate::Dag;
 
@@ -129,7 +129,7 @@ struct Candidate {
     path: Path,
     operation: Operation,
     priority: u8,
-    parallelizable: bool,
+    concurrent: bool,
     is_method: bool,
 }
 
@@ -253,24 +253,27 @@ impl Planner {
                     extended_tasks.push(task);
                 }
 
-                // Compute a maximal set of non-overlapping (non-prefix) paths for parallelism
+                // Compute a maximal set of non-overlapping (non-prefix) paths for concurrency
                 let non_conflicting_paths = longest_non_conflicting(
                     extended_tasks.iter().map(|t| t.path().clone()).collect(),
                 );
 
-                // The method is parallelizable if all task paths are in the non-conflicting list
-                // and are all scoped (i.e. none of them requires access to System)
-                let mut parallelizable = true;
-                for task in &extended_tasks {
-                    if !task.is_scoped() || !non_conflicting_paths.contains(task.path()) {
-                        parallelizable = false;
-                        break;
-                    }
-                }
+                let concurrent = if matches!(method.expansion(), Expansion::Sequential) {
+                    false
+                } else {
+                    // The method supports concurrency if all tasks are scoped (i.e. they don't need
+                    // access to System) or the method is labelled as independent and all paths are
+                    // in the non-conflicting list
+                    extended_tasks.iter().all(|task| {
+                        (task.is_scoped(cur_state)
+                            || matches!(method.expansion(), Expansion::Independent))
+                            && non_conflicting_paths.contains(task.path())
+                    })
+                };
 
                 let mut cur_plan = cur_plan;
 
-                if parallelizable {
+                if concurrent {
                     let mut branches = vec![];
 
                     // Create a branch for each task
@@ -287,7 +290,7 @@ impl Planner {
                     // Clone the state in order to apply sequential changes
                     let mut cur_state = cur_state.clone();
 
-                    // If the task is not parallelizable, run tasks in sequence making
+                    // If the task cannot run concurrently, run tasks in sequence making
                     // sure to apply changes before calling the next task
                     for task in extended_tasks {
                         let mut changes = vec![];
@@ -380,7 +383,7 @@ impl Planner {
                                         workflow,
                                         changes,
                                         path: path.clone(),
-                                        parallelizable: task.is_scoped(),
+                                        concurrent: task.is_scoped(&cur_state),
                                         is_method: task.is_method(),
                                         operation: job.operation().clone(),
                                         priority: job.priority(),
@@ -431,37 +434,37 @@ impl Planner {
                 }
             }
 
-            // Compute a maximal set of non-overlapping (non-prefix) paths for parallelism
+            // Compute a maximal set of non-overlapping (non-prefix) paths for concurrency
             let non_conflicting_paths =
                 longest_non_conflicting(distance.iter().map(|op| Path::new(op.path())).collect());
 
-            // Find candidates that can be parallelized
-            let mut parallelizable: BTreeMap<Path, Candidate> = BTreeMap::new();
+            // Find candidates that can run concurrently
+            let mut concurrent_candidates: BTreeMap<Path, Candidate> = BTreeMap::new();
             for candidate in candidates.iter() {
                 // If the candidate is scoped and the path belongs to the non conflicting path list
-                // then add the candidate to the parallelizable list if there isn't a path already
-                if candidate.parallelizable
-                    && !parallelizable.contains_key(&candidate.path)
+                // then add the candidate to the concurrent list if there isn't a path already
+                if candidate.concurrent
+                    && !concurrent_candidates.contains_key(&candidate.path)
                     && non_conflicting_paths.iter().any(|p| p == &candidate.path)
                 {
-                    parallelizable.insert(candidate.path.clone(), candidate.clone());
+                    concurrent_candidates.insert(candidate.path.clone(), candidate.clone());
                 }
             }
 
-            if parallelizable.len() > 1 {
+            if concurrent_candidates.len() > 1 {
                 let mut branches = Vec::new();
                 let mut changes = Vec::new();
                 let mut total_priority = 0;
                 // The path for the candidate is the longest common prefix between child paths
                 // XXX: maybe we need to skip the candidate if there is a method for the
                 // same path?
-                let path = longest_common_prefix(parallelizable.keys());
+                let path = longest_common_prefix(concurrent_candidates.keys());
                 for Candidate {
                     workflow,
                     changes: pending,
                     priority,
                     ..
-                } in parallelizable.into_values()
+                } in concurrent_candidates.into_values()
                 {
                     branches.push(workflow);
                     changes.extend(pending);
@@ -469,13 +472,13 @@ impl Planner {
                     total_priority += priority;
                 }
 
-                // Construct a new candidate using the parallel branches
+                // Construct a new candidate using the concurrent branches
                 // NOTE: we could keep adding branches to the DAG as long as there are non conflicting
                 // paths with the candidate path. For now we just do this operation once
                 candidates.push(Candidate {
                     workflow: Dag::new(branches),
                     changes,
-                    parallelizable: true,
+                    concurrent: true,
                     path,
                     // If there is a method for the same path, give more priority to the method
                     is_method: false,
@@ -524,8 +527,8 @@ mod tests {
 
     use super::*;
     use crate::extract::{Args, System, Target, View};
-    use crate::{dag, par, task::*};
-    use crate::{seq, Dag};
+    use crate::task::prelude::*;
+    use crate::{dag, par, seq, Dag};
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
 
@@ -678,7 +681,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, initial, target).unwrap();
 
-        // We expect counters to be updated in parallel
+        // We expect counters to be updated concurrently
         let expected: Dag<&str> = par!(
             "mahler::planner::tests::plus_one(/counters/one)",
             "mahler::planner::tests::plus_one(/counters/two)",
@@ -712,7 +715,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, initial, target).unwrap();
 
-        // We expect a parallel dag with two tasks on each branch
+        // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(
             seq!(
                 "mahler::planner::tests::plus_one(/counters/one)",
@@ -761,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn it_finds_parallel_plans_with_nested_forks() {
+    fn it_finds_concurrent_plans_with_nested_forks() {
         init();
         type Counters = BTreeMap<String, i32>;
 
@@ -771,7 +774,7 @@ mod tests {
         }
 
         // This is a very dumb example to test how the planner
-        // choses parallelizable methods over automated parallelization
+        // choses concurrent methods over automated concurrency
         fn multi_increment(counters: View<Counters>, target: Target<Counters>) -> Vec<Task> {
             counters
                 .keys()
@@ -841,7 +844,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, initial, target).unwrap();
 
-        // We expect a parallel dag with two tasks on each branch
+        // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(seq!("a++", "a++"), seq!("b++", "b++"))
             + dag!(seq!("c++", "c++"), seq!("d++", "d++"))
             + seq!("a++");
@@ -1096,5 +1099,238 @@ mod tests {
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
+    #[test]
+    fn test_sequential_expansion() {
+        init();
+
+        fn increment(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn double(mut counter: View<i32>) -> View<i32> {
+            *counter *= 2;
+            counter
+        }
+
+        fn sequential_ops() -> Sequence {
+            vec![increment.into_task(), double.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job("", update(increment).with_description(|| "increment"))
+            .job("", update(double).with_description(|| "double"))
+            .job("", update(sequential_ops));
+
+        let initial = 1;
+        let target = 4;
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!("increment", "double");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_concurrent_expansion() {
+        init();
+
+        #[derive(Serialize, Deserialize, Debug, Clone)]
+        struct Counters {
+            a: i32,
+            b: i32,
+        }
+
+        fn increment_a(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn increment_b(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn concurrent_ops() -> Set {
+            vec![increment_a.into_task(), increment_b.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job("/a", update(increment_a).with_description(|| "increment_a"))
+            .job("/b", update(increment_b).with_description(|| "increment_b"))
+            .job("", update(concurrent_ops));
+
+        let initial = Counters { a: 0, b: 0 };
+        let target = Counters { a: 1, b: 1 };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = par!("increment_a", "increment_b");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_concurrent_expansion_with_clashing_tasks() {
+        init();
+
+        fn increment(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn double(mut counter: View<i32>) -> View<i32> {
+            *counter *= 2;
+            counter
+        }
+
+        // No matter if the method is labelled concurrent, the planner
+        // should still return a sequential plan
+        fn concurrent_ops() -> Set {
+            vec![increment.into_task(), double.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job("", update(increment).with_description(|| "increment"))
+            .job("", update(double).with_description(|| "double"))
+            .job("", update(concurrent_ops));
+
+        let initial = 1;
+        let target = 4;
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!("increment", "double");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_sequential_with_unscoped_tasks() {
+        init();
+
+        #[derive(Serialize, Deserialize, Debug, Clone)]
+        struct State {
+            counter: i32,
+            total: i32,
+        }
+
+        fn increment_counter(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn update_total(mut state: View<State>, System(sys): System<State>) -> View<State> {
+            state.total = sys.counter;
+            state
+        }
+
+        fn sequential_unscoped() -> Sequence {
+            vec![increment_counter.into_task(), update_total.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/counter",
+                update(increment_counter).with_description(|| "increment_counter"),
+            )
+            .job("", update(update_total).with_description(|| "update_total"))
+            .job("", update(sequential_unscoped));
+
+        let initial = State {
+            counter: 0,
+            total: 0,
+        };
+        let target = State {
+            counter: 1,
+            total: 1,
+        };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!("increment_counter", "update_total");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_detection_with_unscoped_tasks() {
+        init();
+
+        #[derive(Serialize, Deserialize, Debug, Clone)]
+        struct State {
+            a: i32,
+            b: i32,
+        }
+
+        fn increment_a(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn increment_b(mut counter: View<i32>, System(_sys): System<State>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn detect_unscoped() -> Vec<Task> {
+            vec![increment_a.into_task(), increment_b.into_task()]
+        }
+
+        let domain = Domain::new()
+            .job("/a", update(increment_a).with_description(|| "increment_a"))
+            .job("/b", update(increment_b).with_description(|| "increment_b"))
+            .job("", update(detect_unscoped));
+
+        let initial = State { a: 0, b: 0 };
+        let target = State { a: 1, b: 1 };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!("increment_a", "increment_b");
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_concurrent_with_unscoped_tasks() {
+        init();
+
+        #[derive(Serialize, Deserialize, Debug, Clone)]
+        struct State {
+            a: i32,
+            b: i32,
+        }
+
+        fn increment_a(mut counter: View<i32>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn increment_b(mut counter: View<i32>, System(_sys): System<State>) -> View<i32> {
+            *counter += 1;
+            counter
+        }
+
+        fn concurrent_unscoped() -> Set {
+            vec![increment_a.into_task(), increment_b.into_task()].into()
+        }
+
+        let domain = Domain::new()
+            .job("/a", update(increment_a).with_description(|| "increment_a"))
+            .job("/b", update(increment_b).with_description(|| "increment_b"))
+            .job("", update(concurrent_unscoped));
+
+        let initial = State { a: 0, b: 0 };
+        let target = State { a: 1, b: 1 };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = par!("increment_a", "increment_b");
+        assert_eq!(workflow.to_string(), expected.to_string());
     }
 }

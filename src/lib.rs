@@ -10,7 +10,7 @@
 //! - Simple API. Jobs can be targeted to specific paths and operations within the state model for targeted operations.
 //! - Declaratively access System state and resources using extractors.
 //! - Intelligent planner. Automatically discover a workflow to transition from the current system state to a given target state.
-//! - Concurrent execution of jobs. The planner automatically detects when operations can be performed in parallel and adjusts the execution graph for concurrency.
+//! - Concurrent execution of jobs. The planner automatically detects when operations can be performed concurrently and adjusts the execution graph accorddingly.
 //! - Observable runtime. Monitor the evolving state of the system from the Worker API. For more detailed logging, the library uses the [tracing crate](`tracing`).
 //! - Easy to debug. Agent observable state and known goals allow easy replicability when issues occur.
 //!
@@ -168,7 +168,7 @@
 //! fn target(Target(tgt): Target<u32>) {}
 //!
 //! // `System` provides a view into the top level system state.
-//! // A Job using the System extractor is not parallelizable
+//! // A Job using the System extractor cannot run concurrently to other jobs
 //! fn system(System(state): System<MySystemState>) {}
 //!
 //! // `Res` allows to access a shared resource
@@ -357,7 +357,7 @@
 //! }
 //! ```
 //!
-//! ## Compound Jobs
+//! ## Methods
 //!
 //! Sometimes it may be desirable to re-use jobs in different contexts, or combine multiple jobs in
 //! order to guide the planner. This can be achieved by the use of compound jobs, called
@@ -409,6 +409,34 @@
 //! a reverse search for the paths corresponding to the tasks returned by the
 //! method. Failing to do this will result in an failure when planning.
 //! </div>
+//!
+//! ### Controlling method expansion
+//!
+//! Methods can control how their returned tasks are expanded for execution using wrapper types
+//! [`task::Sequence`] and [`task::Set`]
+//!
+//! ```rust
+//! use mahler::extract::{View, Target};
+//! use mahler::task::{Task, Sequence, Set, Handler};
+//!
+//! // Force sequential execution
+//! fn sequential_ops() -> Sequence {
+//!     vec![task_one.into_task(), task_two.into_task()].into()
+//! }
+//!
+//! // Allow concurrent execution regardless of task scoping
+//! fn independent_ops() -> Set {
+//!     vec![task_one.into_task(), task_two.into_task()].into()
+//! }
+//!
+//! // Use automatic detection based on task scoping (default)
+//! fn auto_ops() -> Vec<Task> {
+//!     vec![task_one.into_task(), task_two.into_task()]
+//! }
+//!
+//! fn task_one() {}
+//! fn task_two() {}
+//! ```
 //!
 //! # Error handling
 //!
