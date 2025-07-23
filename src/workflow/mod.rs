@@ -113,11 +113,7 @@ impl Task for WorkUnit {
             return Err(TaskError::ConditionFailed);
         }
 
-        let result = self.action.run(system).await;
-        if result.is_ok() {
-            info!("finished");
-        }
-        result
+        self.action.run(system).await
     }
 }
 
