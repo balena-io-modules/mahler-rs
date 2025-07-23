@@ -51,7 +51,7 @@
 //! fn target(Target(tgt): Target<u32>) {}
 //!
 //! // `System` provides a view into the top level system state.
-//! // A Job using the System extractor is not parallelizable
+//! // A Job using the System extractor cannot run concurrently to other jobs
 //! fn system(System(state): System<MySystemState>) {}
 //!
 //! // `Res` allows to access a shared resource
@@ -60,9 +60,9 @@
 //!
 //! # Extractor scoping
 //!
-//! Job is assigned to a specific state path and its handler only allowed to read/write data
-//! under that path. This is called *scoping* and it allows to ensure that instanced tasks are
-//! parallelizable. However, sometimes a handler may require access to a property outside its path
+//! Each job is assigned to a specific state path and its handler only allowed to read/write data
+//! under that path. This is called *scoping* and it is used to determine whether two tasks can run
+//! concurrently. However, sometimes a handler may require access to a property outside its path
 //! order to make changes, this means the Job is no longer scoped.
 //!
 //! A handler is scoped if all its extractors are scoped.

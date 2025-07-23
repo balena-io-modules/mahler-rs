@@ -21,7 +21,7 @@ Mahler solves this by using [automated planning](https://en.wikipedia.org/wiki/A
 ## Core Features
 
 - **Job-based architecture** - Define operations as Rust functions that operate on typed state
-- **Parallel execution** - Planner detects when jobs can run concurrently based on state paths
+- **Concurrent execution** - Planner detects when jobs can run concurrently based on state paths
 - **JSON state model** - System state represented as JSON with path-based job targeting
 - **Effect isolation** - Jobs separate planning logic from actual I/O operations
 - **Automatic re-planning** - Re-computes workflow when runtime conditions change

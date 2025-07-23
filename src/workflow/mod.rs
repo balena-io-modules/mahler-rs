@@ -26,7 +26,7 @@ pub(crate) use channel::*;
 pub(crate) use interrupt::*;
 
 #[derive(Hash)]
-/// Unique reqpresentation of a task acting on a specific path and system state.
+/// Unique representation of a task acting on a specific path and system state.
 ///
 /// The hash of this structure is used as the [`WorkUnit`] id
 struct WorkUnitId<'s> {
