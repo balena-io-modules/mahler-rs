@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::{select, sync::RwLock};
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{Stream, StreamExt};
+use tracing::field::display;
 use tracing::{debug, error, field, info, info_span, span, trace, warn, Instrument, Level, Span};
 
 #[cfg(debug_assertions)]
@@ -757,17 +758,17 @@ impl<O, I> Worker<O, Ready, I> {
                             match res {
                                 Ok(InnerSeekResult::TargetReached) => {
                                     info!("target state applied");
-                                    seek_span.record("result", "success");
+                                    seek_span.record("result", display("success"));
                                     return Ok(SeekStatus::Success);
                                 }
                                 Ok(InnerSeekResult::WorkflowCompleted) => {}
                                 Ok(InnerSeekResult::Interrupted) => {
                                     warn!("target state apply interrupted by user request");
-                                    seek_span.record("result", "interrupted");
+                                    seek_span.record("result", display("interrupted"));
                                     return Ok(SeekStatus::Interrupted);
                                 }
                                 Err(InnerSeekError::Planning(PlannerError::NotFound)) =>  {
-                                    seek_span.record("result", "workflow_not_found");
+                                    seek_span.record("result", display("workflow_not_found"));
                                     return Ok(SeekStatus::NotFound);
                                 }
                                 Err(InnerSeekError::Planning(PlannerError::Serialization(e))) =>  return Err(e)?,
@@ -796,7 +797,7 @@ impl<O, I> Worker<O, Ready, I> {
                                     // should be recoverable
                                     if !io.is_empty() {
                                         warn!("target state apply interrupted due to error");
-                                        seek_span.record("result", "aborted");
+                                        seek_span.record("result", display("aborted"));
                                         return Ok(SeekStatus::Aborted(io))
                                     }
 
