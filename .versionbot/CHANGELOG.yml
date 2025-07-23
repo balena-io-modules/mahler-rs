@@ -1,4 +1,32 @@
 - commits:
+    - subject: Wrap seek_target tracing result in `display`
+      hash: 183c69091f3d7b4f7419347567c769155da64e11
+      body: |
+        This just makes the logs a bit cleaner.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Remove finished message from run_task logs
+      hash: a776a8631327d37a71d92654039ed6e02419bdda
+      body: |
+        It is unnecessary since users can make use of the `close` event to
+        detect when the task terminated and it just causes noise on the logs.
+
+        It is different with the `starting` message, because tracing `new` event
+        doesn't convey enough information, and the `enter` event is emmited
+        every time the async task is polled by the tokio runtime, so it gets too
+        verbose.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.17.1
+  title: ""
+  date: 2025-07-23T21:11:19.205Z
+- commits:
     - subject: Refactor internal variables in Worker
       hash: e4923b8b6a99c9f774765c1c91ce999442101bea
       body: |
