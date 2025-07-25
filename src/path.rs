@@ -43,6 +43,30 @@ impl Path {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    /// Returns true if this path is a prefix of the other path.
+    /// A path is a prefix of another if all its tokens match the beginning of the other's tokens.
+    /// For example, "/a" is a prefix of "/a/b", but "/a" is NOT a prefix of "/aa".
+    pub fn is_prefix_of(&self, other: &Path) -> bool {
+        let self_tokens: Vec<_> = self.0.tokens().collect();
+        let other_tokens: Vec<_> = other.0.tokens().collect();
+
+        // Empty path is a prefix of everything
+        if self_tokens.is_empty() {
+            return true;
+        }
+
+        // Can't be a prefix if we have more tokens
+        if self_tokens.len() > other_tokens.len() {
+            return false;
+        }
+
+        // Check if all our tokens match the beginning of other's tokens
+        self_tokens
+            .iter()
+            .zip(other_tokens.iter())
+            .all(|(a, b)| a == b)
+    }
 }
 
 impl Display for Path {
@@ -185,5 +209,30 @@ mod tests {
             ]
         );
         assert_eq!(old, Some("a".to_string()))
+    }
+
+    #[test]
+    fn test_is_prefix_of() {
+        // Basic prefix relationship
+        let path_a = Path::from_static("/a");
+        let path_a_b = Path::from_static("/a/b");
+        let path_a_b_c = Path::from_static("/a/b/c");
+        let path_aa = Path::from_static("/aa");
+        let path_b = Path::from_static("/b");
+        let root = Path::from_static("");
+
+        // True cases - proper path prefixes
+        assert!(path_a.is_prefix_of(&path_a_b));
+        assert!(path_a.is_prefix_of(&path_a_b_c));
+        assert!(path_a_b.is_prefix_of(&path_a_b_c));
+        assert!(root.is_prefix_of(&path_a));
+        assert!(root.is_prefix_of(&path_a_b));
+        assert!(path_a.is_prefix_of(&path_a)); // Self prefix
+
+        // False cases - not path prefixes
+        assert!(!path_a.is_prefix_of(&path_aa)); // "/a" is NOT a prefix of "/aa"
+        assert!(!path_a.is_prefix_of(&path_b));
+        assert!(!path_a_b.is_prefix_of(&path_a)); // Longer path cannot be prefix of shorter
+        assert!(!path_aa.is_prefix_of(&path_a));
     }
 }

@@ -46,42 +46,39 @@ enum SearchFailed {
     Internal(#[from] anyhow::Error),
 }
 
-/// Returns the longest (maximum cardinality) subset of non‐conflicting paths
-/// from the input. Two paths are considered to conflict if one is a prefix
-/// of the other. In such a case, we choose to keep the path that is not a prefix
-/// of any other—that is, the more specific path.
-///
-/// # Arguments
-///
-/// * `paths` - A vector of `Path` instances.
-///
-/// # Returns
-///
-/// A vector of `Path` which represents one maximal set (greedy solution)
-/// in which no path is a prefix of another.
-fn longest_non_conflicting(paths: Vec<Path>) -> Vec<Path> {
-    // We use a simple O(n^2) approach:
-    // For each path, if any other path starts with it, then skip it.
-    // TODO: maybe implement a more efficient algorithm with a trie
-    let mut result = Vec::new();
-    for (i, p) in paths.iter().enumerate() {
-        // Check p against every other path in the input.
-        let mut p_is_prefix = false;
-        for (j, q) in paths.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            // If p is a proper prefix of q, then skip p.
-            if q.starts_with(p.as_str()) {
-                p_is_prefix = true;
-                break;
-            }
-        }
-        if !p_is_prefix {
+/// Returns the longest subset of non-conflicting paths, preferring prefixes over specific paths.
+/// When conflicts occur, prioritizes prefixes over more specific paths.
+/// For example, if /config appears after /config/some_var, we prefer /config and remove /config/some_var.
+fn select_non_conflicting_prefer_prefixes<'a, I>(paths: I) -> Vec<Path>
+where
+    I: IntoIterator<Item = &'a Path>,
+{
+    let mut result: Vec<Path> = Vec::new();
+
+    for p in paths.into_iter() {
+        // If no existing paths are prefixes of the current path
+        if !result.iter().any(|selected| selected.is_prefix_of(p)) {
+            // Remove all the paths the current path is a prefix of
+            result.retain(|selected| !p.is_prefix_of(selected));
+
+            // And add the new path
             result.push(p.clone());
         }
     }
     result
+}
+
+/// Returns true if none of the paths conflict with each other.
+/// Two paths conflict if one is a prefix of the other.
+fn paths_are_non_conflicting(paths: Vec<Path>) -> bool {
+    for (i, path1) in paths.iter().enumerate() {
+        for path2 in paths.iter().skip(i + 1) {
+            if path1.is_prefix_of(path2) || path2.is_prefix_of(path1) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Computes the longest common prefix over a list of `Path`
@@ -253,20 +250,14 @@ impl Planner {
                     extended_tasks.push(task);
                 }
 
-                // Compute a maximal set of non-overlapping (non-prefix) paths for parallelism
-                let non_conflicting_paths = longest_non_conflicting(
-                    extended_tasks.iter().map(|t| t.path().clone()).collect(),
-                );
-
-                // The method is parallelizable if all task paths are in the non-conflicting list
+                // The method tasks can be executed concurrently if no task paths conflict
                 // and are all scoped (i.e. none of them requires access to System)
-                let mut parallelizable = true;
-                for task in &extended_tasks {
-                    if !task.is_scoped() || !non_conflicting_paths.contains(task.path()) {
-                        parallelizable = false;
-                        break;
-                    }
-                }
+                let parallelizable = paths_are_non_conflicting(
+                    extended_tasks
+                        .iter()
+                        .map(|task| task.path().clone())
+                        .collect(),
+                ) && extended_tasks.iter().all(|task| task.is_scoped());
 
                 let mut cur_plan = cur_plan;
 
@@ -379,7 +370,7 @@ impl Planner {
                                     candidates.push(Candidate {
                                         workflow,
                                         changes,
-                                        path: path.clone(),
+                                        path: task.path().clone(),
                                         parallelizable: task.is_scoped(),
                                         is_method: task.is_method(),
                                         operation: job.operation().clone(),
@@ -431,15 +422,17 @@ impl Planner {
                 }
             }
 
-            // Compute a maximal set of non-overlapping (non-prefix) paths for parallelism
-            let non_conflicting_paths =
-                longest_non_conflicting(distance.iter().map(|op| Path::new(op.path())).collect());
+            // Find the longest list of non-conflicting tasks
+            let non_conflicting_paths = select_non_conflicting_prefer_prefixes(
+                candidates.iter().map(|Candidate { path, .. }| path),
+            );
 
             // Find candidates that can be parallelized
             let mut parallelizable: BTreeMap<Path, Candidate> = BTreeMap::new();
             for candidate in candidates.iter() {
                 // If the candidate is scoped and the path belongs to the non conflicting path list
-                // then add the candidate to the parallelizable list if there isn't a path already
+                // then add the candidate to the parallelizable list if there isn't a candidate already
+                // for that path
                 if candidate.parallelizable
                     && !parallelizable.contains_key(&candidate.path)
                     && non_conflicting_paths.iter().any(|p| p == &candidate.path)
@@ -519,11 +512,12 @@ impl Planner {
 mod tests {
     use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
+    use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
     use std::fmt::Display;
 
     use super::*;
-    use crate::extract::{Args, System, Target, View};
+    use crate::extract::{Args, Pointer, System, Target, View};
     use crate::{dag, par, task::*};
     use crate::{seq, Dag};
     use tracing_subscriber::fmt::format::FmtSpan;
@@ -640,6 +634,7 @@ mod tests {
 
     #[test]
     fn it_calculates_a_linear_workflow_with_compound_tasks() {
+        init();
         let domain = Domain::new()
             .job("", update(plus_two))
             .job("", none(plus_one));
@@ -758,6 +753,64 @@ mod tests {
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
+    #[test]
+    fn it_calculates_concurrent_workflows_from_non_conflicting_paths() {
+        init();
+        type Config = HashMap<String, String>;
+
+        #[derive(Serialize, Deserialize)]
+        struct MyState {
+            config: Config,
+            counters: HashMap<String, i32>,
+        }
+
+        fn new_counter(mut counter: Pointer<i32>, Target(tgt): Target<i32>) -> Pointer<i32> {
+            counter.assign(tgt);
+            counter
+        }
+
+        fn update_config(mut config: View<Config>, Target(tgt): Target<Config>) -> View<Config> {
+            *config = tgt;
+            config
+        }
+
+        fn new_config(mut config: Pointer<String>, Target(tgt): Target<String>) -> Pointer<String> {
+            config.assign(tgt);
+            config
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/counters/{counter}",
+                create(new_counter).with_description(|Args(counter): Args<String>| {
+                    format!("create counter '{counter}'")
+                }),
+            )
+            .job(
+                "/config/{config}",
+                create(new_config).with_description(|Args(config): Args<String>| {
+                    format!("create config '{config}'")
+                }),
+            )
+            .job(
+                "/config",
+                update(update_config).with_description(|| "update configurations"),
+            );
+
+        let initial =
+            serde_json::from_value::<MyState>(json!({ "config": {}, "counters": {} })).unwrap();
+        let target = serde_json::from_value::<MyState>(
+            json!({ "config": {"some_var":"one", "other_var": "two"}, "counters": {"one": 0} }),
+        )
+        .unwrap();
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = par!("create counter 'one'", "update configurations");
+        assert_eq!(expected.to_string(), workflow.to_string());
     }
 
     #[test]
@@ -1096,5 +1149,184 @@ mod tests {
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
+    // Helper function tests
+    #[test]
+    fn test_paths_are_non_conflicting_empty_list() {
+        assert!(paths_are_non_conflicting(vec![]));
+    }
+
+    #[test]
+    fn test_paths_are_non_conflicting_single_path() {
+        let paths = vec![Path::from_static("/config")];
+        assert!(paths_are_non_conflicting(paths));
+    }
+
+    #[test]
+    fn test_paths_are_non_conflicting_no_conflicts() {
+        let paths = vec![
+            Path::from_static("/config"),
+            Path::from_static("/counters"),
+            Path::from_static("/settings"),
+        ];
+        assert!(paths_are_non_conflicting(paths));
+    }
+
+    #[test]
+    fn test_paths_are_non_conflicting_with_prefix_conflict() {
+        let paths = vec![
+            Path::from_static("/config"),
+            Path::from_static("/config/server"),
+        ];
+        assert!(!paths_are_non_conflicting(paths));
+    }
+
+    #[test]
+    fn test_paths_are_non_conflicting_identical_paths() {
+        let paths = vec![Path::from_static("/config"), Path::from_static("/config")];
+        assert!(!paths_are_non_conflicting(paths));
+    }
+
+    #[test]
+    fn test_paths_are_non_conflicting_root_path() {
+        let paths = vec![Path::from_static(""), Path::from_static("/config")];
+        assert!(!paths_are_non_conflicting(paths));
+    }
+
+    #[test]
+    fn test_select_non_conflicting_prefer_prefixes_basic() {
+        let paths = vec![Path::from_static("/a"), Path::from_static("/b")];
+        let result = select_non_conflicting_prefer_prefixes(&paths);
+        assert_eq!(result, paths);
+    }
+
+    #[test]
+    fn test_select_non_conflicting_prefer_prefixes_with_conflicts() {
+        let paths = vec![
+            Path::from_static("/config/other_var"),
+            Path::from_static("/config/some_var"),
+            Path::from_static("/counters/one"),
+            Path::from_static("/config"),
+        ];
+        let result = select_non_conflicting_prefer_prefixes(&paths);
+        let expected = vec![
+            Path::from_static("/counters/one"),
+            Path::from_static("/config"),
+        ];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_select_non_conflicting_prefer_prefixes_your_example() {
+        let paths = vec![
+            Path::from_static("/a"),
+            Path::from_static("/b"),
+            Path::from_static("/b/c"),
+            Path::from_static("/b/d"),
+        ];
+        let result = select_non_conflicting_prefer_prefixes(&paths);
+        let expected = vec![Path::from_static("/a"), Path::from_static("/b")];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_select_non_conflicting_prefer_prefixes_no_later_prefix() {
+        let paths = vec![
+            Path::from_static("/config/server/host"),
+            Path::from_static("/config/server/port"),
+            Path::from_static("/database/host"),
+        ];
+        let result = select_non_conflicting_prefer_prefixes(&paths);
+        assert_eq!(result, paths);
+    }
+
+    #[test]
+    fn test_select_non_conflicting_prefer_prefixes_prefix_first() {
+        // Counter example: when prefix comes first, it should be kept
+        // and more specific paths should be ignored
+        let paths = vec![
+            Path::from_static("/config"),
+            Path::from_static("/config/server"),
+            Path::from_static("/config/client"),
+        ];
+        let result = select_non_conflicting_prefer_prefixes(&paths);
+        let expected = vec![Path::from_static("/config")];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_select_non_conflicting_prefer_prefixes_root_path() {
+        // Edge case: root path should dominate all other paths
+        let paths = vec![
+            Path::from_static(""),
+            Path::from_static("/config"),
+            Path::from_static("/counters"),
+        ];
+        let result = select_non_conflicting_prefer_prefixes(&paths);
+        let expected = vec![Path::from_static("")];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_select_non_conflicting_proper_path_prefix_vs_string_prefix() {
+        // This test demonstrates the fix: /a should NOT conflict with /aa
+        // because /a is not a path prefix of /aa (only a string prefix)
+        let paths = vec![
+            Path::from_static("/a"),
+            Path::from_static("/aa"),
+            Path::from_static("/a/b"),
+        ];
+        let result = select_non_conflicting_prefer_prefixes(&paths);
+        // /a should conflict with /a/b but NOT with /aa
+        let expected = vec![Path::from_static("/a"), Path::from_static("/aa")];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_longest_common_prefix_empty() {
+        let paths: Vec<Path> = vec![];
+        let result = longest_common_prefix(&paths);
+        assert_eq!(result.as_str(), "");
+    }
+
+    #[test]
+    fn test_longest_common_prefix_single_path() {
+        let paths = vec![Path::from_static("/config/server")];
+        let result = longest_common_prefix(&paths);
+        assert_eq!(result.as_str(), "/config/server");
+    }
+
+    #[test]
+    fn test_longest_common_prefix_common_prefix() {
+        let paths = vec![
+            Path::from_static("/config/server/host"),
+            Path::from_static("/config/server/port"),
+            Path::from_static("/config/server/ssl"),
+        ];
+        let result = longest_common_prefix(&paths);
+        assert_eq!(result.as_str(), "/config/server");
+    }
+
+    #[test]
+    fn test_longest_common_prefix_no_common_prefix() {
+        let paths = vec![
+            Path::from_static("/config"),
+            Path::from_static("/counters"),
+            Path::from_static("/settings"),
+        ];
+        let result = longest_common_prefix(&paths);
+        assert_eq!(result.as_str(), "");
+    }
+
+    #[test]
+    fn test_longest_common_prefix_root_paths() {
+        let paths = vec![
+            Path::from_static("/a/b"),
+            Path::from_static("/a/c"),
+            Path::from_static("/a/d"),
+        ];
+        let result = longest_common_prefix(&paths);
+        assert_eq!(result.as_str(), "/a");
     }
 }
