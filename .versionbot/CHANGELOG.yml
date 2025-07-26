@@ -1,4 +1,35 @@
 - commits:
+    - subject: Fix planner automated concurrency detection
+      hash: 3f06d226e082a9035f3b7bccafb4b542109ab45b
+      body: >
+        This fixes how the planner chooses tasks that can be executed
+
+        concurrently from the list of candidates of each stage. Before it
+
+        would use the longest list of non conflicting paths, but that is wrong,
+
+        because a task for `/a` should be chosen over a task for `/a/b` because
+
+        of the candidate preference. The new calculation chooses the longest
+        list
+
+        of non conflicting paths giving preference to shorter prefixes.
+
+
+        This also adds adds a new helper function for path conflict detection
+
+        when evaluating task methods and adds some testing for these helper
+
+        functions.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.17.2
+  title: ""
+  date: 2025-07-26T05:52:35.556Z
+- commits:
     - subject: Wrap seek_target tracing result in `display`
       hash: 183c69091f3d7b4f7419347567c769155da64e11
       body: |
