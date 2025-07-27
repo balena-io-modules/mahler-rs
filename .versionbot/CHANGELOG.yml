@@ -1,4 +1,24 @@
 - commits:
+    - subject: Fix method scoping to use sub-task scoping evaluation
+      hash: 43321234a82cdafaa5593166b2fec9d20de72fde
+      body: >
+        Methods now dynamically evaluate scoping by checking if all their
+
+        expanded sub-tasks are scoped, rather than using a static field.
+
+        This ensures better accuracy in parallelization detection for compound
+        tasks.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Closes: "#32"
+        closes: "#32"
+      author: Felipe Lalanne
+      nested: []
+  version: 0.17.3
+  title: ""
+  date: 2025-07-27T19:59:14.805Z
+- commits:
     - subject: Fix planner automated concurrency detection
       hash: 3f06d226e082a9035f3b7bccafb4b542109ab45b
       body: >
