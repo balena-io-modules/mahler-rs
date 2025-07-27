@@ -29,7 +29,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
 
     /// Return true if the handler requires scoped access to a partion of the system
     ///
-    /// A scoped handler is parallelizable.
+    /// A scoped handler supports concurrency.
     ///
     /// The scoping of the handler is determined from the extractor. If all extractors are scoped,
     /// then the handler is scoped.

@@ -126,7 +126,7 @@ struct Candidate {
     path: Path,
     operation: Operation,
     priority: u8,
-    parallelizable: bool,
+    concurrent: bool,
     is_method: bool,
 }
 
@@ -252,16 +252,16 @@ impl Planner {
 
                 // The method tasks can be executed concurrently if no task paths conflict
                 // and are all scoped (i.e. none of them requires access to System)
-                let parallelizable = paths_are_non_conflicting(
+                let concurrent = paths_are_non_conflicting(
                     extended_tasks
                         .iter()
                         .map(|task| task.path().clone())
                         .collect(),
-                ) && extended_tasks.iter().all(|task| task.is_scoped());
+                ) && extended_tasks.iter().all(|task| task.is_scoped(cur_state));
 
                 let mut cur_plan = cur_plan;
 
-                if parallelizable {
+                if concurrent {
                     let mut branches = vec![];
 
                     // Create a branch for each task
@@ -278,7 +278,7 @@ impl Planner {
                     // Clone the state in order to apply sequential changes
                     let mut cur_state = cur_state.clone();
 
-                    // If the task is not parallelizable, run tasks in sequence making
+                    // If the task cannot run concurrently, run tasks in sequence making
                     // sure to apply changes before calling the next task
                     for task in extended_tasks {
                         let mut changes = vec![];
@@ -371,7 +371,7 @@ impl Planner {
                                         workflow,
                                         changes,
                                         path: task.path().clone(),
-                                        parallelizable: task.is_scoped(),
+                                        concurrent: task.is_scoped(&cur_state),
                                         is_method: task.is_method(),
                                         operation: job.operation().clone(),
                                         priority: job.priority(),
@@ -427,34 +427,33 @@ impl Planner {
                 candidates.iter().map(|Candidate { path, .. }| path),
             );
 
-            // Find candidates that can be parallelized
-            let mut parallelizable: BTreeMap<Path, Candidate> = BTreeMap::new();
+            // Find candidates that can run concurrently
+            let mut concurrent_candidates: BTreeMap<Path, Candidate> = BTreeMap::new();
             for candidate in candidates.iter() {
                 // If the candidate is scoped and the path belongs to the non conflicting path list
-                // then add the candidate to the parallelizable list if there isn't a candidate already
-                // for that path
-                if candidate.parallelizable
-                    && !parallelizable.contains_key(&candidate.path)
+                // then add the candidate to the concurrent list if there isn't a path already
+                if candidate.concurrent
+                    && !concurrent_candidates.contains_key(&candidate.path)
                     && non_conflicting_paths.iter().any(|p| p == &candidate.path)
                 {
-                    parallelizable.insert(candidate.path.clone(), candidate.clone());
+                    concurrent_candidates.insert(candidate.path.clone(), candidate.clone());
                 }
             }
 
-            if parallelizable.len() > 1 {
+            if concurrent_candidates.len() > 1 {
                 let mut branches = Vec::new();
                 let mut changes = Vec::new();
                 let mut total_priority = 0;
                 // The path for the candidate is the longest common prefix between child paths
                 // XXX: maybe we need to skip the candidate if there is a method for the
                 // same path?
-                let path = longest_common_prefix(parallelizable.keys());
+                let path = longest_common_prefix(concurrent_candidates.keys());
                 for Candidate {
                     workflow,
                     changes: pending,
                     priority,
                     ..
-                } in parallelizable.into_values()
+                } in concurrent_candidates.into_values()
                 {
                     branches.push(workflow);
                     changes.extend(pending);
@@ -462,13 +461,13 @@ impl Planner {
                     total_priority += priority;
                 }
 
-                // Construct a new candidate using the parallel branches
+                // Construct a new candidate using the concurrent branches
                 // NOTE: we could keep adding branches to the DAG as long as there are non conflicting
                 // paths with the candidate path. For now we just do this operation once
                 candidates.push(Candidate {
                     workflow: Dag::new(branches),
                     changes,
-                    parallelizable: true,
+                    concurrent: true,
                     path,
                     // If there is a method for the same path, give more priority to the method
                     is_method: false,
@@ -673,7 +672,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, initial, target).unwrap();
 
-        // We expect counters to be updated in parallel
+        // We expect counters to be updated concurrently
         let expected: Dag<&str> = par!(
             "mahler::planner::tests::plus_one(/counters/one)",
             "mahler::planner::tests::plus_one(/counters/two)",
@@ -707,7 +706,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, initial, target).unwrap();
 
-        // We expect a parallel dag with two tasks on each branch
+        // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(
             seq!(
                 "mahler::planner::tests::plus_one(/counters/one)",
@@ -814,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn it_finds_parallel_plans_with_nested_forks() {
+    fn it_finds_concurrent_plans_with_nested_forks() {
         init();
         type Counters = BTreeMap<String, i32>;
 
@@ -824,7 +823,7 @@ mod tests {
         }
 
         // This is a very dumb example to test how the planner
-        // choses parallelizable methods over automated parallelization
+        // choses concurrent methods over automated concurrency
         fn multi_increment(counters: View<Counters>, target: Target<Counters>) -> Vec<Task> {
             counters
                 .keys()
@@ -894,7 +893,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, initial, target).unwrap();
 
-        // We expect a parallel dag with two tasks on each branch
+        // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(seq!("a++", "a++"), seq!("b++", "b++"))
             + dag!(seq!("c++", "c++"), seq!("d++", "d++"))
             + seq!("a++");

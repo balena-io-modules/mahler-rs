@@ -5,7 +5,7 @@ use std::{
 use thiserror::Error;
 
 /// A workflow error aggregating multiple errors
-/// in the execution of parallel branches of the
+/// in the execution of concurrent branches of the
 /// graph
 #[derive(Error, Debug)]
 pub struct AggregateError<E>(#[from] pub Vec<E>);

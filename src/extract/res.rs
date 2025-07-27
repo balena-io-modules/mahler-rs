@@ -86,7 +86,7 @@ use crate::task::{Context, FromSystem};
 ///     with_io(view, |view| async move {
 ///         {
 ///             // this is possible but it may interfere with the workflow execution
-///             // if there are multiple writers in parallel
+///             // if there are multiple writers running concurrently
 ///             let mut conf = config.write().await;
 ///             *conf = String::from("bar");
 ///         }
