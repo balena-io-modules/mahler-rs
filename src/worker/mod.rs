@@ -263,7 +263,7 @@ impl<O> Default for Worker<O, Uninitialized> {
     }
 }
 
-impl<O> Worker<O, Uninitialized> {
+impl<O, I> Worker<O, Uninitialized, I> {
     /// Create a new uninitialized Worker instance
     pub fn new() -> Self {
         Worker::from_inner(Uninitialized {
@@ -273,7 +273,7 @@ impl<O> Worker<O, Uninitialized> {
     }
 }
 
-impl<O> Worker<O, Uninitialized> {
+impl<O, I> Worker<O, Uninitialized, I> {
     /// Add a [Job](`crate::task::Job`) to the worker domain
     pub fn job(mut self, route: &'static str, job: Job) -> Self {
         self.inner.domain = self.inner.domain.job(route, job);
@@ -365,7 +365,7 @@ impl<O> Worker<O, Uninitialized> {
     /// # Errors
     /// The method will throw a [SerializationError](`crate::errors::SerializationError`) if the
     /// provided state cannot be converted to the internal state representation.
-    pub fn initial_state<I>(self, state: O) -> Result<Worker<O, Ready, I>, SerializationError>
+    pub fn initial_state(self, state: O) -> Result<Worker<O, Ready, I>, SerializationError>
     where
         O: Serialize,
     {

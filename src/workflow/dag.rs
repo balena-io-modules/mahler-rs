@@ -127,18 +127,14 @@ impl<T> Iterator for Iter<T> {
 ///     })
 /// }
 ///
-/// # tokio_test::block_on(async {
 /// // Setup the worker domain and resources
-/// let worker = Worker::new()
-///                 .job("", update(plus_one).with_description(|| "+1"))
-///                 .initial_state(0)
-///                 .unwrap();
-/// let workflow = worker.find_workflow(2).await.unwrap();
+/// let worker: Worker<i32> = Worker::new()
+///                 .job("", update(plus_one).with_description(|| "+1"));
+/// let workflow = worker.find_workflow(0, 2).unwrap();
 ///
 /// // We expect a linear DAG with two tasks
 /// let expected: Dag<&str> = seq!("+1", "+1");
 /// assert_eq!(workflow.to_string(), expected.to_string());
-/// # })
 /// ```
 ///
 /// # Operating with DAGs
