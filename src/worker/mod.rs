@@ -106,7 +106,8 @@ pub struct Uninitialized {
 /// At this point the Worker is ready to start seeking a target state
 #[derive(Clone)]
 pub struct Ready {
-    planner: Planner,
+    domain: Domain,
+    resources: Resources,
     system_rwlock: Arc<RwLock<System>>,
     update_event_channel: watch::Sender<()>,
     patch_tx: Sender<Patch>,
@@ -121,6 +122,28 @@ pub struct Stopped {}
 impl WorkerState for Uninitialized {}
 impl WorkerState for Ready {}
 impl WorkerState for Stopped {}
+
+pub trait WithResources {
+    fn insert_resource<R: Send + Sync + 'static>(&mut self, resource: R);
+}
+
+impl WithResources for Uninitialized {
+    fn insert_resource<R>(&mut self, resource: R)
+    where
+        R: Send + Sync + 'static,
+    {
+        self.resources.insert(resource);
+    }
+}
+
+impl WithResources for Ready {
+    fn insert_resource<R>(&mut self, resource: R)
+    where
+        R: Send + Sync + 'static,
+    {
+        self.resources.insert(resource);
+    }
+}
 
 /// Core component for workflow generation and execution
 ///
@@ -273,43 +296,14 @@ impl<O, I> Worker<O, Uninitialized, I> {
     }
 }
 
-impl<O, I> Worker<O, Uninitialized, I> {
-    /// Add a [Job](`crate::task::Job`) to the worker domain
-    pub fn job(mut self, route: &'static str, job: Job) -> Self {
-        self.inner.domain = self.inner.domain.job(route, job);
-        self
-    }
-
-    /// Add a list if jobs linked to the same route on the worker domain
-    ///
-    /// This is a convenience method to simplify the configuration of multiple jobs
-    /// for the same domain
-    ///
-    /// ```rust
-    /// use serde::{Deserialize, Serialize};
-    /// use mahler::worker::{Worker, Uninitialized};
-    /// use mahler::task::prelude::*;
-    ///
-    /// #[derive(Serialize, Deserialize)]
-    /// struct StateModel;
-    ///
-    /// fn foo() {}
-    /// fn bar() {}
-    ///
-    /// let worker: Worker<StateModel, Uninitialized> = Worker::new()
-    ///
-    ///         .jobs("/{foo}", [update(foo), update(bar)]);
-    /// ```
-    pub fn jobs<const N: usize>(mut self, route: &'static str, list: [Job; N]) -> Self {
-        self.inner.domain = self.inner.domain.jobs(route, list);
-        self
-    }
-
+impl<O, S: WorkerState + WithResources, I> Worker<O, S, I> {
     /// Add a shared resource to use within tasks
     ///
     /// Resources are stored by [TypeId](`std::any::TypeId`),
     /// meaning only one resource of each type is allowed. If multiple resources of the same type
     /// are configured, only the last one will be used.
+    ///
+    /// This method consumes self to use when chaining calls during Worker build
     ///
     /// ```rust
     /// use serde::{Deserialize, Serialize};
@@ -350,7 +344,88 @@ impl<O, I> Worker<O, Uninitialized, I> {
     where
         R: Send + Sync + 'static,
     {
-        self.inner.resources = self.inner.resources.with_res(res);
+        self.inner.insert_resource(res);
+        self
+    }
+
+    /// Add/update a shared resource to use within tasks
+    ///
+    /// Resources are stored by [TypeId](`std::any::TypeId`),
+    /// meaning only one resource of each type is allowed. If multiple resources of the same type
+    /// are configured, only the last one will be used.
+    ///
+    /// ```rust
+    /// use serde::{Deserialize, Serialize};
+    /// use mahler::worker::{Worker, Uninitialized};
+    ///
+    /// #[derive(Serialize, Deserialize)]
+    /// struct StateModel;
+    ///
+    /// // MyConnection represents a shared resource
+    /// struct MyConnection;
+    ///
+    /// let conn = MyConnection {/* .. */};
+    /// let otherconn = MyConnection { /* .. */};
+    ///
+    /// let mut worker: Worker<StateModel, Uninitialized> = Worker::new()
+    ///         // add conn as resource
+    ///         .resource(conn);
+    ///
+    /// // replace the connection
+    /// worker.use_resource(otherconn);
+    /// ```
+    ///
+    /// Resources can be accessed by jobs using the [Res extractor](`crate::extract::Res`).
+    ///
+    /// ```rust
+    /// use mahler::task::prelude::*;
+    /// use mahler::extract::Res;
+    ///
+    /// struct MyConnection;
+    ///
+    /// fn job_with_resource(res: Res<MyConnection>) {
+    ///     // Access the worker MyConnection instance by dereferencing `res`.
+    ///     // Initializing the extractor will fail if no resource of type MyConnection
+    ///     // has been assigned to the worker.
+    /// }
+    /// ```
+    pub fn use_resource<R>(&mut self, res: R)
+    where
+        R: Send + Sync + 'static,
+    {
+        self.inner.insert_resource(res);
+    }
+}
+
+impl<O, I> Worker<O, Uninitialized, I> {
+    /// Add a [Job](`crate::task::Job`) to the worker domain
+    pub fn job(mut self, route: &'static str, job: Job) -> Self {
+        self.inner.domain = self.inner.domain.job(route, job);
+        self
+    }
+
+    /// Add a list if jobs linked to the same route on the worker domain
+    ///
+    /// This is a convenience method to simplify the configuration of multiple jobs
+    /// for the same domain
+    ///
+    /// ```rust
+    /// use serde::{Deserialize, Serialize};
+    /// use mahler::worker::{Worker, Uninitialized};
+    /// use mahler::task::prelude::*;
+    ///
+    /// #[derive(Serialize, Deserialize)]
+    /// struct StateModel;
+    ///
+    /// fn foo() {}
+    /// fn bar() {}
+    ///
+    /// let worker: Worker<StateModel, Uninitialized> = Worker::new()
+    ///
+    ///         .jobs("/{foo}", [update(foo), update(bar)]);
+    /// ```
+    pub fn jobs<const N: usize>(mut self, route: &'static str, list: [Job; N]) -> Self {
+        self.inner.domain = self.inner.domain.jobs(route, list);
         self
     }
 
@@ -370,14 +445,11 @@ impl<O, I> Worker<O, Uninitialized, I> {
         O: Serialize,
     {
         let Uninitialized {
-            domain,
-            resources: env,
-            ..
+            domain, resources, ..
         } = self.inner;
 
-        // Create a new system with an initial state and the previously
-        // defined resources
-        let system = System::try_from(state).map(|s| s.with_resources(env))?;
+        // Create a new system with an initial state
+        let system = System::try_from(state)?;
 
         // Shared system protected by RwLock
         let system_rwlock = Arc::new(RwLock::new(system));
@@ -431,7 +503,8 @@ impl<O, I> Worker<O, Uninitialized, I> {
         }
 
         Ok(Worker::from_inner(Ready {
-            planner: Planner::new(domain),
+            domain,
+            resources,
             system_rwlock,
             update_event_channel,
             patch_tx,
@@ -641,12 +714,22 @@ impl<O, I> Worker<O, Ready, I> {
         let tgt = serde_json::to_value(tgt).map_err(SerializationError::from)?;
 
         let Ready {
-            planner,
+            resources,
+            domain,
             system_rwlock,
             notify_writer_closed,
             patch_tx,
             ..
         } = self.inner.clone();
+
+        // Create new planner
+        let planner = Planner::new(domain);
+
+        // Update system resources
+        {
+            let mut system = self.inner.system_rwlock.write().await;
+            system.set_resources(resources);
+        }
 
         enum InnerSeekResult {
             TargetReached,

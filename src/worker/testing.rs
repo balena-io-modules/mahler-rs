@@ -1,9 +1,9 @@
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
-use super::{Ready, Uninitialized, Worker};
-use crate::planner::{Error as PlannerError, Planner};
-use crate::system::System;
+use super::{Ready, Uninitialized, Worker, WorkerState};
+use crate::planner::{Domain, Error as PlannerError, Planner};
+use crate::system::{Resources, System};
 use crate::task::{self, Context};
 use crate::{task::Task, workflow::Workflow};
 
@@ -14,7 +14,31 @@ use crate::{task::Task, workflow::Workflow};
 /// This is returned by [`Worker::find_workflow`] when used on testing.
 pub struct NotFound;
 
-impl<O, I> Worker<O, Uninitialized, I> {
+impl AsRef<Resources> for Uninitialized {
+    fn as_ref(&self) -> &Resources {
+        &self.resources
+    }
+}
+
+impl AsRef<Domain> for Uninitialized {
+    fn as_ref(&self) -> &Domain {
+        &self.domain
+    }
+}
+
+impl AsRef<Resources> for Ready {
+    fn as_ref(&self) -> &Resources {
+        &self.resources
+    }
+}
+
+impl AsRef<Domain> for Ready {
+    fn as_ref(&self) -> &Domain {
+        &self.domain
+    }
+}
+
+impl<O, S: WorkerState + AsRef<Resources> + AsRef<Domain>, I> Worker<O, S, I> {
     #[cfg_attr(docsrs, doc(cfg(debug_assertions)))]
     /// Find a workflow for testing purposes within the context of the worker
     ///
@@ -55,12 +79,13 @@ impl<O, I> Worker<O, Uninitialized, I> {
         I: Serialize + DeserializeOwned,
         O: Serialize,
     {
-        let ini = System::try_from(cur)
-            .expect("failed to serialize initial state")
-            .with_resources(self.inner.resources.clone());
+        let mut ini = System::try_from(cur).expect("failed to serialize initial state");
+        let resources: &Resources = self.inner.as_ref();
+        ini.set_resources(resources.clone());
         let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
-        let planner = Planner::new(self.inner.domain.clone());
+        let domain: &Domain = self.inner.as_ref();
+        let planner = Planner::new(domain.clone());
 
         match planner.find_workflow::<I>(&ini, &tgt) {
             Ok(workflow) => Ok(workflow),
@@ -78,10 +103,10 @@ impl<O, I> Worker<O, Ready, I> {
     ) -> Result<(), task::Error> {
         let task_id = task.id().to_string();
         let Context { args, .. } = task.context_mut();
+
         let path = self
             .inner
-            .planner
-            .domain()
+            .domain
             .find_path_for_job(task_id.as_str(), args)
             .expect("could not find path for task");
 
@@ -153,12 +178,13 @@ impl<O, I> Worker<O, Ready, I> {
         O: Serialize + DeserializeOwned,
     {
         let mut system = self.inner.system_rwlock.read().await.clone();
+        system.set_resources(self.inner.resources.clone());
+
         let task_id = task.id().to_string();
         let Context { args, .. } = task.context_mut();
         let path = self
             .inner
-            .planner
-            .domain()
+            .domain
             .find_path_for_job(task_id.as_str(), args)
             .expect("could not find path for task");
 

@@ -113,7 +113,7 @@ impl<R: Send + Sync + 'static> FromSystem for Res<R> {
     type Error = ExtractionError;
 
     fn from_system(system: &System, _: &Context) -> Result<Self, Self::Error> {
-        let arc = system.get_res::<R>();
+        let arc = system.resource::<R>();
         Ok(Res(arc))
     }
 }
