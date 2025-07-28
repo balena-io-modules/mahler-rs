@@ -233,6 +233,9 @@ fn fetch_image(
     }
 
     with_io(image, |mut image| async move {
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         // Check if the image exists first, we do this because
         // we don't know if the initial state is correct
         match docker.inspect_image(&image_name).await {
@@ -309,6 +312,8 @@ fn remove_image(
 
     with_io(img_ptr, |img_ptr| async move {
         docker
+            .as_ref()
+            .expect("docker resource should be available")
             .remove_image(&image_name, None, None)
             .await
             .with_context(|| format!("failed to remove image {image_name}"))?;
@@ -329,7 +334,7 @@ fn fetch_service_image(Target(tgt): Target<TargetService>) -> Option<Task> {
 }
 
 async fn image_matches_with_target(
-    docker: &Res<Docker>,
+    docker: &Docker,
     tgt_img: &Option<String>,
     img_id: &Option<String>,
 ) -> bool {
@@ -374,6 +379,9 @@ fn install_service(
 
     with_io(svc_ptr, |mut svc_ptr| async move {
         let container_name = format!("{}_{}", project.name, service_name);
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         match docker.inspect_container(&container_name, None).await {
             Ok(svc_info) => {
                 let mut svc: Service = svc_info.into();
@@ -381,7 +389,7 @@ fn install_service(
                 // If the existing service has the same image id as the
                 // locally stored image, then we replace it with the target img
                 // name
-                if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+                if image_matches_with_target(docker, &tgt_img, &svc.image).await {
                     svc.image = tgt_img;
                 }
                 svc_ptr.assign(svc);
@@ -424,7 +432,7 @@ fn install_service(
             })?
             .into();
 
-        if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+        if image_matches_with_target(docker, &tgt_img, &svc.image).await {
             svc.image = tgt_img;
         }
 
@@ -460,6 +468,9 @@ fn start_service(
     }
 
     with_io(svc_view, |mut svc_view| async move {
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         if let Some(ref id) = svc_view.id {
             docker
                 .start_container(id, None::<StartContainerOptions<String>>)
@@ -475,7 +486,7 @@ fn start_service(
                 })?
                 .into();
 
-            if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+            if image_matches_with_target(docker, &tgt_img, &svc.image).await {
                 svc.image = tgt_img;
             }
             *svc_view = svc;
@@ -509,6 +520,9 @@ fn stop_service(
     }
 
     with_io(svc_view, |mut svc_view| async move {
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         if let Some(ref id) = svc_view.id {
             docker
                 .stop_container(id, None)
@@ -524,7 +538,7 @@ fn stop_service(
                 })?
                 .into();
 
-            if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+            if image_matches_with_target(docker, &tgt_img, &svc.image).await {
                 svc.image = tgt_img;
             }
             *svc_view = svc;
@@ -560,6 +574,9 @@ fn uninstall_service(
     }
 
     with_io(svc_ptr, |svc_ptr| async move {
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         if let Some(id) = svc_ptr.as_ref().and_then(|svc| svc.id.as_ref()) {
             docker
                 .remove_container(
