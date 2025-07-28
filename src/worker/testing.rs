@@ -93,9 +93,7 @@ impl<O, S: WorkerState + AsRef<Resources> + AsRef<Domain>, I> Worker<O, S, I> {
             Err(e) => panic!("unexpected planning error: {e}"),
         }
     }
-}
 
-impl<O, I> Worker<O, Ready, I> {
     async fn run_task_with_system(
         &self,
         mut task: Task,
@@ -104,9 +102,8 @@ impl<O, I> Worker<O, Ready, I> {
         let task_id = task.id().to_string();
         let Context { args, .. } = task.context_mut();
 
-        let path = self
-            .inner
-            .domain
+        let domain: &Domain = self.inner.as_ref();
+        let path = domain
             .find_path_for_job(task_id.as_str(), args)
             .expect("could not find path for task");
 
@@ -160,31 +157,33 @@ impl<O, I> Worker<O, Ready, I> {
     ///
     /// # tokio_test::block_on(async {
     /// // Setup the worker domain and resources
-    /// let worker: Worker<i32, Ready> = Worker::new().job("", update(plus_one)).initial_state(0).unwrap();
+    /// let worker: Worker<i32, _> = Worker::new().job("", update(plus_one));
     ///
     /// // Run task emulating a target of 2 and initial state of 0
-    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await.unwrap(), 1);
+    /// assert_eq!(worker.run_task(0, plus_one.with_target(2)).await.unwrap(), 1);
     ///
     /// // Run task emulating a target of 2 and initial state of 2 (no changes)
-    /// let worker: Worker<i32, Ready> = Worker::new().job("", update(plus_one)).initial_state(2).unwrap();
-    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await.unwrap(), 2);
+    /// let worker: Worker<i32, _> = Worker::new().job("", update(plus_one));
+    /// assert_eq!(worker.run_task(2, plus_one.with_target(2)).await.unwrap(), 2);
     /// # })
     /// ```
     ///
     /// # Panics
     /// This function will panic if a sewrialization or internal error happens during execution
-    pub async fn run_task(&self, mut task: Task) -> Result<O, task::Error>
+    pub async fn run_task(&self, initial_state: O, mut task: Task) -> Result<O, task::Error>
     where
         O: Serialize + DeserializeOwned,
     {
-        let mut system = self.inner.system_rwlock.read().await.clone();
-        system.set_resources(self.inner.resources.clone());
+        let mut system =
+            System::try_from(initial_state).expect("failed to serialize initial state");
+
+        let resources: &Resources = self.inner.as_ref();
+        system.set_resources(resources.clone());
 
         let task_id = task.id().to_string();
         let Context { args, .. } = task.context_mut();
-        let path = self
-            .inner
-            .domain
+        let domain: &Domain = self.inner.as_ref();
+        let path = domain
             .find_path_for_job(task_id.as_str(), args)
             .expect("could not find path for task");
 
@@ -234,15 +233,19 @@ mod tests {
 
         let worker: Worker<Counters, _> = Worker::new()
             .job("/{counter}", update(plus_one))
-            .job("/{counter}", update(plus_two))
-            .initial_state(Counters(HashMap::from([
-                ("one".to_string(), 1),
-                ("two".to_string(), 0),
-            ])))
-            .unwrap();
+            .job("/{counter}", update(plus_two));
 
         let task = plus_one.with_target(3).with_arg("counter", "one");
-        let res = worker.run_task(task).await.unwrap();
+        let res = worker
+            .run_task(
+                Counters(HashMap::from([
+                    ("one".to_string(), 1),
+                    ("two".to_string(), 0),
+                ])),
+                task,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
             res,
@@ -269,7 +272,16 @@ mod tests {
 
         let task = plus_two.with_target(3).with_arg("counter", "one");
 
-        let res = worker.run_task(task).await.unwrap();
+        let res = worker
+            .run_task(
+                Counters(HashMap::from([
+                    ("one".to_string(), 0),
+                    ("two".to_string(), 0),
+                ])),
+                task,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
             res,

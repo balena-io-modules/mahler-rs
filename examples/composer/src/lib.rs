@@ -765,11 +765,12 @@ mod tests {
         let docker = Docker::connect_with_defaults().unwrap();
         let _ = docker.info().await.unwrap();
 
-        let worker = create_worker()
-            .initial_state(Project::new(PROJECT_NAME))
-            .unwrap();
+        let worker = create_worker();
         let state = worker
-            .run_task(fetch_image.with_arg("image_name", "alpine:3.18"))
+            .run_task(
+                Project::new(PROJECT_NAME),
+                fetch_image.with_arg("image_name", "alpine:3.18"),
+            )
             .await
             .unwrap();
 
