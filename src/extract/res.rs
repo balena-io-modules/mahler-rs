@@ -1,5 +1,3 @@
-use anyhow::Context as AnyhowCxt;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::errors::ExtractionError;
@@ -10,8 +8,6 @@ use crate::task::{Context, FromSystem};
 ///
 /// This extractor will look for a resource of type `<R>` for the [Worker](`crate::worker::Worker`) and
 /// provides read-only access to a resource reference if it exists.
-///
-/// Internally, this extractor stores the resource as an `Arc<R>`;
 ///
 /// # Example
 ///
@@ -41,10 +37,10 @@ use crate::task::{Context, FromSystem};
 ///     // can be access within the Job handler
 /// }
 ///
-/// let worker: Worker<SystemState, Ready> = Worker::new()
+/// let mut worker: Worker<SystemState, Ready> = Worker::new()
 ///     .job("/{foo}/{bar}", update(multiple_resources))
-///     .resource(MyConnection {/* ... */})
-///     .resource(MyConfig {/* ... */})
+///     .resource(MyConnection {/* .. */})
+///     .resource(MyConfig {/* .. */})
 ///     .initial_state(SystemState {/* ... */})
 ///     .unwrap();
 /// ```
@@ -84,7 +80,7 @@ use crate::task::{Context, FromSystem};
 /// fn edit_resources(view: View<i32>, config: Res<MyConfig>) -> Update<i32> {
 ///     // update view
 ///     with_io(view, |view| async move {
-///         {
+///         if let Some(config) = config.as_ref() {
 ///             // this is possible but it may interfere with the workflow execution
 ///             // if there are multiple writers running concurrently
 ///             let mut conf = config.write().await;
@@ -101,34 +97,23 @@ use crate::task::{Context, FromSystem};
 ///     .initial_state(SystemState {/* ... */})
 ///     .unwrap();
 /// ```
-///
-/// # Errors
-/// Initialization of the extractor will fail if there is no resource of type `<R>` configured for
-/// the `Worker`.
 #[derive(Debug, Clone)]
-pub struct Res<R>(Arc<R>);
+pub struct Res<R>(Option<Arc<R>>);
+
+impl<R> Res<R> {
+    /// Returns a reference to the resource wrapped in an Option
+    ///
+    /// Returns None if the resource is not defined on the system
+    pub fn as_ref(&self) -> Option<&R> {
+        self.0.as_deref()
+    }
+}
 
 impl<R: Send + Sync + 'static> FromSystem for Res<R> {
     type Error = ExtractionError;
 
     fn from_system(system: &System, _: &Context) -> Result<Self, Self::Error> {
-        let arc = system
-            .get_res::<R>()
-            .with_context(|| {
-                format!(
-                    "failed to find resource of type {}",
-                    std::any::type_name::<R>()
-                )
-            })
-            .map_err(ExtractionError::from)?;
+        let arc = system.resource::<R>();
         Ok(Res(arc))
-    }
-}
-
-impl<R> Deref for Res<R> {
-    type Target = R;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }

@@ -1,12 +1,9 @@
-use std::sync::Arc;
-
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
-use tokio::sync::RwLock;
 
-use super::{Ready, Worker};
-use crate::planner::{Error as PlannerError, Planner};
-use crate::system::System;
+use super::{Ready, Uninitialized, Worker, WorkerState};
+use crate::planner::{Domain, Error as PlannerError, Planner};
+use crate::system::{Resources, System};
 use crate::task::{self, Context};
 use crate::{task::Task, workflow::Workflow};
 
@@ -17,29 +14,31 @@ use crate::{task::Task, workflow::Workflow};
 /// This is returned by [`Worker::find_workflow`] when used on testing.
 pub struct NotFound;
 
-async fn find_workflow<I>(
-    system: &Arc<RwLock<System>>,
-    planner: &Planner,
-    tgt: I,
-) -> Result<Workflow, NotFound>
-where
-    I: Serialize + DeserializeOwned,
-{
-    let cur = {
-        let sys = system.read().await;
-        sys.clone()
-    };
-
-    let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
-
-    match planner.find_workflow::<I>(&cur, &tgt) {
-        Ok(workflow) => Ok(workflow),
-        Err(PlannerError::NotFound) => Err(NotFound),
-        Err(e) => panic!("unexpected planning error: {e}"),
+impl AsRef<Resources> for Uninitialized {
+    fn as_ref(&self) -> &Resources {
+        &self.resources
     }
 }
 
-impl<O, I> Worker<O, Ready, I> {
+impl AsRef<Domain> for Uninitialized {
+    fn as_ref(&self) -> &Domain {
+        &self.domain
+    }
+}
+
+impl AsRef<Resources> for Ready {
+    fn as_ref(&self) -> &Resources {
+        &self.resources
+    }
+}
+
+impl AsRef<Domain> for Ready {
+    fn as_ref(&self) -> &Domain {
+        &self.domain
+    }
+}
+
+impl<O, S: WorkerState + AsRef<Resources> + AsRef<Domain>, I> Worker<O, S, I> {
     #[cfg_attr(docsrs, doc(cfg(debug_assertions)))]
     /// Find a workflow for testing purposes within the context of the worker
     ///
@@ -62,28 +61,37 @@ impl<O, I> Worker<O, Ready, I> {
     ///    })
     /// }
     ///
-    /// # tokio_test::block_on(async {
     /// // Setup the worker domain and resources
     /// let worker = Worker::new()
-    ///                 .job("", update(plus_one).with_description(|| "+1"))
-    ///                 .initial_state(0)
-    ///                 .unwrap();
-    /// let workflow = worker.find_workflow(2).await.unwrap();
+    ///                 .job("", update(plus_one).with_description(|| "+1"));
+    /// let workflow = worker.find_workflow(0, 2).unwrap();
     ///
     /// // We expect a linear DAG with two tasks
     /// let expected: Dag<&str> = seq!("+1", "+1");
     /// assert_eq!(workflow.to_string(), expected.to_string());
-    /// # })
     /// ```
     ///
     /// # Panics
     ///
     /// This function will panic if any error happens during planning
-    pub async fn find_workflow(&self, tgt: I) -> Result<Workflow, NotFound>
+    pub fn find_workflow(&self, cur: O, tgt: I) -> Result<Workflow, NotFound>
     where
         I: Serialize + DeserializeOwned,
+        O: Serialize,
     {
-        find_workflow::<I>(&self.inner.system_rwlock, &self.inner.planner, tgt).await
+        let mut ini = System::try_from(cur).expect("failed to serialize initial state");
+        let resources: &Resources = self.inner.as_ref();
+        ini.set_resources(resources.clone());
+        let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
+
+        let domain: &Domain = self.inner.as_ref();
+        let planner = Planner::new(domain.clone());
+
+        match planner.find_workflow::<I>(&ini, &tgt) {
+            Ok(workflow) => Ok(workflow),
+            Err(PlannerError::NotFound) => Err(NotFound),
+            Err(e) => panic!("unexpected planning error: {e}"),
+        }
     }
 
     async fn run_task_with_system(
@@ -93,10 +101,9 @@ impl<O, I> Worker<O, Ready, I> {
     ) -> Result<(), task::Error> {
         let task_id = task.id().to_string();
         let Context { args, .. } = task.context_mut();
-        let path = self
-            .inner
-            .planner
-            .domain()
+
+        let domain: &Domain = self.inner.as_ref();
+        let path = domain
             .find_path_for_job(task_id.as_str(), args)
             .expect("could not find path for task");
 
@@ -133,7 +140,7 @@ impl<O, I> Worker<O, Ready, I> {
     ///
     /// use mahler::task::{self, prelude::*};
     /// use mahler::extract::{View, Target};
-    /// use mahler::worker::Worker;
+    /// use mahler::worker::{Worker, Ready};
     ///
     /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
     ///    if *counter < tgt {
@@ -150,30 +157,33 @@ impl<O, I> Worker<O, Ready, I> {
     ///
     /// # tokio_test::block_on(async {
     /// // Setup the worker domain and resources
-    /// let worker = Worker::new().job("", update(plus_one)).initial_state::<i32>(0).unwrap();
+    /// let worker: Worker<i32, _> = Worker::new().job("", update(plus_one));
     ///
     /// // Run task emulating a target of 2 and initial state of 0
-    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await.unwrap(), 1);
+    /// assert_eq!(worker.run_task(0, plus_one.with_target(2)).await.unwrap(), 1);
     ///
     /// // Run task emulating a target of 2 and initial state of 2 (no changes)
-    /// let worker = Worker::new().job("", update(plus_one)).initial_state::<i32>(2).unwrap();
-    /// assert_eq!(worker.run_task(plus_one.with_target(2)).await.unwrap(), 2);
+    /// let worker: Worker<i32, _> = Worker::new().job("", update(plus_one));
+    /// assert_eq!(worker.run_task(2, plus_one.with_target(2)).await.unwrap(), 2);
     /// # })
     /// ```
     ///
     /// # Panics
     /// This function will panic if a sewrialization or internal error happens during execution
-    pub async fn run_task(&self, mut task: Task) -> Result<O, task::Error>
+    pub async fn run_task(&self, initial_state: O, mut task: Task) -> Result<O, task::Error>
     where
         O: Serialize + DeserializeOwned,
     {
-        let mut system = self.inner.system_rwlock.read().await.clone();
+        let mut system =
+            System::try_from(initial_state).expect("failed to serialize initial state");
+
+        let resources: &Resources = self.inner.as_ref();
+        system.set_resources(resources.clone());
+
         let task_id = task.id().to_string();
         let Context { args, .. } = task.context_mut();
-        let path = self
-            .inner
-            .planner
-            .domain()
+        let domain: &Domain = self.inner.as_ref();
+        let path = domain
             .find_path_for_job(task_id.as_str(), args)
             .expect("could not find path for task");
 
@@ -190,6 +200,7 @@ impl<O, I> Worker<O, Ready, I> {
 mod tests {
     use pretty_assertions::assert_eq;
     use serde::Deserialize;
+    use serde_json::json;
     use std::collections::HashMap;
 
     use super::*;
@@ -220,17 +231,21 @@ mod tests {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
         struct Counters(HashMap<String, i32>);
 
-        let worker = Worker::new()
+        let worker: Worker<Counters, _> = Worker::new()
             .job("/{counter}", update(plus_one))
-            .job("/{counter}", update(plus_two))
-            .initial_state::<Counters>(Counters(HashMap::from([
-                ("one".to_string(), 1),
-                ("two".to_string(), 0),
-            ])))
-            .unwrap();
+            .job("/{counter}", update(plus_two));
 
         let task = plus_one.with_target(3).with_arg("counter", "one");
-        let res = worker.run_task(task).await.unwrap();
+        let res = worker
+            .run_task(
+                Counters(HashMap::from([
+                    ("one".to_string(), 1),
+                    ("two".to_string(), 0),
+                ])),
+                task,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
             res,
@@ -246,10 +261,10 @@ mod tests {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
         struct Counters(HashMap<String, i32>);
 
-        let worker = Worker::new()
+        let worker: Worker<Counters, _> = Worker::new()
             .job("/{counter}", update(plus_one))
             .job("/{counter}", update(plus_two))
-            .initial_state::<Counters>(Counters(HashMap::from([
+            .initial_state(Counters(HashMap::from([
                 ("one".to_string(), 0),
                 ("two".to_string(), 0),
             ])))
@@ -257,7 +272,16 @@ mod tests {
 
         let task = plus_two.with_target(3).with_arg("counter", "one");
 
-        let res = worker.run_task(task).await.unwrap();
+        let res = worker
+            .run_task(
+                Counters(HashMap::from([
+                    ("one".to_string(), 0),
+                    ("two".to_string(), 0),
+                ])),
+                task,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
             res,
@@ -273,21 +297,15 @@ mod tests {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
         struct Counters(HashMap<String, i32>);
 
-        let worker = Worker::new()
+        let worker: Worker<Counters, _> = Worker::new()
             .job("/{counter}", update(plus_one))
-            .job("/{counter}", update(plus_two))
-            .initial_state(Counters(HashMap::from([
-                ("one".to_string(), 0),
-                ("two".to_string(), 0),
-            ])))
-            .unwrap();
+            .job("/{counter}", update(plus_two));
 
         let workflow = worker
-            .find_workflow(Counters(HashMap::from([
-                ("one".to_string(), 2),
-                ("two".to_string(), 1),
-            ])))
-            .await
+            .find_workflow(
+                serde_json::from_value(json!({"one": 0, "two": 0})).unwrap(),
+                serde_json::from_value(json!({"one": 2, "two": 1})).unwrap(),
+            )
             .unwrap();
 
         // We expect a linear DAG with three tasks

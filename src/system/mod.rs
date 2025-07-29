@@ -22,13 +22,12 @@ impl Resources {
         Self(HashMap::new())
     }
 
-    pub fn with_res<R>(mut self, res: R) -> Self
+    pub fn insert<R>(&mut self, res: R)
     where
         R: Send + Sync + 'static,
     {
         let type_id = TypeId::of::<R>();
         self.0.insert(type_id, Arc::new(res));
-        self
     }
 
     pub fn get<R>(&self) -> Option<Arc<R>>
@@ -84,20 +83,11 @@ impl System {
         Ok(s)
     }
 
-    pub(crate) fn with_resources(mut self, env: Resources) -> Self {
-        self.resources = env;
-        self
+    pub(crate) fn set_resources(&mut self, resources: Resources) {
+        self.resources = resources;
     }
 
-    pub fn with_res<R>(mut self, res: R) -> Self
-    where
-        R: Send + Sync + 'static,
-    {
-        self.resources = self.resources.with_res(res);
-        self
-    }
-
-    pub(crate) fn get_res<R>(&self) -> Option<Arc<R>>
+    pub(crate) fn resource<R>(&self) -> Option<Arc<R>>
     where
         R: Send + Sync + 'static,
     {

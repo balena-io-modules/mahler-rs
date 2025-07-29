@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context as AnyhowCtx};
 use bollard::container::{CreateContainerOptions, StartContainerOptions};
 use bollard::secret::{ContainerInspectResponse, ContainerState, ContainerStateStatusEnum};
 use futures_util::stream::StreamExt;
-use mahler::worker::{Ready, Worker};
+use mahler::worker::{Uninitialized, Worker};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -233,6 +233,9 @@ fn fetch_image(
     }
 
     with_io(image, |mut image| async move {
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         // Check if the image exists first, we do this because
         // we don't know if the initial state is correct
         match docker.inspect_image(&image_name).await {
@@ -309,6 +312,8 @@ fn remove_image(
 
     with_io(img_ptr, |img_ptr| async move {
         docker
+            .as_ref()
+            .expect("docker resource should be available")
             .remove_image(&image_name, None, None)
             .await
             .with_context(|| format!("failed to remove image {image_name}"))?;
@@ -329,7 +334,7 @@ fn fetch_service_image(Target(tgt): Target<TargetService>) -> Option<Task> {
 }
 
 async fn image_matches_with_target(
-    docker: &Res<Docker>,
+    docker: &Docker,
     tgt_img: &Option<String>,
     img_id: &Option<String>,
 ) -> bool {
@@ -374,6 +379,9 @@ fn install_service(
 
     with_io(svc_ptr, |mut svc_ptr| async move {
         let container_name = format!("{}_{}", project.name, service_name);
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         match docker.inspect_container(&container_name, None).await {
             Ok(svc_info) => {
                 let mut svc: Service = svc_info.into();
@@ -381,7 +389,7 @@ fn install_service(
                 // If the existing service has the same image id as the
                 // locally stored image, then we replace it with the target img
                 // name
-                if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+                if image_matches_with_target(docker, &tgt_img, &svc.image).await {
                     svc.image = tgt_img;
                 }
                 svc_ptr.assign(svc);
@@ -424,7 +432,7 @@ fn install_service(
             })?
             .into();
 
-        if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+        if image_matches_with_target(docker, &tgt_img, &svc.image).await {
             svc.image = tgt_img;
         }
 
@@ -460,6 +468,9 @@ fn start_service(
     }
 
     with_io(svc_view, |mut svc_view| async move {
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         if let Some(ref id) = svc_view.id {
             docker
                 .start_container(id, None::<StartContainerOptions<String>>)
@@ -475,7 +486,7 @@ fn start_service(
                 })?
                 .into();
 
-            if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+            if image_matches_with_target(docker, &tgt_img, &svc.image).await {
                 svc.image = tgt_img;
             }
             *svc_view = svc;
@@ -509,6 +520,9 @@ fn stop_service(
     }
 
     with_io(svc_view, |mut svc_view| async move {
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         if let Some(ref id) = svc_view.id {
             docker
                 .stop_container(id, None)
@@ -524,7 +538,7 @@ fn stop_service(
                 })?
                 .into();
 
-            if image_matches_with_target(&docker, &tgt_img, &svc.image).await {
+            if image_matches_with_target(docker, &tgt_img, &svc.image).await {
                 svc.image = tgt_img;
             }
             *svc_view = svc;
@@ -560,6 +574,9 @@ fn uninstall_service(
     }
 
     with_io(svc_ptr, |svc_ptr| async move {
+        let docker = docker
+            .as_ref()
+            .expect("docker resource should be available");
         if let Some(id) = svc_ptr.as_ref().and_then(|svc| svc.id.as_ref()) {
             docker
                 .remove_container(
@@ -624,7 +641,7 @@ fn purge_service(svc_view: View<Service>) -> Vec<Task> {
     actions
 }
 
-pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> {
+pub fn create_worker() -> Worker<Project, Uninitialized, TargetProject> {
     // Initialize the connection
     let docker = Docker::connect_with_defaults().unwrap();
 
@@ -665,8 +682,6 @@ pub fn create_worker(project: Project) -> Worker<Project, Ready, TargetProject> 
             ],
         )
         .resource::<Docker>(docker)
-        .initial_state(project)
-        .unwrap()
 }
 
 #[cfg(test)]
@@ -750,9 +765,12 @@ mod tests {
         let docker = Docker::connect_with_defaults().unwrap();
         let _ = docker.info().await.unwrap();
 
-        let worker = create_worker(Project::new(PROJECT_NAME));
+        let worker = create_worker();
         let state = worker
-            .run_task(fetch_image.with_arg("image_name", "alpine:3.18"))
+            .run_task(
+                Project::new(PROJECT_NAME),
+                fetch_image.with_arg("image_name", "alpine:3.18"),
+            )
             .await
             .unwrap();
 
@@ -768,7 +786,9 @@ mod tests {
     async fn it_can_start_container() {
         before();
 
-        let worker = create_worker(Project::new(PROJECT_NAME));
+        let worker = create_worker()
+            .initial_state(Project::new(PROJECT_NAME))
+            .unwrap();
         let target = serde_json::from_value::<TargetProject>(json!({
             "name": "my-project",
             "services": {
@@ -818,7 +838,7 @@ mod tests {
             "services": {}
         }))
         .unwrap();
-        let worker = create_worker(initial_state);
+        let worker = create_worker();
         let target = serde_json::from_value::<TargetProject>(json!({
             "name": "my-project",
             "services": {
@@ -831,7 +851,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = worker.find_workflow(target).await.unwrap();
+        let workflow = worker.find_workflow(initial_state, target).unwrap();
         let expected: Dag<&str> = seq!(
             "pull image 'alpine:3.18'",
             "install container for service 'my-service'",
@@ -858,7 +878,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let worker = create_worker(initial_state);
+        let worker = create_worker();
         let target = serde_json::from_value::<TargetProject>(json!({
             "name": "my-project",
             "services": {
@@ -871,7 +891,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = worker.find_workflow(target).await.unwrap();
+        let workflow = worker.find_workflow(initial_state, target).unwrap();
         let expected: Dag<&str> = seq!(
             "stop container for service 'my-service'",
             "remove container for service 'my-service'",
@@ -899,7 +919,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let worker = create_worker(initial_state);
+        let worker = create_worker();
         let target = serde_json::from_value::<TargetProject>(json!({
             "name": "my-project",
             "services": {
@@ -912,7 +932,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = worker.find_workflow(target).await.unwrap();
+        let workflow = worker.find_workflow(initial_state, target).unwrap();
         let expected: Dag<&str> = seq!(
             "pull image 'alpine:3.20'",
             "stop container for service 'my-service'",
@@ -925,10 +945,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_finds_a_workflow_to_start_container() {
+        before();
+
+        let initial_state = serde_json::from_value::<Project>(json!({
+            "name": "my-project",
+            "images": {
+                "alpine:3.18": {}
+            },
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Created"
+                }
+            }
+        }))
+        .unwrap();
+        let worker = create_worker();
+        let target = serde_json::from_value::<TargetProject>(json!({
+            "name": "my-project",
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Running"
+                }
+            }
+        }))
+        .unwrap();
+
+        let workflow = worker.find_workflow(initial_state, target).unwrap();
+        let expected: Dag<&str> = seq!("start container for service 'my-service'",);
+        assert_eq!(workflow.to_string(), expected.to_string());
+
+        let initial_state = serde_json::from_value::<Project>(json!({
+            "name": "my-project",
+            "images": {
+                "alpine:3.18": {}
+            },
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Stopped"
+                }
+            }
+        }))
+        .unwrap();
+        let target = serde_json::from_value::<TargetProject>(json!({
+            "name": "my-project",
+            "services": {
+                "my-service": {
+                    "image": "alpine:3.18",
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Running"
+                }
+            }
+        }))
+        .unwrap();
+
+        let workflow = worker.find_workflow(initial_state, target).unwrap();
+        let expected: Dag<&str> = seq!("start container for service 'my-service'",);
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[tokio::test]
     async fn test_create_start_and_stop_container() {
         before();
 
-        let worker = create_worker(Project::new(PROJECT_NAME));
+        let worker = create_worker()
+            .initial_state(Project::new(PROJECT_NAME))
+            .unwrap();
         let target = serde_json::from_value::<TargetProject>(json!({
             "name": "my-project",
             "services": {
@@ -975,10 +1063,6 @@ mod tests {
             }
         }))
         .unwrap();
-
-        let workflow = worker.find_workflow(target.clone()).await.unwrap();
-        let expected: Dag<&str> = seq!("start container for service 'my-service'");
-        assert_eq!(workflow.to_string(), expected.to_string());
 
         // Seeking the target must succeed
         let mut worker = worker;

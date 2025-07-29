@@ -171,10 +171,6 @@ impl Planner {
         Self(domain)
     }
 
-    pub fn domain(&self) -> &Domain {
-        &self.0
-    }
-
     #[instrument(level="trace", skip_all, fields(id=%task.id(), path=%task.path()), err(level=Level::TRACE))]
     fn try_task(
         &self,
