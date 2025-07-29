@@ -1,4 +1,71 @@
 - commits:
+    - subject: Refactor Worker test interface to accept initial state as parameter
+      hash: 9957d4e7a15b5e26d7ec4b5fdf1fb4dd8ac8e007
+      body: >
+        Modify run_task to accept the initial state directly as a parameter.
+
+        This simplifies the testing interface and removes state-dependent
+        generic constraints.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Refactor Worker resource management system
+      hash: 6daf403fdefc1d3280a37f9f64d3ede0a6a74702
+      body: >
+        - Replace domain+resources composition pattern with separate state
+        management
+
+        - Split Ready state to hold domain and resources separately for cleaner
+        access
+
+        - Rename get_res to resource() for consistency
+
+        - Add WithResources trait to enable resource updates across worker
+        states
+
+        - Remove unused planner.domain() method and simplify resource insertion
+        API
+
+        - Update test methods to work with new resource management approach
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Make Worker::find_workflow test method synchronous
+      hash: 4ede2ee68aafcaed1f293dd0bc0342e28b8c8030
+      body: |
+        Removes the need for awaiting a workflow to be generated.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Refactor Res extractor to be optional
+      hash: 6d0ddb5be02ce3c65f6d65bb17ec2bcbb4c4a67f
+      body: >
+        Changes Res<R> from requiring resources to be present to returning
+
+        an optional resource. This is a breaking change, that while it makes the
+
+        use of `Res` a bit less ergonomic, it also allows testing workflow
+
+        search without the need for having resources defined.
+
+
+        Updates composer example to handle optional Docker resource with proper
+        error messages.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.18.0
+  title: ""
+  date: 2025-07-29T15:19:18.058Z
+- commits:
     - subject: Fix method scoping to use sub-task scoping evaluation
       hash: 43321234a82cdafaa5593166b2fec9d20de72fde
       body: >
