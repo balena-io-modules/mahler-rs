@@ -1,4 +1,20 @@
 - commits:
+    - subject: Update matchit to fix empty routes issue
+      hash: 345033af1e7bf2f5ae44e748aed29f4a0c5de847
+      body: |
+        Inconsistent behavior would happen when inserting an empty route first
+        in the domain. This was traced to the matchit dependency and fixed on
+        https://github.com/ibraheemdev/matchit/pull/76, this update that
+        dependency to that revision
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.18.1
+  title: ""
+  date: 2025-08-01T14:20:31.061Z
+- commits:
     - subject: Refactor Worker test interface to accept initial state as parameter
       hash: 9957d4e7a15b5e26d7ec4b5fdf1fb4dd8ac8e007
       body: >
