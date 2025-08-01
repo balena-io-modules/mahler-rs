@@ -1,4 +1,16 @@
 - commits:
+    - subject: Fix missing matchit version for cargo publish
+      hash: 49a9c67fee0d9a680125bcdebd372933da783822
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.18.2
+  title: ""
+  date: 2025-08-01T15:27:51.283Z
+- commits:
     - subject: Update matchit to fix empty routes issue
       hash: 345033af1e7bf2f5ae44e748aed29f4a0c5de847
       body: |
