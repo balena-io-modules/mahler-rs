@@ -339,6 +339,7 @@ impl Planner {
                 let path = Path::new(op.path());
 
                 // Retrieve matching jobs at this path
+                trace!("finding jobs for path '{path}'");
                 if let Some((args, jobs)) = self.0.find_matching_jobs(path.as_str()) {
                     let pointer = path.as_ref();
                     let target = pointer.resolve(tgt).unwrap_or(&Value::Null);

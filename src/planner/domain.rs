@@ -324,4 +324,19 @@ mod tests {
         let result = domain.find_path_for_job(func.id(), &mut args);
         assert!(result.is_err());
     }
+
+    // See: https://github.com/ibraheemdev/matchit/issues/75
+    #[test]
+    fn test_finds_jobs_for_empty_paths() {
+        let func = |view: View<()>| view;
+        let domain = Domain::new()
+            .job("", update(func))
+            .job("/other", update(plus_two));
+
+        if let Some((_, mut jobs)) = domain.find_matching_jobs("") {
+            assert!(jobs.any(|j| j.id() == func.id()));
+        } else {
+            panic!("should find a job")
+        }
+    }
 }
