@@ -339,7 +339,7 @@ impl Planner {
                 let path = Path::new(op.path());
 
                 // Retrieve matching jobs at this path
-                trace!("finding jobs for path '{path}'");
+                trace!("finding jobs for op '{op}'");
                 if let Some((args, jobs)) = self.0.find_matching_jobs(path.as_str()) {
                     let pointer = path.as_ref();
                     let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
@@ -763,7 +763,7 @@ mod tests {
         }
 
         fn new_counter(mut counter: Pointer<i32>, Target(tgt): Target<i32>) -> Pointer<i32> {
-            counter.assign(tgt);
+            counter.replace(tgt);
             counter
         }
 
@@ -773,7 +773,7 @@ mod tests {
         }
 
         fn new_config(mut config: Pointer<String>, Target(tgt): Target<String>) -> Pointer<String> {
-            config.assign(tgt);
+            config.replace(tgt);
             config
         }
 

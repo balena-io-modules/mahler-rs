@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context as AnyhowCtx};
+use anyhow::Context as AnyhowCtx;
 use json_patch::{
     diff, AddOperation, CopyOperation, MoveOperation, Patch, PatchOperation, RemoveOperation,
     ReplaceOperation, TestOperation,
@@ -15,12 +15,12 @@ use crate::path::Path;
 use crate::system::System;
 use crate::task::{Context, Effect, Error, FromSystem, IntoResult};
 
-/// Extracts a pointer to a sub-element of the global state indicated
+/// Extracts a view to a sub-element of the global state indicated
 /// by the path.
 ///
 /// The type of the sub-element is given by the type parameter T.
 ///
-/// The pointer can be null, meaning the parent of the element exists,
+/// The View can be null, meaning the parent of the element exists,
 /// but the specific location pointed by the path does not exist.
 ///
 /// # Example
@@ -60,44 +60,25 @@ use crate::task::{Context, Effect, Error, FromSystem, IntoResult};
 /// Initializing the extractor will fail if the path assigned to the job cannot be resolved or the
 /// value pointed by the path cannot be deserialized into type `<T>`
 #[derive(Debug)]
-pub struct Pointer<T> {
+pub struct View<T> {
     initial: Value,
-    state: Option<T>,
+    state: T,
     path: Path,
 }
 
-impl<T> Pointer<T> {
+impl<T> View<T> {
     // The only way to create a pointer is via the
     // from_system method
-    fn new(initial: Value, state: Option<T>, path: Path) -> Self {
-        Pointer {
+    fn new(initial: Value, state: T, path: Path) -> Self {
+        Self {
             initial,
             state,
             path,
         }
     }
-
-    /// Assign a value to location indicated by the path.
-    pub fn assign(&mut self, value: impl Into<T>) -> &mut T {
-        self.insert(value.into())
-    }
-
-    /// Clear the value at the location indicated by the path
-    pub fn unassign(mut self) -> Self {
-        self.state.take();
-        self
-    }
-
-    /// Initialize the location pointed by the path with the defaut value of the type T.
-    pub fn zero(&mut self) -> &mut T
-    where
-        T: Default,
-    {
-        self.assign(T::default())
-    }
 }
 
-impl<T: DeserializeOwned> FromSystem for Pointer<T> {
+impl<T: DeserializeOwned> FromSystem for View<T> {
     type Error = ExtractionError;
 
     fn from_system(system: &System, context: &Context) -> Result<Self, Self::Error> {
@@ -111,45 +92,62 @@ impl<T: DeserializeOwned> FromSystem for Pointer<T> {
         // XXX: how can this happen?
         parent
             .resolve(root)
-            .with_context(|| format!("Failed to resolve path {}", context.path))?;
+            .with_context(|| format!("failed to resolve path {}", context.path))?;
 
         // At this point we assume that if the pointer cannot be
         // resolved is because the value does not exist yet unless
         // the parent is a scalar
-        let (state, initial): (Option<T>, Value) = match json_ptr.resolve(root) {
+        let (state, initial): (T, Value) = match json_ptr.resolve(root) {
             Ok(value) => (
-                Some(serde_json::from_value::<T>(value.clone()).with_context(|| {
+                serde_json::from_value::<T>(value.clone()).with_context(|| {
                     format!(
-                        "Failed to deserialize {value} into {}",
+                        "failed to deserialize {} from: {value}",
                         std::any::type_name::<T>()
                     )
-                })?),
+                })?,
                 value.clone(),
             ),
             Err(e) => match e {
-                ResolveError::NotFound { .. } => (None, Value::Null),
-                ResolveError::OutOfBounds { .. } => (None, Value::Null),
+                ResolveError::NotFound { .. } => (
+                    // if the value does not exist, see if we can deserialize null into the type
+                    serde_json::from_value::<T>(Value::Null).with_context(|| {
+                        format!(
+                            "failed to deserialize {} from: null",
+                            std::any::type_name::<T>()
+                        )
+                    })?,
+                    Value::Null,
+                ),
+                ResolveError::OutOfBounds { .. } => (
+                    serde_json::from_value::<T>(Value::Null).with_context(|| {
+                        format!(
+                            "failed to deserialize {} from: null",
+                            std::any::type_name::<T>()
+                        )
+                    })?,
+                    Value::Null,
+                ),
                 _ => {
                     // XXX: how can this happen?
                     return Err(e)
-                        .with_context(|| format!("Failed to resolve path {}", context.path))?;
+                        .with_context(|| format!("failed to resolve path {}", context.path))?;
                 }
             },
         };
 
-        Ok(Pointer::new(initial, state, context.path.clone()))
+        Ok(View::new(initial, state, context.path.clone()))
     }
 }
 
-impl<T> Deref for Pointer<T> {
-    type Target = Option<T>;
+impl<T> Deref for View<T> {
+    type Target = T;
 
     fn deref(&self) -> &Self::Target {
         &self.state
     }
 }
 
-impl<T> DerefMut for Pointer<T> {
+impl<T> DerefMut for View<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.state
     }
@@ -200,17 +198,14 @@ fn prepend_path(pointer: PointerBuf, patch: Patch) -> Patch {
     Patch(changes)
 }
 
-impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
+impl<T: Serialize> IntoResult<Patch> for View<T> {
     fn into_result(self) -> Result<Patch, Error> {
         let before = self.initial;
-        let after = if let Some(state) = self.state {
-            // This should not happen unless there is a bug (hopefully).
-            // if this happens during worker operation, it will be catched
-            // as a panic in the task
-            serde_json::to_value(state).expect("failed to serialize pointer value")
-        } else {
-            Value::Null
-        };
+
+        // This should not happen unless there is a bug (hopefully).
+        // if this happens during worker operation, it will be catched
+        // as a panic in the task
+        let after = serde_json::to_value(self.state).expect("failed to serialize pointer value");
 
         let patch = match (before, after) {
             (Value::Null, Value::Null) => Patch(vec![]),
@@ -229,8 +224,8 @@ impl<T: Serialize> IntoResult<Patch> for Pointer<T> {
 }
 
 /// Convert a simple pointer into an effect
-impl<T, E> From<Pointer<T>> for Effect<Pointer<T>, E> {
-    fn from(ptr: Pointer<T>) -> Effect<Pointer<T>, E> {
+impl<T, E> From<View<T>> for Effect<View<T>, E> {
+    fn from(ptr: View<T>) -> Effect<View<T>, E> {
         Effect::from_result(Ok(ptr))
     }
 }
@@ -279,52 +274,7 @@ impl<T, E> From<Pointer<T>> for Effect<Pointer<T>, E> {
 ///
 /// Initializing the extractor will fail if the path assigned to the job cannot be resolved (or it
 /// resolves to `Null`) or the value pointed by the path cannot be deserialized into type `<T>`
-#[derive(Debug)]
-pub struct View<T>(Pointer<T>);
-
-impl<T: DeserializeOwned> FromSystem for View<T> {
-    type Error = ExtractionError;
-
-    fn from_system(system: &System, context: &Context) -> Result<Self, Self::Error> {
-        let pointer = Pointer::<T>::from_system(system, context)?;
-
-        // Fail if pointer is null
-        if pointer.is_none() {
-            return Err(anyhow!("Path {} does not exist", context.path).into());
-        }
-
-        Ok(View(pointer))
-    }
-}
-
-impl<T> Deref for View<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        // we can unwrap here because we know the state is not None
-        self.0.state.as_ref().unwrap()
-    }
-}
-
-impl<T> DerefMut for View<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // we can unwrap here because we know the state is not None
-        self.0.state.as_mut().unwrap()
-    }
-}
-
-impl<T: Serialize> IntoResult<Patch> for View<T> {
-    fn into_result(self) -> Result<Patch, Error> {
-        self.0.into_result()
-    }
-}
-
-/// Convert a simple view into an effect
-impl<T, E> From<View<T>> for Effect<View<T>, E> {
-    fn from(view: View<T>) -> Effect<View<T>, E> {
-        Effect::from_result(Ok(view))
-    }
-}
+pub type Pointer<T> = View<Option<T>>;
 
 #[cfg(test)]
 mod tests {
@@ -411,7 +361,7 @@ mod tests {
 
         assert_eq!(ptr.as_ref(), None);
 
-        ptr.assign(3);
+        ptr.replace(3);
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();
@@ -482,7 +432,7 @@ mod tests {
 
         assert_eq!(ptr.as_ref(), None);
 
-        let value = ptr.zero();
+        let value = ptr.get_or_insert_default();
         *value = 3;
 
         // Get the list changes to the view
@@ -510,7 +460,7 @@ mod tests {
             Pointer::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
 
         // Delete the value
-        ptr = ptr.unassign();
+        ptr.take();
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();
@@ -562,7 +512,7 @@ mod tests {
             Pointer::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
 
         assert_eq!(ptr.as_ref(), None);
-        ptr.assign("three");
+        ptr.replace("three".into());
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();
@@ -587,7 +537,7 @@ mod tests {
             Pointer::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
 
         // Remove the second element
-        ptr = ptr.unassign();
+        ptr.take();
 
         // Get the list changes to the view
         let changes = ptr.into_result().unwrap();

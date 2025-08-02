@@ -229,7 +229,7 @@ fn fetch_image(
 ) -> Create<Image, FetchImageError> {
     // Initialize the image if it doesn't exist
     if image.is_none() {
-        image.zero();
+        image.get_or_insert_default();
     }
 
     with_io(image, |mut image| async move {
@@ -280,7 +280,7 @@ fn fetch_image(
             .await
             .with_context(|| format!("failed to read information for image {image_name}"))?;
 
-        image.assign(Image { id: img_info.id });
+        image.replace(Image { id: img_info.id });
 
         Ok(image)
     })
@@ -320,9 +320,10 @@ fn remove_image(
 
         Ok(img_ptr)
     })
-    .map(|img_ptr| {
+    .map(|mut img_ptr| {
         // Delete the service if it is not running
-        img_ptr.unassign()
+        img_ptr.take();
+        img_ptr
     })
 }
 
@@ -369,7 +370,7 @@ fn install_service(
     // If the image has already been downloaded then
     // simulate the service install
     if local_img.is_some() {
-        svc_ptr.assign(Service {
+        svc_ptr.replace(Service {
             // The status should be 'Created' after install
             status: Some(ServiceStatus::Created),
             // The rest of the fields should be the same
@@ -392,7 +393,7 @@ fn install_service(
                 if image_matches_with_target(docker, &tgt_img, &svc.image).await {
                     svc.image = tgt_img;
                 }
-                svc_ptr.assign(svc);
+                svc_ptr.replace(svc);
 
                 return Ok(svc_ptr);
             }
@@ -437,7 +438,7 @@ fn install_service(
         }
 
         // Assign the pointer to the new service info
-        svc_ptr.assign(svc);
+        svc_ptr.replace(svc);
 
         Ok(svc_ptr)
     })
@@ -594,7 +595,10 @@ fn uninstall_service(
 
         Ok(svc_ptr)
     })
-    .map(|svc_ptr| svc_ptr.unassign())
+    .map(|mut svc_ptr| {
+        svc_ptr.take();
+        svc_ptr
+    })
 }
 
 /// Recreate the service on configuration change
