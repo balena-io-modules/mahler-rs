@@ -1,7 +1,7 @@
 use std::{convert::Infallible, future::Future};
 
 use super::effect::Effect;
-use crate::extract::{Pointer, View};
+use crate::extract::View;
 
 /// Creates an [`Effect`] from a pure value and an I/O function
 ///
@@ -23,10 +23,10 @@ pub type IO<T, E = Infallible> = Effect<View<T>, E>;
 pub type Update<T, E = Infallible> = Effect<View<T>, E>;
 
 /// Convenience alias for `Job` return type
-pub type Delete<T, E = Infallible> = Effect<Pointer<T>, E>;
+pub type Delete<T, E = Infallible> = Effect<View<Option<T>>, E>;
 
 /// Convenience alias for `Job` return type
-pub type Create<T, E = Infallible> = Effect<Pointer<T>, E>;
+pub type Create<T, E = Infallible> = Effect<View<Option<T>>, E>;
 
 /// Convenience alias for `Job` return type
-pub type Any<T, E = Infallible> = Effect<Pointer<T>, E>;
+pub type Any<T, E = Infallible> = Effect<View<Option<T>>, E>;

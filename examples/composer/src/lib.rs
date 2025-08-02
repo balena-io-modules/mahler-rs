@@ -10,7 +10,7 @@ use thiserror::Error;
 use bollard::image::CreateImageOptions;
 use bollard::Docker;
 
-use mahler::extract::{Args, Pointer, Res, System, Target, View};
+use mahler::extract::{Args, Res, System, Target, View};
 use mahler::task::prelude::*;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Default)]
@@ -223,13 +223,13 @@ pub struct FetchImageError(#[from] anyhow::Error);
 /// Effect: add the image to the list of images
 /// Action: pull the image from the registry and add it to the images local registry
 fn fetch_image(
-    mut image: Pointer<Image>,
+    mut image: View<Option<Image>>,
     Args(image_name): Args<String>,
     docker: Res<Docker>,
 ) -> Create<Image, FetchImageError> {
     // Initialize the image if it doesn't exist
     if image.is_none() {
-        image.zero();
+        image.get_or_insert_default();
     }
 
     with_io(image, |mut image| async move {
@@ -280,7 +280,7 @@ fn fetch_image(
             .await
             .with_context(|| format!("failed to read information for image {image_name}"))?;
 
-        image.assign(Image { id: img_info.id });
+        image.replace(Image { id: img_info.id });
 
         Ok(image)
     })
@@ -296,7 +296,7 @@ pub struct RemoveImageError(#[from] anyhow::Error);
 /// Effect: remove the image from the state
 /// Action: remove the image from the engine
 fn remove_image(
-    img_ptr: Pointer<Image>,
+    img_ptr: View<Option<Image>>,
     Args(image_name): Args<String>,
     System(project): System<Project>,
     docker: Res<Docker>,
@@ -320,9 +320,10 @@ fn remove_image(
 
         Ok(img_ptr)
     })
-    .map(|img_ptr| {
+    .map(|mut img_ptr| {
         // Delete the service if it is not running
-        img_ptr.unassign()
+        img_ptr.take();
+        img_ptr
     })
 }
 
@@ -357,7 +358,7 @@ pub struct InstallServiceError(#[from] anyhow::Error);
 /// Effect: add the service to the `services` object, with a `status` of `created`
 /// Action: create a new container using the docker API and set the `containerId` property of the service in the `services` object
 fn install_service(
-    mut svc_ptr: Pointer<Service>,
+    mut svc_ptr: View<Option<Service>>,
     Args(service_name): Args<String>,
     System(project): System<Project>,
     Target(tgt): Target<TargetService>,
@@ -369,7 +370,7 @@ fn install_service(
     // If the image has already been downloaded then
     // simulate the service install
     if local_img.is_some() {
-        svc_ptr.assign(Service {
+        svc_ptr.replace(Service {
             // The status should be 'Created' after install
             status: Some(ServiceStatus::Created),
             // The rest of the fields should be the same
@@ -392,7 +393,7 @@ fn install_service(
                 if image_matches_with_target(docker, &tgt_img, &svc.image).await {
                     svc.image = tgt_img;
                 }
-                svc_ptr.assign(svc);
+                svc_ptr.replace(svc);
 
                 return Ok(svc_ptr);
             }
@@ -437,7 +438,7 @@ fn install_service(
         }
 
         // Assign the pointer to the new service info
-        svc_ptr.assign(svc);
+        svc_ptr.replace(svc);
 
         Ok(svc_ptr)
     })
@@ -561,7 +562,7 @@ pub struct UninstallServiceError(#[from] anyhow::Error);
 /// Effect: remove the service from the state
 /// Action: remove the container
 fn uninstall_service(
-    svc_ptr: Pointer<Service>,
+    svc_ptr: View<Option<Service>>,
     Args(service_name): Args<String>,
     docker: Res<Docker>,
 ) -> Delete<Service, StartServiceError> {
@@ -594,7 +595,10 @@ fn uninstall_service(
 
         Ok(svc_ptr)
     })
-    .map(|svc_ptr| svc_ptr.unassign())
+    .map(|mut svc_ptr| {
+        svc_ptr.take();
+        svc_ptr
+    })
 }
 
 /// Recreate the service on configuration change

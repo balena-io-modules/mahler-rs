@@ -339,7 +339,7 @@ impl Planner {
                 let path = Path::new(op.path());
 
                 // Retrieve matching jobs at this path
-                trace!("finding jobs for path '{path}'");
+                trace!("finding jobs for op '{op}'");
                 if let Some((args, jobs)) = self.0.find_matching_jobs(path.as_str()) {
                     let pointer = path.as_ref();
                     let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
@@ -513,7 +513,7 @@ mod tests {
     use std::fmt::Display;
 
     use super::*;
-    use crate::extract::{Args, Pointer, System, Target, View};
+    use crate::extract::{Args, System, Target, View};
     use crate::{dag, par, task::*};
     use crate::{seq, Dag};
     use tracing_subscriber::fmt::format::FmtSpan;
@@ -762,8 +762,8 @@ mod tests {
             counters: HashMap<String, i32>,
         }
 
-        fn new_counter(mut counter: Pointer<i32>, Target(tgt): Target<i32>) -> Pointer<i32> {
-            counter.assign(tgt);
+        fn new_counter(mut counter: View<Option<i32>>, Target(tgt): Target<i32>) -> View<Option<i32>> {
+            counter.replace(tgt);
             counter
         }
 
@@ -772,8 +772,8 @@ mod tests {
             config
         }
 
-        fn new_config(mut config: Pointer<String>, Target(tgt): Target<String>) -> Pointer<String> {
-            config.assign(tgt);
+        fn new_config(mut config: View<Option<String>>, Target(tgt): Target<String>) -> View<Option<String>> {
+            config.replace(tgt);
             config
         }
 

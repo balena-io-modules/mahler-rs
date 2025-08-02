@@ -30,7 +30,7 @@
 //! Some commonly used extractors are
 //!
 //! ```rust
-//! use mahler::extract::{View, Pointer, Args, Target, System, Res};
+//! use mahler::extract::{View, Args, Target, System, Res};
 //!
 //! struct MyConnection;
 //! struct MySystemState;
@@ -39,9 +39,9 @@
 //! // state for the handler.
 //! fn view(state: View<u32>) {}
 //!
-//! // `Pointer` is like `View`, except the pointed value can be null
+//! // For nullable values, use `View<Option<T>>`
 //! // for instance, in the case of `create` operations
-//! fn pointer(state: Pointer<u32>) {}
+//! fn nullable_view(state: View<Option<u32>>) {}
 //!
 //! // `Args` gives you the path arguments and deserializes them
 //! fn args(Args(counter_name): Args<String>) {}

@@ -147,7 +147,7 @@
 //! the planning/execution context is passed to the handler.
 //!
 //! ```rust
-//! use mahler::extract::{View, Pointer, Args, Target, System, Res};
+//! use mahler::extract::{View, Args, Target, System, Res};
 //!
 //! struct MyConnection;
 //! struct MySystemState;
@@ -156,9 +156,9 @@
 //! // state for the handler.
 //! fn view(state: View<u32>) {}
 //!
-//! // `Pointer` is like `View`, except the pointed value can be null
+//! // For nullable values, use `View<Option<T>>`  
 //! // for instance, in the case of `create` operations
-//! fn pointer(state: Pointer<u32>) {}
+//! fn nullable_view(state: View<Option<u32>>) {}
 //!
 //! // `Args` gives you the path arguments and deserializes them
 //! fn args(Args(counter_name): Args<String>) {}
@@ -182,11 +182,10 @@
 //!
 //! ## Modifying the system state
 //!
-//! The [View](`extract::View`) and [Pointer](`extract::Pointer`) extractors also provide a
-//! mechanism to modify the system state.
+//! The [View](`extract::View`) extractor provides a mechanism to modify the system state.
 //!
 //! ```rust
-//! use mahler::extract::{View, Pointer, Target};
+//! use mahler::extract::{View, Target};
 //!
 //! // create a Job to update a counter
 //! fn plus_one(mut counter: View<u32>, Target(tgt): Target<u32>) -> View<u32> {
@@ -202,15 +201,15 @@
 //!     counter
 //! }
 //!
-//! fn plus_one_ptr(mut ptr: Pointer<u32>, Target(tgt): Target<u32>) -> Pointer<u32> {
-//!         // `Pointer` can be null, so it dereferences to
+//! fn plus_one_nullable(mut view: View<Option<u32>>, Target(tgt): Target<u32>) -> View<Option<u32>> {
+//!         // `View<Option<T>>` can be null, so it dereferences to
 //!         // an Option<T>.
-//!         if ptr.is_none() {
+//!         if view.is_none() {
 //!             // initialize the value if null
-//!             ptr.zero();
+//!             view.get_or_insert_default();
 //!         }
 //!
-//!         ptr.as_mut().map(|counter| {
+//!         view.as_mut().map(|counter| {
 //!             if *counter < tgt {
 //!                 // update the counter if below the target
 //!                 *counter += 1;
@@ -218,12 +217,12 @@
 //!             counter
 //!         });
 //!
-//!         // return the updated pointer
-//!         ptr
+//!         // return the updated view
+//!         view
 //!     }
 //! ```
 //!
-//! Internally, the cumulative changes to the `View`/`Pointer` extractors are converted by the planner to a
+//! Internally, the cumulative changes to the `View` extractors are converted by the planner to a
 //! [Patch](`json_patch::Patch`) and used to determine
 //! the applicability of the task to a given target (if no changes are performed by the task at planning,
 //! then the task is not applicable). At runtime, the same patch is used first to
@@ -301,9 +300,9 @@
 //! - [with_io](`task::with_io`) to create an effect from pure and IO parts
 //! - [IO](`task::IO`) as an alias of `Effect<View<T>, E>`
 //! - [Update](`task::Update`) as an alias of `Effect<View<T>, E>`
-//! - [Create](`task::Create`) as an alias of `Effect<Pointer<T>, E>`
-//! - [Delete](`task::Delete`) as an alias of `Effect<Pointer<T>, E>`
-//! - [Any](`task::Any`) as an alias of `Effect<Pointer<T>, E>`
+//! - [Create](`task::Create`) as an alias of `Effect<View<Option<T>>, E>`
+//! - [Delete](`task::Delete`) as an alias of `Effect<View<Option<T>>, E>`
+//! - [Any](`task::Any`) as an alias of `Effect<View<Option<T>>, E>`
 //!
 //! This means the above operation may be written as
 //!
