@@ -762,7 +762,10 @@ mod tests {
             counters: HashMap<String, i32>,
         }
 
-        fn new_counter(mut counter: View<Option<i32>>, Target(tgt): Target<i32>) -> View<Option<i32>> {
+        fn new_counter(
+            mut counter: View<Option<i32>>,
+            Target(tgt): Target<i32>,
+        ) -> View<Option<i32>> {
             counter.replace(tgt);
             counter
         }
@@ -772,7 +775,10 @@ mod tests {
             config
         }
 
-        fn new_config(mut config: View<Option<String>>, Target(tgt): Target<String>) -> View<Option<String>> {
+        fn new_config(
+            mut config: View<Option<String>>,
+            Target(tgt): Target<String>,
+        ) -> View<Option<String>> {
             config.replace(tgt);
             config
         }

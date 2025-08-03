@@ -175,7 +175,7 @@ impl WithResources for Ready {
 /// struct Counters(HashMap<String, i32>);
 ///
 /// // A simple job to update a counter
-/// fn plus_one() -> Update<i32> { todo!() }
+/// fn plus_one() -> IO<i32> { todo!() }
 ///
 /// // A composite job
 /// fn plus_two() -> Vec<Task> { todo!() }
@@ -944,7 +944,7 @@ mod tests {
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct Counters(HashMap<String, i32>);
 
-    fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
+    fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
         if *counter < tgt {
             // Modify the counter if we are below target
             *counter += 1;
@@ -954,7 +954,7 @@ mod tests {
         // effect will only be called if the job is chosen
         // in the workflow which will only happens if there are
         // changes
-        Effect::of(counter).with_io(|counter| async {
+        with_io(counter, |counter| async {
             sleep(Duration::from_millis(10)).await;
             Ok(counter)
         })
@@ -1105,7 +1105,7 @@ mod tests {
     async fn test_worker_interrupt_status() {
         init();
 
-        fn sleepy_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Effect<View<i32>> {
+        fn sleepy_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
             if *counter < tgt {
                 // Modify the counter if we are below target
                 *counter += 1;
@@ -1115,7 +1115,7 @@ mod tests {
             // effect will only be called if the job is chosen
             // in the workflow which will only happens if there are
             // changes
-            Effect::of(counter).with_io(|counter| async {
+            with_io(counter, |counter| async {
                 sleep(Duration::from_millis(10)).await;
                 Ok(counter)
             })

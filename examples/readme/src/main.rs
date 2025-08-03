@@ -22,7 +22,7 @@ struct Counters(BTreeMap<String, i32>);
 // - `View`, that provides a mutable view into the system state. By modifying the view,
 // the job task can affect the global state
 // - `Target`, providing a read only view to the target being seeked by the planner
-fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> Update<i32> {
+fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
     if *counter < tgt {
         // Modify the counter value if we are below the target
         *counter += 1;

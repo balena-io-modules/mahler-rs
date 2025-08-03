@@ -1,14 +1,17 @@
 use json_patch::Patch;
 use serde::Serialize;
 
+use super::context::Context;
+use super::effect::Effect;
+use super::errors::Error;
 use super::from_system::FromSystem;
-use super::{Action, Context, Effect, Error, Method, Task};
+use super::{Action, Method, Task};
 use crate::system::System;
 
 /// Trait for functions that can be used as worker jobs
 ///
 /// A Handler is any function that accepts zero or more "[extractors](`crate::extract`)" as
-/// arguments and returns something that can be converted into an [Effect](`super::Effect`) on the
+/// arguments and returns something that can be converted into an Effect on the
 /// system.
 pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     /// Execute the handler

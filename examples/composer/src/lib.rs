@@ -226,7 +226,7 @@ fn fetch_image(
     mut image: View<Option<Image>>,
     Args(image_name): Args<String>,
     docker: Res<Docker>,
-) -> Create<Image, FetchImageError> {
+) -> IO<Option<Image>, FetchImageError> {
     // Initialize the image if it doesn't exist
     if image.is_none() {
         image.get_or_insert_default();
@@ -300,7 +300,7 @@ fn remove_image(
     Args(image_name): Args<String>,
     System(project): System<Project>,
     docker: Res<Docker>,
-) -> Delete<Image, RemoveImageError> {
+) -> IO<Option<Image>, RemoveImageError> {
     // only remove the image if it not being used by any service
     if project
         .services
@@ -320,10 +320,10 @@ fn remove_image(
 
         Ok(img_ptr)
     })
-    .map(|mut img_ptr| {
-        // Delete the service if it is not running
-        img_ptr.take();
-        img_ptr
+    .map(|mut img| {
+        // delete the image pointer
+        img.take();
+        img
     })
 }
 
@@ -363,7 +363,7 @@ fn install_service(
     System(project): System<Project>,
     Target(tgt): Target<TargetService>,
     docker: Res<Docker>,
-) -> Create<Service, InstallServiceError> {
+) -> IO<Option<Service>, InstallServiceError> {
     let tgt_img = tgt.image.clone();
     let local_img = tgt_img.as_ref().and_then(|img| project.images.get(img));
 
@@ -458,7 +458,7 @@ fn start_service(
     Args(service_name): Args<String>,
     Target(tgt): Target<TargetService>,
     docker: Res<Docker>,
-) -> Update<Service, StartServiceError> {
+) -> IO<Service, StartServiceError> {
     let svc_config = ServiceConfig::from(svc_view.clone());
     let tgt_img = tgt.image.clone();
     let tgt_config = ServiceConfig::from(tgt);
@@ -513,7 +513,7 @@ fn stop_service(
     Args(service_name): Args<String>,
     Target(tgt): Target<TargetService>,
     docker: Res<Docker>,
-) -> Update<Service, StartServiceError> {
+) -> IO<Service, StartServiceError> {
     let tgt_img = tgt.image.clone();
 
     if matches!(svc_view.status, Some(ServiceStatus::Running)) {
@@ -565,7 +565,7 @@ fn uninstall_service(
     svc_ptr: View<Option<Service>>,
     Args(service_name): Args<String>,
     docker: Res<Docker>,
-) -> Delete<Service, StartServiceError> {
+) -> IO<Option<Service>, StartServiceError> {
     if svc_ptr
         .as_ref()
         .is_none_or(|svc| matches!(svc.status, Some(ServiceStatus::Running)))
@@ -595,9 +595,10 @@ fn uninstall_service(
 
         Ok(svc_ptr)
     })
-    .map(|mut svc_ptr| {
-        svc_ptr.take();
-        svc_ptr
+    .map(|mut svc| {
+        // delete the service
+        svc.take();
+        svc
     })
 }
 

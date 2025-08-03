@@ -3,7 +3,7 @@
 //! # Intro
 //!
 //! A [handler](`crate::task::Handler`) is any function that accepts zero or more "extractors" as
-//! arguments and returns something that can be converted into an [Effect](`crate::task::Effect`) on the
+//! arguments and returns something that can be converted into an effect on the
 //! system. An extractor is a type that implements [FromSystem](`crate::task::FromSystem`).
 //!
 //! ```rust,no_run

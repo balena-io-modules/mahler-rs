@@ -13,7 +13,7 @@ use std::ops::{Deref, DerefMut};
 use crate::errors::ExtractionError;
 use crate::path::Path;
 use crate::system::System;
-use crate::task::{Context, Effect, Error, FromSystem, IntoResult};
+use crate::task::{Context, Error, FromSystem, IntoResult};
 
 /// Extracts a view to a sub-element of the global state indicated
 /// by the path.
@@ -29,15 +29,14 @@ use crate::task::{Context, Effect, Error, FromSystem, IntoResult};
 /// ```rust,no_run
 /// use mahler::{
 ///     extract::View,
-///     task::{Handler, create, update, with_io, Create, Update},
+///     task::{Handler, create, update, with_io, IO},
 ///     worker::{Worker, Ready}
 /// };
 /// use serde::{Serialize, Deserialize};
-///
 /// #[derive(Serialize,Deserialize)]
 /// struct SystemState {/* ... */};
 ///
-/// fn foo_bar(mut view: View<i32>) -> Update<i32> {
+/// fn foo_bar(mut view: View<i32>) -> IO<i32> {
 ///     // view can be dereferenced into the given type
 ///     // and is guaranteed to exist at this point
 ///     if *view < 5 {
@@ -50,7 +49,7 @@ use crate::task::{Context, Effect, Error, FromSystem, IntoResult};
 ///     })
 /// }
 ///
-/// fn create_counter(mut view: View<Option<i32>>) -> Create<i32> {
+/// fn create_counter(mut view: View<Option<i32>>) -> IO<Option<i32>> {
 ///     if view.is_none() {
 ///         // Initialize with default value if it doesn't exist
 ///         *view = Some(0);
@@ -234,13 +233,6 @@ impl<T: Serialize> IntoResult<Patch> for View<T> {
         };
 
         Ok(patch)
-    }
-}
-
-/// Convert a simple pointer into an effect
-impl<T, E> From<View<T>> for Effect<View<T>, E> {
-    fn from(ptr: View<T>) -> Effect<View<T>, E> {
-        Effect::from_result(Ok(ptr))
     }
 }
 

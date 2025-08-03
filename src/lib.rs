@@ -138,7 +138,7 @@
 //! system state), an optional target and zero or more path arguments.
 //!
 //! A [handler](`task::Handler`) in mahler is any function that accepts zero or more "[extractors](`extract`)" as
-//! arguments and returns something that can be converted into an [Effect](`task::Effect`) on the
+//! arguments and returns something that can be converted into an effect on the
 //! system.
 //!
 //! ## Extractors
@@ -201,23 +201,9 @@
 //!     counter
 //! }
 //!
-//! fn plus_one_nullable(mut view: View<Option<u32>>, Target(tgt): Target<u32>) -> View<Option<u32>> {
-//!         // `View<Option<T>>` can be null, so it dereferences to
-//!         // an Option<T>.
-//!         if view.is_none() {
-//!             // initialize the value if null
-//!             view.get_or_insert_default();
-//!         }
-//!
-//!         view.as_mut().map(|counter| {
-//!             if *counter < tgt {
-//!                 // update the counter if below the target
-//!                 *counter += 1;
-//!             }
-//!             counter
-//!         });
-//!
-//!         // return the updated view
+//! // remove the counter (delete type job)
+//! fn delete_counter(mut view: View<Option<u32>>) -> View<Option<u32>> {
+//!         view.take();
 //!         view
 //!     }
 //! ```
@@ -228,7 +214,7 @@
 //! then the task is not applicable). At runtime, the same patch is used first to
 //! determine if the task is safe to apply, and later to update the internal worker state.
 //!
-//! ## Effect
+//! ## System Effects (I/O)
 //!
 //! In mahler, the function defined by the job needs to be executed in two different contexts:
 //! - At planning, the context for the job is determined (current state, path, target) and the
@@ -237,74 +223,34 @@
 //! - At runtime, the tasks composing the workflow are executed in the corresponding order
 //!   determined by the planner and changes to the underlying system are performed.
 //!
-//! This 2-in-1 function evaluation is enabled by the introduction of the [Effect](`task::Effect`)
-//! type. An `Effect` combines both a *pure* operation on an input and an effectful or `IO`
+//! This 2-in-1 function evaluation is enabled by the introduction of the [IO](`task::IO`)
+//! type. An `IO` combines both a *pure* operation on an input and an effectful or `IO`
 //! operation.
 //!
 //! ```rust
-//! use mahler::task::Effect;
+//! use mahler::task::{with_io, IO};
+//! use mahler::extract::View;
 //! use tokio::time::{sleep, Duration};
 //!
-//! fn new_effect() -> Effect<i32> {
-//!     Effect::of(0)
-//!         .map(|i| i + 1)
-//!         .with_io(|i| async move {
-//!             // system changes should only be performed
-//!             // within the IO part of the Effect
-//!             sleep(Duration::from_millis(10)).await;
+//! fn increment_job(mut view: View<i32>) -> IO<i32> {
+//!     // Pure modification
+//!     *view += 1;
+//!     
+//!     // Combine with IO operation
+//!     with_io(view, |view| async move {
+//!         // system changes should only be performed
+//!         // within the IO part
+//!         sleep(Duration::from_millis(10)).await;
 //!
-//!             // return a Result
-//!             Ok(i + 1)
-//!         })
+//!         // return the view
+//!         Ok(view)
+//!     })
 //! }
 //!
-//! // The simulated result can be obtained by calling `pure`
-//! assert_eq!(new_effect().pure(), Ok(1));
-//!
-//! # tokio_test::block_on(async move {
-//! // The actual action on the system is performed by calling `run`
-//! assert_eq!(new_effect().run().await, Ok(2));
-//! # })
+//! #
 //! ```
 //!
 //! This type is what can be used in mahler jobs to isolate effects on the underlying system.
-//!
-//! ```rust
-//! use tokio::time::{sleep, Duration};
-//!
-//! use mahler::extract::{View, Target};
-//! use mahler::task::Effect;
-//!
-//! // create a Job to update a counter
-//! fn plus_one(mut counter: View<u32>, Target(tgt): Target<u32>) -> Effect<View<u32>> {
-//!     if *counter < tgt {
-//!         // update the counter if below the target
-//!         *counter += 1;
-//!     }
-//!
-//!     // return an Effect type to isolate system changes
-//!     Effect::of(counter)
-//!         // the IO portion will only ever be called if the job is
-//!         // selected by the planner
-//!         .with_io(|counter| async move {
-//!             // perform IO here
-//!             sleep(Duration::from_millis(10)).await;
-//!
-//!             // with_io expects a Result output
-//!             Ok(counter)
-//!         })
-//! }
-//! ```
-//!
-//! Because this operation is common for job definitions, mahler provides some useful aliases:
-//! - [with_io](`task::with_io`) to create an effect from pure and IO parts
-//! - [IO](`task::IO`) as an alias of `Effect<View<T>, E>`
-//! - [Update](`task::Update`) as an alias of `Effect<View<T>, E>`
-//! - [Create](`task::Create`) as an alias of `Effect<View<Option<T>>, E>`
-//! - [Delete](`task::Delete`) as an alias of `Effect<View<Option<T>>, E>`
-//! - [Any](`task::Any`) as an alias of `Effect<View<Option<T>>, E>`
-//!
-//! This means the above operation may be written as
 //!
 //! ```rust
 //! use tokio::time::{sleep, Duration};
@@ -319,19 +265,23 @@
 //!         *counter += 1;
 //!     }
 //!
-//!     // create an `Effect`
+//!     // return an IO type to isolate system changes
 //!     with_io(counter, |counter| async move {
+//!         // the IO portion will only ever be called if the job is
+//!         // selected by the planner
 //!         // perform IO here
 //!         sleep(Duration::from_millis(10)).await;
+//!
+//!         // with_io expects a Result output
 //!         Ok(counter)
 //!     })
 //! }
 //! ```
 //!
 //! <div class="warning">
-//! It is critical that system changes are isolated with `Effect`. There is nothing that prevents
+//! It is critical that system changes are isolated with `IO`. There is nothing that prevents
 //! a `Job` from performing blocking I/O, but that could potentially be harmful as the job may be
-//! instanced multiple times during planning.
+//! tried multiple times during planning.
 //! </div>
 //!
 //! ```rust

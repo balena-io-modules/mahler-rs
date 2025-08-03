@@ -4,7 +4,7 @@ use super::Task;
 
 use super::effect::Effect;
 use super::errors::Error;
-use crate::errors::{IOError, MethodError};
+use crate::errors::MethodError;
 
 pub trait IntoResult<O> {
     fn into_result(self) -> Result<O, Error>;
@@ -37,20 +37,6 @@ where
 {
     fn from(value: I) -> Effect<Patch, Error, I> {
         Effect::of(value).and_then(move |o| o.into_result())
-    }
-}
-
-/// Implement `Into<Effect>` for any effect that has an `IntoResult` as the output. This means that, for
-/// instance, `Effect<View<T>>` implements `Into<Effect>`, so effects can use extractors to interact
-/// with the state
-impl<I, E> From<Effect<I, E>> for Effect<Patch, Error, I>
-where
-    I: IntoResult<Patch> + Send + 'static,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn from(eff: Effect<I, E>) -> Effect<Patch, Error, I> {
-        eff.map_err(|e| IOError::new(e).into())
-            .and_then(move |o| o.into_result())
     }
 }
 
