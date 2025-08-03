@@ -431,7 +431,7 @@ impl<O, I> Worker<O, Uninitialized, I> {
 
     /// Provide the initial worker state
     ///
-    /// This moves the state of the worker to `Ready`. No further jobs or resources may
+    /// This moves the state of the worker to `Ready`. No further jobs may
     /// be assigned after `initial_state` has been called.
     ///
     /// Note that an additional input type `<I>` may be defined at this point in case
@@ -583,55 +583,6 @@ impl<O, I> Worker<O, Ready, I> {
     pub async fn state(&self) -> Result<O, SerializationError>
     where
         O: DeserializeOwned,
-    {
-        let system = self.inner.system_rwlock.read().await;
-        let state = system.state()?;
-        Ok(state)
-    }
-
-    /// Read the current system state from the worker using the input type `<I>`
-    ///
-    /// This is a helper method to allow state manipulation
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use serde::{Deserialize, Serialize};
-    /// use mahler::worker::Worker;
-    ///
-    /// #[derive(Debug, Serialize, Deserialize)]
-    /// struct SystemState;
-    ///
-    /// #[derive(Debug, Serialize, Deserialize)]
-    /// struct TargetState;
-    ///
-    /// # tokio_test::block_on(async move {
-    /// let mut worker = Worker::new()
-    ///     // todo: configure jobs
-    ///     .initial_state(SystemState {/* .. */})
-    ///     .unwrap();
-    ///
-    /// worker.seek_target(TargetState {/* .. */})
-    ///     .await
-    ///     .unwrap();
-    ///
-    /// let state = worker.state_as_target().await.unwrap();
-    ///
-    /// // todo: modify state
-    /// let new_target = state;
-    ///
-    /// // trigger new search
-    /// worker.seek_target(new_target).await.unwrap();
-    /// # })
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// The method will throw a [SerializationError](`crate::errors::SerializationError`) if the
-    /// internal state cannot be deserialized into the output type `<O>`
-    pub async fn state_as_target(&self) -> Result<I, SerializationError>
-    where
-        I: DeserializeOwned,
     {
         let system = self.inner.system_rwlock.read().await;
         let state = system.state()?;
