@@ -1,4 +1,56 @@
 - commits:
+    - subject: Remove state_as_target from Worker
+      hash: 02932fbf9b6d54ad84fb2edb7ff3d12cef5848ce
+      body: |
+        This is a breaking change that removes a function that is really not
+        necessary as conversion is best left to users
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Replace Effect<T> with IO<T> type for simpler job interface
+      hash: 1dcbed263d56f317512929073fb5cd65c2dc8129
+      body: |
+        Move Effect type to internal implementation detail and introduce
+        IO<T> as the new public return type for job handlers that need
+        async operations. The IO type provides the same functionality
+        with a more intuitive interface that hides the complexity of
+        effect composition.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Remove Pointer<T> type alias in favor of View<Option<T>>
+      hash: 643d3b5a36c9444ce1e6bc239dddf1edb023faa7
+      body: >
+        - Remove Pointer<T> type alias from src/extract/view.rs
+
+        - Update all Pointer references in documentation to use View<Option<T>>
+
+        - Convert all Pointer tests to equivalent View<Option<T>> tests
+
+        - Update type aliases (Create<T>, Delete<T>, Any<T>) to use
+        View<Option<T>>
+
+        - Fix imports and test functions that referenced Pointer<T>
+
+        - Update crate-level documentation and examples
+
+
+        This simplifies the API by removing the type alias and making nullable
+
+        value handling more explicit through View<Option<T>>.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.19.0
+  title: ""
+  date: 2025-08-04T15:59:50.812Z
+- commits:
     - subject: Fix missing matchit version for cargo publish
       hash: 49a9c67fee0d9a680125bcdebd372933da783822
       body: ""
