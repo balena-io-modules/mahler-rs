@@ -2,7 +2,7 @@ ARG ALPINE_VERSION=3.20
 
 FROM alpine:${ALPINE_VERSION}
 
-ARG RUST_VERSION=1.82
+ARG RUST_VERSION=1.84
 
 RUN apk add --update --no-cache \
 	build-base \

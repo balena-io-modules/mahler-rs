@@ -3,7 +3,7 @@
 //! # Intro
 //!
 //! A [handler](`crate::task::Handler`) is any function that accepts zero or more "extractors" as
-//! arguments and returns something that can be converted into an [Effect](`crate::task::Effect`) on the
+//! arguments and returns something that can be converted into an effect on the
 //! system. An extractor is a type that implements [FromSystem](`crate::task::FromSystem`).
 //!
 //! ```rust,no_run
@@ -30,7 +30,7 @@
 //! Some commonly used extractors are
 //!
 //! ```rust
-//! use mahler::extract::{View, Pointer, Args, Target, System, Res};
+//! use mahler::extract::{View, Args, Target, System, Res};
 //!
 //! struct MyConnection;
 //! struct MySystemState;
@@ -39,9 +39,9 @@
 //! // state for the handler.
 //! fn view(state: View<u32>) {}
 //!
-//! // `Pointer` is like `View`, except the pointed value can be null
+//! // For nullable values, use `View<Option<T>>`
 //! // for instance, in the case of `create` operations
-//! fn pointer(state: Pointer<u32>) {}
+//! fn nullable_view(state: View<Option<u32>>) {}
 //!
 //! // `Args` gives you the path arguments and deserializes them
 //! fn args(Args(counter_name): Args<String>) {}

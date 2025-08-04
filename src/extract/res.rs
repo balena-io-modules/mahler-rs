@@ -53,7 +53,7 @@ use crate::task::{Context, FromSystem};
 /// use std::ops::Deref;
 /// use mahler::{
 ///     extract::{View, Res},
-///     task::{Handler, update, Update, with_io},
+///     task::{Handler, update, with_io, IO},
 ///     worker::{Worker, Ready}
 /// };
 /// use serde::{Serialize, Deserialize};
@@ -77,7 +77,7 @@ use crate::task::{Context, FromSystem};
 /// #[derive(Serialize, Deserialize)]
 /// struct SystemState {/* ... */};
 ///
-/// fn edit_resources(view: View<i32>, config: Res<MyConfig>) -> Update<i32> {
+/// fn edit_resources(view: View<i32>, config: Res<MyConfig>) -> IO<i32> {
 ///     // update view
 ///     with_io(view, |view| async move {
 ///         if let Some(config) = config.as_ref() {

@@ -6,8 +6,8 @@ mod errors;
 mod from_system;
 mod handler;
 mod into_result;
+mod io;
 mod job;
-mod with_io;
 
 use json_patch::Patch;
 use serde::Serialize;
@@ -26,18 +26,17 @@ pub(crate) use into_result::*;
 
 pub use context::FromContext;
 pub use description::*;
-pub use effect::*;
 pub use errors::*;
 pub use from_system::*;
 pub use handler::*;
+pub use io::*;
 pub use job::*;
-pub use with_io::*;
 
 pub mod prelude {
     //! Core types and traits for setting up tasks
     pub use super::handler::*;
+    pub use super::io::*;
     pub use super::job::{any, create, delete, none, update};
-    pub use super::with_io::*;
     pub use super::Task;
 }
 
@@ -418,15 +417,12 @@ mod tests {
         counter
     }
 
-    fn plus_one_async_with_effect(
-        mut counter: View<i32>,
-        Target(tgt): Target<i32>,
-    ) -> Effect<View<i32>> {
+    fn plus_one_async_with_effect(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
         if *counter < tgt {
             *counter += 1;
         }
 
-        Effect::of(counter).with_io(|counter| async {
+        with_io(counter, |counter| async {
             sleep(Duration::from_millis(10)).await;
             Ok(counter)
         })
@@ -435,12 +431,12 @@ mod tests {
     fn plus_one_async_with_error(
         mut counter: View<i32>,
         Target(tgt): Target<i32>,
-    ) -> Effect<View<i32>, SomeError> {
+    ) -> IO<i32, SomeError> {
         if *counter < tgt {
             *counter += 1;
         }
 
-        Effect::of(counter).with_io(|_| async {
+        with_io(counter, |_| async {
             sleep(Duration::from_millis(10)).await;
             Err(SomeError)
         })
