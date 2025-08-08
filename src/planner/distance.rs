@@ -91,7 +91,7 @@ impl Distance {
         self.0.is_empty()
     }
 
-    pub fn iter(&self) -> Iter<Operation> {
+    pub fn iter(&self) -> Iter<'_, Operation> {
         self.0.iter()
     }
 
