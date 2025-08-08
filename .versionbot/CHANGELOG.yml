@@ -1,4 +1,19 @@
 - commits:
+    - subject: Escape URI components in route parameters
+      hash: bce3585f8d796542b0215ed3894867a51077df23
+      body: |
+        Route parameters can contain characters that need to be URI-encoded
+        when used in JSON pointers. This change ensures proper escaping of
+        route arguments by using jsonptr::Token encoding/decoding.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.19.2
+  title: ""
+  date: 2025-08-08T20:13:50.122Z
+- commits:
     - subject: Revert matchit update
       hash: 36cfed2796ed267bdec0b77c94f3798fa9f0c72c
       body: |
