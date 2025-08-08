@@ -200,7 +200,6 @@ impl Domain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     use crate::extract::{Target, View};
     use crate::path::PathArgs;
@@ -247,7 +246,7 @@ mod tests {
             .job("/counters/{counter}", none(plus_one))
             .job("/counters/{counter}", update(plus_two));
 
-        let mut args = PathArgs(vec![(Arc::from("counter"), String::from("one"))]);
+        let mut args = PathArgs::from(vec![("counter", "one")]);
         let path = domain.find_path_for_job(plus_one.id(), &mut args).unwrap();
         assert_eq!(path, String::from("/counters/one"))
     }
@@ -257,10 +256,7 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new().job("/files/{*path}", update(func));
 
-        let mut args = PathArgs(vec![(
-            Arc::from("path"),
-            "documents/report.pdf".to_string(),
-        )]);
+        let mut args = PathArgs::from(vec![("path", "documents/report.pdf")]);
         let result = domain.find_path_for_job(func.id(), &mut args).unwrap();
 
         assert_eq!(result, "/files/documents/report.pdf".to_string());
@@ -271,11 +267,11 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new().job("/data/{{counter}}/edit", update(func));
 
-        let mut args = PathArgs(vec![(Arc::from("counter"), "456".to_string())]);
+        let mut args = PathArgs::from(vec![("counter", "456")]);
         let result = domain.find_path_for_job(func.id(), &mut args).unwrap();
 
         assert_eq!(result, "/data/{counter}/edit".to_string()); // Escaped `{counter}` remains unchanged
-        assert_eq!(args, PathArgs(vec![])); // counter was never used so it should have been removed
+        assert_eq!(args, PathArgs::default()); // counter was never used so it should have been removed
     }
 
     #[test]
@@ -283,10 +279,10 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new().job("/users/{id}/files/{{file}}/{*path}", update(func));
 
-        let mut args = PathArgs(vec![
-            (Arc::from("id"), "42".to_string()),
-            (Arc::from("path"), "reports/january.csv".to_string()),
-            (Arc::from("unused"), "some-value".to_string()),
+        let mut args = PathArgs::from(vec![
+            ("id", "42"),
+            ("path", "reports/january.csv"),
+            ("unused", "some-value"),
         ]);
         let result = domain.find_path_for_job(func.id(), &mut args).unwrap();
 
@@ -297,10 +293,7 @@ mod tests {
 
         assert_eq!(
             args,
-            PathArgs(vec![
-                (Arc::from("id"), "42".to_string()),
-                (Arc::from("path"), "reports/january.csv".to_string()),
-            ])
+            PathArgs::from(vec![("id", "42"), ("path", "reports/january.csv"),])
         );
     }
 
@@ -309,7 +302,7 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new();
 
-        let mut args = PathArgs(vec![(Arc::from("counter"), "999".to_string())]);
+        let mut args = PathArgs::from(vec![("counter", "999")]);
 
         let result = domain.find_path_for_job(func.id(), &mut args);
         assert!(result.is_err());
@@ -320,7 +313,7 @@ mod tests {
         let func = |file: View<()>| file;
         let domain = Domain::new().job("/tasks/{task_id}/check", update(func));
 
-        let mut args = PathArgs(vec![]); // No arguments provided
+        let mut args = PathArgs::default(); // No arguments provided
         let result = domain.find_path_for_job(func.id(), &mut args);
         assert!(result.is_err());
     }

@@ -1,4 +1,4 @@
-use jsonptr::PointerBuf;
+use jsonptr::{PointerBuf, Token};
 use serde_json::Value;
 
 use super::errors::Error;
@@ -33,8 +33,27 @@ impl Context {
 
     pub fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Self {
         let Self { mut args, .. } = self;
-        args.insert(key, value);
+
+        // escape the argument value
+        let value: String = value.into();
+        let encoded = Token::from(value).encoded().to_owned();
+        args.insert(key, encoded);
         Self { args, ..self }
+    }
+
+    pub(crate) fn decoded_args(&self) -> PathArgs {
+        PathArgs::from(
+            self.args
+                .iter()
+                .map(|(key, value)| {
+                    let decoded = Token::from_encoded(value)
+                        .expect("value should be encoded")
+                        .decoded()
+                        .to_string();
+                    (key.as_ref(), decoded)
+                })
+                .collect::<Vec<(&str, String)>>(),
+        )
     }
 }
 
