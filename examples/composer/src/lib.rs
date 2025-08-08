@@ -1026,7 +1026,7 @@ mod tests {
             "name": "my-project",
             "services": {
                 "my-service": {
-                    "image": "alpine:3.18",
+                    "image": "docker.io/library/alpine:3.18",
                     "cmd": ["sleep", "infinity"]
                 }
             }
@@ -1040,11 +1040,21 @@ mod tests {
 
         // The alpine image must exist now
         let docker = Docker::connect_with_defaults().unwrap();
-        let img = docker.inspect_image("alpine:3.18").await.unwrap();
+        let img = docker
+            .inspect_image("docker.io/library/alpine:3.18")
+            .await
+            .unwrap();
 
         // The image ids should match
         let state = worker.state().await.unwrap();
-        assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
+        assert_eq!(
+            state
+                .images
+                .get("docker.io/library/alpine:3.18")
+                .unwrap()
+                .id,
+            img.id
+        );
 
         let container = docker
             .inspect_container(&format!("{PROJECT_NAME}_my-service"), None)
@@ -1061,7 +1071,7 @@ mod tests {
             "name": "my-project",
             "services": {
                 "my-service": {
-                    "image": "alpine:3.18",
+                    "image": "docker.io/library/alpine:3.18",
                     "cmd": ["sleep", "infinity"],
                     "status": "Running"
                 }
@@ -1089,7 +1099,7 @@ mod tests {
             "name": "my-project",
             "services": {
                 "my-service": {
-                    "image": "alpine:3.18",
+                    "image": "docker.io/library/alpine:3.18",
                     "cmd": ["sleep", "infinity"],
                     "status": "Stopped"
                 }
@@ -1132,7 +1142,7 @@ mod tests {
         ));
 
         // The image should no longer exist
-        let image = docker.inspect_image("alpine:3.18").await;
+        let image = docker.inspect_image("docker.io/library/alpine:3.18").await;
         assert!(matches!(
             image,
             Err(bollard::errors::Error::DockerResponseServerError { .. })

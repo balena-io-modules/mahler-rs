@@ -104,7 +104,7 @@ impl Deref for Path {
 // Structure to store path arguments when matching
 // against a lens
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
-pub(crate) struct PathArgs(pub Vec<(Arc<str>, String)>);
+pub(crate) struct PathArgs(Vec<(Arc<str>, String)>);
 
 impl PathArgs {
     pub fn iter(&self) -> impl Iterator<Item = &(Arc<str>, String)> {
@@ -159,6 +159,16 @@ impl From<matchit::Params<'_, '_>> for PathArgs {
             .collect();
 
         PathArgs(params)
+    }
+}
+
+impl<K: AsRef<str>, V: Into<String>> From<Vec<(K, V)>> for PathArgs {
+    fn from(args: Vec<(K, V)>) -> Self {
+        PathArgs(
+            args.into_iter()
+                .map(|(k, v)| (Arc::from(k.as_ref()), v.into()))
+                .collect(),
+        )
     }
 }
 

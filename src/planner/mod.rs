@@ -34,7 +34,7 @@ enum SearchFailed {
     #[error("task error: {0:?}")]
     BadTask(#[from] task::Error),
 
-    #[error("task empty")]
+    #[error("task not applicable")]
     EmptyTask,
 
     #[error("loop detected")]
@@ -221,7 +221,7 @@ impl Planner {
                     // The subtask is not allowed to override arguments
                     // in the parent task, so we first make sure to propagate
                     // arguments from the parent
-                    for (k, v) in method.context().args.iter() {
+                    for (k, v) in method.context().decoded_args().iter() {
                         t = t.with_arg(k, v);
                     }
 
@@ -353,6 +353,7 @@ impl Planner {
                     // Filter `None` jobs from the list
                     for job in jobs.filter(|j| j.operation() != &Operation::None) {
                         if op.matches(job.operation()) || job.operation() == &Operation::Any {
+                            trace!("found job for operation: {op}");
                             let task = job.new_task(context.clone());
                             let mut changes = Vec::new();
 

@@ -48,8 +48,8 @@ impl<T: DeserializeOwned + Send> FromContext for Args<T> {
     type Error = ExtractionError;
 
     fn from_context(context: &Context) -> Result<Self, Self::Error> {
-        let args = &context.args;
-        let value = T::deserialize(de::PathDeserializer::new(args)).with_context(|| {
+        let args = context.decoded_args();
+        let value = T::deserialize(de::PathDeserializer::new(&args)).with_context(|| {
             format!(
                 "Failed to deserialize {args} into {}",
                 std::any::type_name::<T>()
