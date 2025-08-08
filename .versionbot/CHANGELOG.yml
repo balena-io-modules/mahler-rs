@@ -1,4 +1,18 @@
 - commits:
+    - subject: Revert matchit update
+      hash: 36cfed2796ed267bdec0b77c94f3798fa9f0c72c
+      body: |
+        We need to wait for a new version of matchit to include the release
+        https://github.com/ibraheemdev/matchit/pull/76
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.19.1
+  title: ""
+  date: 2025-08-08T19:46:10.231Z
+- commits:
     - subject: Remove state_as_target from Worker
       hash: 02932fbf9b6d54ad84fb2edb7ff3d12cef5848ce
       body: |
