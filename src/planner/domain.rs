@@ -189,7 +189,7 @@ impl Domain {
     /// Find matches for the given path in the domain
     /// the matches are sorted in order that they should be
     /// tested
-    pub(crate) fn find_matching_jobs(&self, path: &str) -> Option<(PathArgs, Iter<Job>)> {
+    pub(crate) fn find_matching_jobs(&self, path: &str) -> Option<(PathArgs, Iter<'_, Job>)> {
         self.router
             .at(path)
             .map(|matched| (PathArgs::from(matched.params), matched.value.iter()))
