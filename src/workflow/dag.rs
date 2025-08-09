@@ -393,10 +393,10 @@ impl<T> Dag<T> {
             if let Some(tail_rc) = branch.tail {
                 match *tail_rc.write().unwrap() {
                     Node::Item { ref mut next, .. } => {
-                        *next = tail.clone();
+                        next.clone_from(&tail);
                     }
                     Node::Join { ref mut next } => {
-                        *next = tail.clone();
+                        next.clone_from(&tail);
                     }
                     // The tail should never point to a fork
                     Node::Fork { .. } => unreachable!(),
@@ -437,13 +437,13 @@ impl<T> Dag<T> {
 
         if let Some(value) = iter.next() {
             head = Node::item(value.into(), None).into_link();
-            tail = head.clone();
+            tail.clone_from(&head);
 
             for value in iter {
                 let new_node = Node::item(value.into(), None).into_link();
                 if let Some(tail_node) = tail {
                     if let Node::Item { ref mut next, .. } = *tail_node.write().unwrap() {
-                        *next = new_node.clone();
+                        next.clone_from(&new_node);
                     }
                 }
                 tail = new_node;
@@ -917,18 +917,21 @@ mod tests {
 
         for &value in &elements {
             assert!(head.is_some());
-            if let Some(head_rc) = head {
-                if let Node::Item {
-                    value: node_value,
-                    next,
-                } = &*head_rc.read().unwrap()
-                {
-                    assert_eq!(*node_value, value);
-                    head = next.clone();
-                } else {
-                    panic!("expected an item node");
+            head = match head {
+                Some(head_rc) => {
+                    if let Node::Item {
+                        value: node_value,
+                        next,
+                    } = &*head_rc.read().unwrap()
+                    {
+                        assert_eq!(*node_value, value);
+                        next.clone()
+                    } else {
+                        panic!("expected an item node");
+                    }
                 }
-            }
+                None => panic!("head should not be None at this point"),
+            };
         }
         assert!(head.is_none());
     }
