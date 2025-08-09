@@ -102,6 +102,8 @@ impl Task for WorkUnit {
     type Error = TaskError;
 
     #[instrument(name = "run_task", skip_all, fields(task=%self.action), err)]
+    // Fixed in Rust 1.81 https://github.com/rust-lang/rust-clippy/issues/12281
+    #[allow(clippy::blocks_in_conditions)]
     async fn run(&self, system: &System) -> Result<Patch, TaskError> {
         info!("starting");
         // dry-run the task to test that conditions hold
