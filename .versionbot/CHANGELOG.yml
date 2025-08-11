@@ -1,4 +1,62 @@
 - commits:
+    - subject: Improve conflict detection when planning
+      hash: a1467fa2dd4243a9cf80b41ac2373cde1a10d655
+      body: |
+        Methods are allowed to modify a different part of the state than the one
+        pointed by the path assigned to the method. This is quite useful and
+        powerful, because it allows to have methods that prepare the state to
+        perform a certain operation. An example is given in the added tests
+        where, a service creation needs to be preceeed by an image creation.
+
+        The problem with this is that we cannot just use the method path for
+        conflict detection but need to use the reported changes for each
+        sub-task to determine conflicts. This updates the planner to do that and
+        adds some tests.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Remove is_scoped from Handler trait
+      hash: 5a13bf07c39f4c0841971a6df01d29bbf03a8b0f
+      body: |
+        Scoping is an internal property of action tasks that doesn't need to be
+        queried by users.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Clean up path sorting
+      hash: 7afe97bffaa497fd428b25eae4f8922b9abf4e0d
+      body: |
+        The `cmp` implementaton on `Path` was confusing. This now adds tests for
+        sorting and updates the planner to sort candidates by reverse path
+        ordering.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Propagate method arguments to child tasks allowing overrides
+      hash: 9ae6902348625b16dbd5eee7026ff93329502ee9
+      body: |
+        This removes the previous behavior that prevented a child task to use a
+        different argument from the parent task, e.g. if the parent task had the
+        argument `counter: one`, no child tasks could have a `counter: two`.
+        This was meant as a heuristic for conflict avoidance but is not an
+        effective one and prevents some use cases. This will be replaced on a a
+        following commit with better conflict detection based on the changes
+        introduced by a task.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.19.3
+  title: ""
+  date: 2025-08-11T21:24:17.465Z
+- commits:
     - subject: Escape URI components in route parameters
       hash: bce3585f8d796542b0215ed3894867a51077df23
       body: |
