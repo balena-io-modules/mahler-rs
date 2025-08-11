@@ -122,6 +122,10 @@ impl PathArgs {
         }
         None
     }
+
+    pub fn contains_key(&self, key: impl AsRef<str>) -> bool {
+        self.0.iter().any(|(k, _)| k.as_ref() == key.as_ref())
+    }
 }
 
 impl Display for PathArgs {

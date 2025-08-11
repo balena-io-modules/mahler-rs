@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
+use tracing::field::display;
 use tracing::{error, field, instrument, trace, trace_span, warn, Level, Span};
 
 use crate::errors::{InternalError, MethodError, SerializationError};
@@ -171,7 +172,7 @@ impl Planner {
         Self(domain)
     }
 
-    #[instrument(level="trace", skip_all, fields(id=%task.id(), path=%task.path()), err(level=Level::TRACE))]
+    #[instrument(level="trace", skip_all, fields(id=%task.id(), path=%task.path(), selected=field::Empty, changes=field::Empty), err(level=Level::TRACE))]
     fn try_task(
         &self,
         task: &Task,
@@ -179,6 +180,7 @@ impl Planner {
         cur_plan: Workflow,
         pending_changes: &mut Vec<PatchOperation>,
     ) -> Result<Workflow, SearchFailed> {
+        let span = Span::current();
         match task {
             Task::Action(action) => {
                 let work_id = WorkUnit::new_id(action, cur_state.root());
@@ -196,7 +198,8 @@ impl Planner {
                 }
 
                 // The task has been selected
-                trace!(selected=true, changes=%patch);
+                span.record("selected", display(true));
+                span.record("changes", display(&patch));
 
                 let Patch(changes) = patch;
                 let Workflow(dag) = cur_plan;
@@ -218,17 +221,24 @@ impl Planner {
                 let mut extended_tasks = Vec::new();
 
                 for mut t in tasks.into_iter() {
-                    // The subtask is not allowed to override arguments
-                    // in the parent task, so we first make sure to propagate
-                    // arguments from the parent
-                    for (k, v) in method.context().decoded_args().iter() {
-                        t = t.with_arg(k, v);
-                    }
-
                     let task_id = t.id().to_string();
+
+                    let Context {
+                        args: method_args, ..
+                    } = method.context();
                     let Context { args, .. } = t.context_mut();
 
-                    // Find the job path on the domain list
+                    // Propagate arguments from the method into the child tasks.
+                    // This is just for better user experience as it avoids having to defint
+                    // arguments for each sub-task in the methos
+                    for (k, v) in method_args.iter() {
+                        if !args.contains_key(k) {
+                            args.insert(k, v);
+                        }
+                    }
+
+                    // Find the job path on the domain list, pass the argument for path matching
+                    // this will remove any unused arguments in the path
                     let path = self.0.find_path_for_job(&task_id, args)?;
 
                     // Using the path, now find the actual job on the domain.
@@ -292,6 +302,10 @@ impl Planner {
                     }
                 }
 
+                let patch = Patch(pending_changes.to_vec());
+                span.record("selected", display(true));
+                span.record("changes", display(patch));
+
                 // Include changes in the returned plan
                 Ok(cur_plan)
             }
@@ -339,7 +353,6 @@ impl Planner {
                 let path = Path::new(op.path());
 
                 // Retrieve matching jobs at this path
-                trace!("finding jobs for op '{op}'");
                 if let Some((args, jobs)) = self.0.find_matching_jobs(path.as_str()) {
                     let pointer = path.as_ref();
                     let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
