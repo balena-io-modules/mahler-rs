@@ -934,21 +934,40 @@ mod tests {
     }
 
     #[test]
+    fn test_dag_from_empty_list() {
+        let dag: Dag<i32> = Dag::seq(Vec::<i32>::new());
+        assert!(dag.is_empty());
+
+        // empty branches
+        let dag: Dag<i32> = Dag::new(vec![Dag::seq(Vec::<i32>::new())]);
+        assert!(dag.is_empty());
+    }
+
+    #[test]
+    fn test_dag_from_single_branch() {
+        let dag: Dag<i32> = dag!(seq!(1, 2, 3));
+        assert!(dag.head.is_some());
+        // a dag from single branch is just a list
+        if let Some(head_rc) = dag.head {
+            let node = &*head_rc.read().unwrap();
+            assert!(matches!(node, Node::Item { value: 1, .. }));
+        }
+    }
+
+    #[test]
     fn test_dag_construction() {
         let dag: Dag<i32> = seq!(1, 2, 3, 4);
 
         assert!(dag.head.is_some());
         if let Some(head_rc) = dag.head {
-            if let Node::Item { value, .. } = &*head_rc.read().unwrap() {
-                assert_eq!(value, &1)
-            }
+            let node = &*head_rc.read().unwrap();
+            assert!(matches!(node, Node::Item { value: 1, .. }));
         }
 
         assert!(dag.tail.is_some());
         if let Some(tail_rc) = dag.tail {
-            if let Node::Item { value, .. } = &*tail_rc.read().unwrap() {
-                assert_eq!(value, &4)
-            }
+            let node = &*tail_rc.read().unwrap();
+            assert!(matches!(node, Node::Item { value: 4, .. }));
         }
     }
 

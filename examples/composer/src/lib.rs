@@ -693,7 +693,7 @@ pub fn create_worker() -> Worker<Project, Uninitialized, TargetProject> {
 mod tests {
     use bollard::container::{ListContainersOptions, RemoveContainerOptions};
     use mahler::worker::SeekStatus;
-    use mahler::{seq, Dag};
+    use mahler::{dag, seq, Dag};
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use tracing_subscriber::fmt::{self, format::FmtSpan};
@@ -938,10 +938,13 @@ mod tests {
         .unwrap();
 
         let workflow = worker.find_workflow(initial_state, target).unwrap();
-        let expected: Dag<&str> = seq!(
-            "pull image 'alpine:3.20'",
-            "stop container for service 'my-service'",
-            "remove container for service 'my-service'",
+        let expected: Dag<&str> = dag!(
+            seq!("pull image 'alpine:3.20'",),
+            seq!(
+                "stop container for service 'my-service'",
+                "remove container for service 'my-service'",
+            )
+        ) + seq!(
             "install container for service 'my-service'",
             "remove image 'alpine:3.18'",
             "start container for service 'my-service'",

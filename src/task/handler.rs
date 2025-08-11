@@ -30,16 +30,6 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
         std::any::type_name::<Self>()
     }
 
-    /// Return true if the handler requires scoped access to a partion of the system
-    ///
-    /// A scoped handler supports concurrency.
-    ///
-    /// The scoping of the handler is determined from the extractor. If all extractors are scoped,
-    /// then the handler is scoped.
-    ///
-    /// See [`FromSystem::is_scoped`]
-    fn is_scoped(&self) -> bool;
-
     /// Create a task from the handler using the default context
     ///
     /// The generated task can be modified using [`Task::with_target`] and [`Task::with_arg`]
@@ -113,13 +103,9 @@ macro_rules! impl_action_handler {
                 res.into()
             }
 
-            fn is_scoped(&self) -> bool {
-                // The handler is scoped if all of its arguments are scoped
-                true $(&& $ty::is_scoped())*
-            }
-
             fn into_task(self) -> Task {
-                Action::new(self, Context::default()).into()
+                let is_scoped = true $(&& $ty::is_scoped())*;
+                Action::new(self, Context::default(), is_scoped).into()
             }
         }
     };
@@ -170,10 +156,6 @@ macro_rules! impl_method_handler {
                 res.into()
             }
 
-            fn is_scoped(&self) -> bool {
-                // The handler is scoped if all of its arguments are scoped
-                true $(&& $ty::is_scoped())*
-            }
 
             fn into_task(self) -> Task {
                 Method::new(self, Context::default()).into()

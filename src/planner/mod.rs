@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
+use tracing::field::display;
 use tracing::{error, field, instrument, trace, trace_span, warn, Level, Span};
 
 use crate::errors::{InternalError, MethodError, SerializationError};
@@ -68,12 +69,19 @@ where
     result
 }
 
-/// Returns true if none of the paths conflict with each other.
-/// Two paths conflict if one is a prefix of the other.
-fn paths_are_non_conflicting(paths: Vec<Path>) -> bool {
-    for (i, path1) in paths.iter().enumerate() {
-        for path2 in paths.iter().skip(i + 1) {
-            if path1.is_prefix_of(path2) || path2.is_prefix_of(path1) {
+/// Returns true if the new changes don't conflict with existing cumulative changes.
+/// Two patch operations conflict if they operate on paths where one is a prefix of the other.
+fn changes_are_non_conflicting(
+    cumulative_changes: &[PatchOperation],
+    new_changes: &[PatchOperation],
+) -> bool {
+    // Check if any operation in new_changes conflicts with any operation in cumulative_changes
+    for op1 in cumulative_changes.iter() {
+        for op2 in new_changes.iter() {
+            let path1 = Path::new(op1.path());
+            let path2 = Path::new(op2.path());
+
+            if path1.is_prefix_of(&path2) || path2.is_prefix_of(&path1) {
                 return false;
             }
         }
@@ -138,9 +146,11 @@ impl PartialOrd for Candidate {
 
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Sort by path ordering first
-        self.path
-            .cmp(&other.path)
+        // Sort by reverse path ordering first, giving shorter paths
+        // higher priority
+        other
+            .path
+            .cmp(&self.path)
             // User defined methods vs actions and automatically generated
             // workflows
             .then(self.is_method.cmp(&other.is_method))
@@ -171,7 +181,7 @@ impl Planner {
         Self(domain)
     }
 
-    #[instrument(level="trace", skip_all, fields(id=%task.id(), path=%task.path()), err(level=Level::TRACE))]
+    #[instrument(level="trace", skip_all, fields(id=%task.id(), path=%task.path(), selected=field::Empty, changes=field::Empty), err(level=Level::TRACE))]
     fn try_task(
         &self,
         task: &Task,
@@ -179,6 +189,7 @@ impl Planner {
         cur_plan: Workflow,
         pending_changes: &mut Vec<PatchOperation>,
     ) -> Result<Workflow, SearchFailed> {
+        let span = Span::current();
         match task {
             Task::Action(action) => {
                 let work_id = WorkUnit::new_id(action, cur_state.root());
@@ -196,7 +207,8 @@ impl Planner {
                 }
 
                 // The task has been selected
-                trace!(selected=true, changes=%patch);
+                span.record("selected", display(true));
+                span.record("changes", display(&patch));
 
                 let Patch(changes) = patch;
                 let Workflow(dag) = cur_plan;
@@ -218,17 +230,24 @@ impl Planner {
                 let mut extended_tasks = Vec::new();
 
                 for mut t in tasks.into_iter() {
-                    // The subtask is not allowed to override arguments
-                    // in the parent task, so we first make sure to propagate
-                    // arguments from the parent
-                    for (k, v) in method.context().decoded_args().iter() {
-                        t = t.with_arg(k, v);
-                    }
-
                     let task_id = t.id().to_string();
+
+                    let Context {
+                        args: method_args, ..
+                    } = method.context();
                     let Context { args, .. } = t.context_mut();
 
-                    // Find the job path on the domain list
+                    // Propagate arguments from the method into the child tasks.
+                    // This is just for better user experience as it avoids having to defint
+                    // arguments for each sub-task in the methos
+                    for (k, v) in method_args.iter() {
+                        if !args.contains_key(k) {
+                            args.insert(k, v);
+                        }
+                    }
+
+                    // Find the job path on the domain list, pass the argument for path matching
+                    // this will remove any unused arguments in the path
                     let path = self.0.find_path_for_job(&task_id, args)?;
 
                     // Using the path, now find the actual job on the domain.
@@ -246,51 +265,58 @@ impl Planner {
                     extended_tasks.push(task);
                 }
 
-                // The method tasks can be executed concurrently if no task paths conflict
-                // and are all scoped (i.e. none of them requires access to System)
-                let concurrent = paths_are_non_conflicting(
-                    extended_tasks
-                        .iter()
-                        .map(|task| task.path().clone())
-                        .collect(),
-                ) && extended_tasks.iter().all(|task| task.is_scoped(cur_state));
+                let mut branches = Vec::new();
+                let mut cumulative_changes = Vec::new();
+                let mut cur_state = cur_state.clone();
 
-                let mut cur_plan = cur_plan;
+                // Iterate over the list of sub-tasks
+                for task in extended_tasks {
+                    // We need to assume the task will conflict, so we run it on a state with
+                    // the cumulative changes applied
+                    let mut temp_state = cur_state.clone();
+                    temp_state
+                        .patch(Patch(cumulative_changes.clone()))
+                        .with_context(|| format!("failed to apply patch {cumulative_changes:?}"))?;
 
-                if concurrent {
-                    let mut branches = vec![];
+                    // Run the task
+                    let mut task_changes = vec![];
+                    let task_workflow =
+                        self.try_task(&task, &temp_state, Workflow::default(), &mut task_changes)?;
 
-                    // Create a branch for each task
-                    for task in extended_tasks {
-                        let Workflow(dag) =
-                            self.try_task(&task, cur_state, Workflow::default(), pending_changes)?;
+                    // Check if task is scoped and changes don't conflict with ALL concurrent changes
+                    let task_scoped = task.is_scoped(&cur_state);
+                    let changes_conflict =
+                        !changes_are_non_conflicting(&cumulative_changes, &task_changes);
 
-                        branches.push(dag);
-                    }
+                    // If there are conflicts we append the task sequentially
+                    if !task_scoped || changes_conflict {
+                        // Join existing branches and concatenate the workflow after the join
+                        let new_dag = Dag::new(branches) + task_workflow.0;
+                        branches = Vec::new();
 
-                    // Extend the current plan with the forking dag
-                    cur_plan = Workflow(cur_plan.0 + Dag::new(branches));
-                } else {
-                    // Clone the state in order to apply sequential changes
-                    let mut cur_state = cur_state.clone();
+                        // Apply cumulative changes to state for sequential execution
+                        cur_state = temp_state;
+                        pending_changes.extend(cumulative_changes);
+                        pending_changes.extend(task_changes);
+                        cumulative_changes = Vec::new();
 
-                    // If the task cannot run concurrently, run tasks in sequence making
-                    // sure to apply changes before calling the next task
-                    for task in extended_tasks {
-                        let mut changes = vec![];
-                        let Workflow(dag) =
-                            self.try_task(&task, &cur_state, cur_plan, &mut changes)?;
-
-                        // Apply changes before the next task
-                        cur_state.patch(Patch(changes.clone())).with_context(|| {
-                            format!("failed to apply patch {pending_changes:?}")
-                        })?;
-
-                        // Add the changes to the pending list
-                        pending_changes.extend(changes);
-                        cur_plan = Workflow(dag);
+                        // Add the new workflow to the list of branches
+                        branches.push(new_dag);
+                    } else {
+                        // Task is scoped and doesn't conflict, then we can assume the
+                        // changes will be the same if running concurrently
+                        branches.push(task_workflow.0);
+                        cumulative_changes.extend(task_changes);
                     }
                 }
+
+                // After all tasks are evaluated, join remaining branches
+                let cur_plan = Workflow(cur_plan.0 + Dag::new(branches));
+                pending_changes.extend(cumulative_changes);
+
+                let patch = Patch(pending_changes.to_vec());
+                span.record("selected", display(true));
+                span.record("changes", display(patch));
 
                 // Include changes in the returned plan
                 Ok(cur_plan)
@@ -339,7 +365,6 @@ impl Planner {
                 let path = Path::new(op.path());
 
                 // Retrieve matching jobs at this path
-                trace!("finding jobs for op '{op}'");
                 if let Some((args, jobs)) = self.0.find_matching_jobs(path.as_str()) {
                     let pointer = path.as_ref();
                     let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
@@ -420,20 +445,26 @@ impl Planner {
                 }
             }
 
-            // Find the longest list of non-conflicting tasks
+            // Find the longest list of non-conflicting tasks based on paths (for prioritization)
             let non_conflicting_paths = select_non_conflicting_prefer_prefixes(
                 candidates.iter().map(|Candidate { path, .. }| path),
             );
 
-            // Find candidates that can run concurrently
+            // Find candidates that can run concurrently using both path and change-based conflict detection
             let mut concurrent_candidates: BTreeMap<Path, Candidate> = BTreeMap::new();
+            let mut cumulative_concurrent_changes: Vec<PatchOperation> = Vec::new();
+
             for candidate in candidates.iter() {
-                // If the candidate is scoped and the path belongs to the non conflicting path list
-                // then add the candidate to the concurrent list if there isn't a path already
+                // If the candidate is scoped, path is non-conflicting, no duplicate path, and changes don't conflict
                 if candidate.concurrent
                     && !concurrent_candidates.contains_key(&candidate.path)
                     && non_conflicting_paths.iter().any(|p| p == &candidate.path)
+                    && changes_are_non_conflicting(
+                        &cumulative_concurrent_changes,
+                        &candidate.changes,
+                    )
                 {
+                    cumulative_concurrent_changes.extend(candidate.changes.clone());
                     concurrent_candidates.insert(candidate.path.clone(), candidate.clone());
                 }
             }
@@ -577,16 +608,17 @@ mod tests {
         counter
     }
 
-    pub fn find_plan<S>(planner: Planner, cur: S, tgt: S) -> Result<Workflow, super::Error>
+    pub fn find_plan<I, O>(planner: Planner, cur: O, tgt: I) -> Result<Workflow, super::Error>
     where
-        S: Serialize + DeserializeOwned,
+        O: Serialize,
+        I: Serialize + DeserializeOwned,
     {
         let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
         let system =
             crate::system::System::try_from(cur).expect("failed to serialize current state");
 
-        let res = planner.find_workflow::<S>(&system, &tgt)?;
+        let res = planner.find_workflow::<I>(&system, &tgt)?;
         Ok(res)
     }
 
@@ -753,6 +785,119 @@ mod tests {
     }
 
     #[test]
+    fn it_avoids_conflicts_from_methods() {
+        init();
+        let initial = HashMap::from([("one".to_string(), 0), ("two".to_string(), 0)]);
+        let target = HashMap::from([("one".to_string(), 1), ("two".to_string(), 1)]);
+
+        fn plus_other(Target(tgt): Target<i32>) -> Vec<Task> {
+            vec![
+                plus_one.with_arg("counter", "one").with_target(tgt),
+                plus_one.with_arg("counter", "two").with_target(tgt),
+            ]
+        }
+
+        let domain = Domain::new()
+            .job("/{counter}", none(plus_one))
+            .job("/{counter}", update(plus_other));
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        // We expect a parallel dag for this specific target
+        let expected: Dag<&str> = par!(
+            "mahler::planner::tests::plus_one(/one)",
+            "mahler::planner::tests::plus_one(/two)",
+        );
+
+        assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
+    #[test]
+    fn it_avoids_conflict_in_tasks_returned_from_methods() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct Service {
+            image: String,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Image {}
+
+        #[derive(Serialize, Deserialize)]
+        struct State {
+            services: HashMap<String, Service>,
+            images: HashMap<String, Image>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct TargetState {
+            services: HashMap<String, Service>,
+        }
+
+        fn create_image(mut view: View<Option<Image>>) -> View<Option<Image>> {
+            *view = Some(Image {});
+            view
+        }
+
+        fn create_service_image(
+            Target(tgt): Target<Service>,
+            System(state): System<State>,
+        ) -> Option<Task> {
+            if !state.images.contains_key(&tgt.image) {
+                return Some(create_image.with_arg("image_name", tgt.image));
+            }
+            None
+        }
+
+        fn create_service(
+            mut view: View<Option<Service>>,
+            Target(tgt): Target<Service>,
+            System(state): System<State>,
+        ) -> View<Option<Service>> {
+            if state.images.contains_key(&tgt.image) {
+                *view = Some(tgt);
+            }
+            view
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/images/{image_name}",
+                none(create_image).with_description(|Args(image_name): Args<String>| {
+                    format!("create image '{image_name}'")
+                }),
+            )
+            .jobs(
+                "/services/{service_name}",
+                [
+                    create(create_service).with_description(|Args(service_name): Args<String>| {
+                        format!("create service '{service_name}'")
+                    }),
+                    create(create_service_image),
+                ],
+            );
+
+        let initial =
+            serde_json::from_value::<State>(json!({ "images": {}, "services": {} })).unwrap();
+        let target = serde_json::from_value::<TargetState>(
+            json!({ "services": {"one":{"image": "ubuntu"}, "two": {"image": "ubuntu"}} }),
+        )
+        .unwrap();
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        let expected: Dag<&str> = seq!(
+            "create image 'ubuntu'",
+            "create service 'one'",
+            "create service 'two'",
+        );
+        assert_eq!(expected.to_string(), workflow.to_string());
+    }
+
+    #[test]
     fn it_calculates_concurrent_workflows_from_non_conflicting_paths() {
         init();
         type Config = HashMap<String, String>;
@@ -812,7 +957,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, initial, target).unwrap();
 
-        let expected: Dag<&str> = par!("create counter 'one'", "update configurations");
+        let expected: Dag<&str> = par!("update configurations", "create counter 'one'");
         assert_eq!(expected.to_string(), workflow.to_string());
     }
 
@@ -844,21 +989,19 @@ mod tests {
         }
 
         fn chunker(counters: View<Counters>, target: Target<Counters>) -> Vec<Task> {
-            let to_update = counters
+            let mut tasks = Vec::new();
+            for k in counters
                 .keys()
                 .filter(|k| {
                     target.get(k.as_str()).unwrap_or(&0) - counters.get(k.as_str()).unwrap_or(&0)
                         > 1
                 })
-                .collect::<Vec<&String>>();
-
-            let mut tasks: Vec<Task> = Vec::new();
-            for chunk in to_update.chunks(2) {
+                .take(2)
+            // take at most 2 changes and create a multi_increment_step
+            {
                 let mut tgt = (*counters).clone();
-                for k in chunk {
-                    if target.contains_key(k.as_str()) {
-                        tgt.insert(k.to_string(), *target.get(k.as_str()).unwrap_or(&0));
-                    }
+                if target.contains_key(k.as_str()) {
+                    tgt.insert(k.to_string(), *target.get(k.as_str()).unwrap_or(&0));
                 }
                 tasks.push(multi_increment.with_target(tgt));
             }
@@ -903,6 +1046,95 @@ mod tests {
             + seq!("a++");
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
+    #[test]
+    fn test_array_element_conflicts() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct State {
+            items: Vec<String>,
+            configs: HashMap<String, String>,
+        }
+
+        fn update_item(mut item: View<String>, Target(tgt): Target<String>) -> View<String> {
+            *item = tgt;
+            item
+        }
+
+        fn update_config(mut config: View<String>, Target(tgt): Target<String>) -> View<String> {
+            *config = tgt;
+            config
+        }
+
+        fn create_item(
+            mut item: View<Option<String>>,
+            Target(tgt): Target<String>,
+        ) -> View<Option<String>> {
+            *item = Some(tgt);
+            item
+        }
+
+        fn create_config(
+            mut config: View<Option<String>>,
+            Target(tgt): Target<String>,
+        ) -> View<Option<String>> {
+            *config = Some(tgt);
+            config
+        }
+
+        fn non_conflicting_updates(Target(tgt): Target<State>) -> Vec<Task> {
+            vec![
+                update_item
+                    .with_arg("index", "0")
+                    .with_target(tgt.items[0].clone()),
+                update_item
+                    .with_arg("index", "1")
+                    .with_target(tgt.items[1].clone()),
+                update_config
+                    .with_arg("key", "server")
+                    .with_target(tgt.configs.get("server").unwrap().clone()),
+                update_config
+                    .with_arg("key", "database")
+                    .with_target(tgt.configs.get("database").unwrap().clone()),
+            ]
+        }
+
+        let domain = Domain::new()
+            .job("/items/{index}", update(update_item))
+            .job("/configs/{key}", update(update_config))
+            .job("/items/{index}", create(create_item))
+            .job("/configs/{key}", create(create_config))
+            .job("/", update(non_conflicting_updates));
+
+        let initial = State {
+            items: vec!["old1".to_string(), "old2".to_string()],
+            configs: HashMap::from([
+                ("server".to_string(), "oldserver".to_string()),
+                ("database".to_string(), "olddatabase".to_string()),
+            ]),
+        };
+
+        let target = State {
+            items: vec!["new1".to_string(), "new2".to_string()],
+            configs: HashMap::from([
+                ("server".to_string(), "newserver".to_string()),
+                ("database".to_string(), "newdatabase".to_string()),
+            ]),
+        };
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+
+        // Should run concurrently because different array elements and map keys don't conflict
+        let expected: Dag<&str> = par!("mahler::planner::tests::test_array_element_conflicts::update_config(/configs/database)",
+                "mahler::planner::tests::test_array_element_conflicts::update_config(/configs/server)",
+                "mahler::planner::tests::test_array_element_conflicts::update_item(/items/0)",
+                "mahler::planner::tests::test_array_element_conflicts::update_item(/items/1)",
+            );
+
+        assert_eq!(workflow.to_string(), expected.to_string());
     }
 
     #[test]
@@ -1152,49 +1384,6 @@ mod tests {
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
-    }
-
-    // Helper function tests
-    #[test]
-    fn test_paths_are_non_conflicting_empty_list() {
-        assert!(paths_are_non_conflicting(vec![]));
-    }
-
-    #[test]
-    fn test_paths_are_non_conflicting_single_path() {
-        let paths = vec![Path::from_static("/config")];
-        assert!(paths_are_non_conflicting(paths));
-    }
-
-    #[test]
-    fn test_paths_are_non_conflicting_no_conflicts() {
-        let paths = vec![
-            Path::from_static("/config"),
-            Path::from_static("/counters"),
-            Path::from_static("/settings"),
-        ];
-        assert!(paths_are_non_conflicting(paths));
-    }
-
-    #[test]
-    fn test_paths_are_non_conflicting_with_prefix_conflict() {
-        let paths = vec![
-            Path::from_static("/config"),
-            Path::from_static("/config/server"),
-        ];
-        assert!(!paths_are_non_conflicting(paths));
-    }
-
-    #[test]
-    fn test_paths_are_non_conflicting_identical_paths() {
-        let paths = vec![Path::from_static("/config"), Path::from_static("/config")];
-        assert!(!paths_are_non_conflicting(paths));
-    }
-
-    #[test]
-    fn test_paths_are_non_conflicting_root_path() {
-        let paths = vec![Path::from_static(""), Path::from_static("/config")];
-        assert!(!paths_are_non_conflicting(paths));
     }
 
     #[test]

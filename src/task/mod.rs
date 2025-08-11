@@ -80,7 +80,7 @@ fn default_description(id: &'static str, ctx: &Context) -> String {
 }
 
 impl Action {
-    pub(crate) fn new<H, T, I>(action: H, context: Context) -> Self
+    pub(crate) fn new<H, T, I>(action: H, context: Context, is_scoped: bool) -> Self
     where
         H: Handler<T, Patch, I>,
         I: Send + 'static,
@@ -89,7 +89,7 @@ impl Action {
         let id = action.id();
         Self {
             id,
-            scoped: action.is_scoped(),
+            scoped: is_scoped,
             context,
             dry_run: Arc::new(move |system: &System, context: &Context| {
                 let effect = handler_clone.call(system, context);
