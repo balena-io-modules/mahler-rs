@@ -16,11 +16,11 @@ impl PartialOrd for Path {
 impl Ord for Path {
     fn cmp(&self, other: &Self) -> Ordering {
         // Compare first by path length (number of tokens)
-        // shorter paths have higher ordering
-        other
-            .0
+        // shorter paths come before longer paths no matter the
+        // lexicographic order
+        self.0
             .count()
-            .cmp(&self.0.count())
+            .cmp(&other.0.count())
             // Then lexicographically
             .then(self.0.cmp(&other.0))
     }
@@ -179,6 +179,33 @@ impl<K: AsRef<str>, V: Into<String>> From<Vec<(K, V)>> for PathArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn it_sorts_path_by_length_and_then_lexicographically() {
+        let mut paths = vec![
+            Path::from_static("/a/b/c"),
+            Path::from_static(""),
+            Path::from_static("/a/b"),
+            Path::from_static("/"),
+            Path::from_static("/a/f"),
+            Path::from_static("/x"),
+            Path::from_static("/a/b/d"),
+        ];
+
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                Path::from_static(""),
+                Path::from_static("/"),
+                Path::from_static("/x"),
+                Path::from_static("/a/b"),
+                Path::from_static("/a/f"),
+                Path::from_static("/a/b/c"),
+                Path::from_static("/a/b/d"),
+            ]
+        )
+    }
 
     #[test]
     fn it_converts_a_path_to_string() {

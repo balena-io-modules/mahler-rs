@@ -139,9 +139,11 @@ impl PartialOrd for Candidate {
 
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Sort by path ordering first
-        self.path
-            .cmp(&other.path)
+        // Sort by reverse path ordering first, giving shorter paths
+        // higher priority
+        other
+            .path
+            .cmp(&self.path)
             // User defined methods vs actions and automatically generated
             // workflows
             .then(self.is_method.cmp(&other.is_method))
@@ -825,7 +827,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, initial, target).unwrap();
 
-        let expected: Dag<&str> = par!("create counter 'one'", "update configurations");
+        let expected: Dag<&str> = par!("update configurations", "create counter 'one'");
         assert_eq!(expected.to_string(), workflow.to_string());
     }
 
