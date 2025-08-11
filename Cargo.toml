@@ -2,6 +2,7 @@
 name = "mahler"
 version = "0.19.4"
 edition = "2021"
+rust-version = "1.81"
 description = "An automated job orchestration library that builds and executes dynamic workflows"
 homepage = "https://github.com/balena-io-modules/mahler-rs"
 keywords = ["job", "orchestration", "workflow", "library"]
