@@ -305,7 +305,7 @@ fn remove_image(
     if project
         .services
         .values()
-        .any(|s| s.image == Some(image_name.clone()))
+        .any(|s| s.image.as_ref() == Some(&image_name))
     {
         return img_ptr.into();
     }

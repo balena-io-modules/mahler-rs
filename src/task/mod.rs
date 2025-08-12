@@ -80,7 +80,7 @@ fn default_description(id: &'static str, ctx: &Context) -> String {
 }
 
 impl Action {
-    pub(crate) fn new<H, T, I>(action: H, context: Context, is_scoped: bool) -> Self
+    pub(crate) fn new<H, T, I>(action: H, context: Context, scoped: bool) -> Self
     where
         H: Handler<T, Patch, I>,
         I: Send + 'static,
@@ -89,7 +89,7 @@ impl Action {
         let id = action.id();
         Self {
             id,
-            scoped: is_scoped,
+            scoped,
             context,
             dry_run: Arc::new(move |system: &System, context: &Context| {
                 let effect = handler_clone.call(system, context);
@@ -114,6 +114,17 @@ impl Action {
     /// The task id is the [`Handler`] type name
     pub fn id(&self) -> &str {
         self.id
+    }
+
+    /// Get the action operational domain, i.e. the path the action modifies/accesses
+    pub(crate) fn domain(&self) -> Path {
+        if self.scoped {
+            // if the task is scoped then return the task path
+            self.context.path.clone()
+        } else {
+            // otherwise return the root path
+            Path::from_static("")
+        }
     }
 
     /// Run the task on the system and return a list of changes
@@ -264,21 +275,6 @@ impl Task {
         match self {
             Self::Action(Action { context, .. }) => context,
             Self::Method(Method { context, .. }) => context,
-        }
-    }
-
-    /// Return true if the task only operates within its assigned path
-    ///
-    /// A scoped task can be executed concurrently with other tasks that have non conflicting paths
-    pub fn is_scoped(&self, system: &System) -> bool {
-        match self {
-            Self::Action(Action { scoped, .. }) => *scoped,
-            Self::Method(method) => method
-                .expand(system)
-                // Iterate over the result. Assume the method is not
-                // scoped if an error happens
-                .iter()
-                .all(|tasks| tasks.iter().all(|task| task.is_scoped(system))),
         }
     }
 
