@@ -1,4 +1,26 @@
 - commits:
+    - subject: Refactor conflict detection in planner
+      hash: 24c821cb4a0a7deca8878ee98ba5f4f64b5c0d16
+      body: |
+        Replace the change-based conflict detection with simpler
+        domain-based approach. Tasks now expose their operational domain
+        directly rather than requiring is_scoped checks.
+
+        This fixes a potential bug in change-only comparison. Changes at
+        planning are not fully representative of what happens at runtime.
+        Based on changes only, the planner could configure tasks to run
+        concurrently that step over each other at runtime. The task indicating
+        its domain of action and using that for conflict detection is the right
+        way to avoid conflicts.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.19.4
+  title: ""
+  date: 2025-08-13T01:54:46.655Z
+- commits:
     - subject: Improve conflict detection when planning
       hash: a1467fa2dd4243a9cf80b41ac2373cde1a10d655
       body: |
