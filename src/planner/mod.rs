@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 use anyhow::{anyhow, Context as AnyhowCtx};
@@ -69,24 +69,20 @@ where
     result
 }
 
-/// Returns true if the new changes don't conflict with existing cumulative changes.
-/// Two patch operations conflict if they operate on paths where one is a prefix of the other.
-fn changes_are_non_conflicting(
-    cumulative_changes: &[PatchOperation],
-    new_changes: &[PatchOperation],
-) -> bool {
-    // Check if any operation in new_changes conflicts with any operation in cumulative_changes
-    for op1 in cumulative_changes.iter() {
-        for op2 in new_changes.iter() {
-            let path1 = Path::new(op1.path());
-            let path2 = Path::new(op2.path());
-
-            if path1.is_prefix_of(&path2) || path2.is_prefix_of(&path1) {
-                return false;
+/// Returns true if a new task domain conflicts with existing cumulative changes.
+fn domains_are_conflicting<'a, I>(cumulative_domain: &BTreeSet<Path>, domain: I) -> bool
+where
+    I: Iterator<Item = &'a Path>,
+{
+    // Check if any path in the domain sets conflict with each other
+    for path1 in domain {
+        for path2 in cumulative_domain.iter() {
+            if path2.is_prefix_of(path1) || path1.is_prefix_of(path2) {
+                return true;
             }
         }
     }
-    true
+    false
 }
 
 /// Computes the longest common prefix over a list of `Path`
@@ -132,9 +128,9 @@ struct Candidate {
     workflow: Dag<WorkUnit>,
     changes: Vec<PatchOperation>,
     path: Path,
+    domain: BTreeSet<Path>,
     operation: Operation,
     priority: u8,
-    concurrent: bool,
     is_method: bool,
 }
 
@@ -187,7 +183,8 @@ impl Planner {
         task: &Task,
         cur_state: &System,
         cur_plan: Workflow,
-        pending_changes: &mut Vec<PatchOperation>,
+        domain: &mut BTreeSet<Path>,
+        changes: &mut Vec<PatchOperation>,
     ) -> Result<Workflow, SearchFailed> {
         let span = Span::current();
         match task {
@@ -210,14 +207,15 @@ impl Planner {
                 span.record("selected", display(true));
                 span.record("changes", display(&patch));
 
-                let Patch(changes) = patch;
+                let Patch(ops) = patch;
                 let Workflow(dag) = cur_plan;
 
                 // Append a new node to the workflow, include a copy
                 // of the changes for validation during runtime
-                let dag = dag + WorkUnit::new(work_id, action.clone(), changes.clone());
+                let dag = dag + WorkUnit::new(work_id, action.clone(), ops.clone());
 
-                pending_changes.extend(changes);
+                domain.insert(action.domain());
+                changes.extend(ops);
 
                 Ok(Workflow(dag))
             }
@@ -266,55 +264,51 @@ impl Planner {
                 }
 
                 let mut branches = Vec::new();
-                let mut cumulative_changes = Vec::new();
+                let mut cumulative_domain = BTreeSet::new();
                 let mut cur_state = cur_state.clone();
 
                 // Iterate over the list of sub-tasks
                 for task in extended_tasks {
-                    // We need to assume the task will conflict, so we run it on a state with
-                    // the cumulative changes applied
-                    let mut temp_state = cur_state.clone();
-                    temp_state
-                        .patch(Patch(cumulative_changes.clone()))
-                        .with_context(|| format!("failed to apply patch {cumulative_changes:?}"))?;
+                    // Run the task as if it was a sequential plan
+                    let mut task_domain = BTreeSet::new();
+                    let mut task_changes = Vec::new();
+                    let Workflow(dag) = self.try_task(
+                        &task,
+                        &cur_state,
+                        Workflow::default(),
+                        &mut task_domain,
+                        &mut task_changes,
+                    )?;
 
-                    // Run the task
-                    let mut task_changes = vec![];
-                    let task_workflow =
-                        self.try_task(&task, &temp_state, Workflow::default(), &mut task_changes)?;
-
-                    // Check if task is scoped and changes don't conflict with ALL concurrent changes
-                    let task_scoped = task.is_scoped(&cur_state);
-                    let changes_conflict =
-                        !changes_are_non_conflicting(&cumulative_changes, &task_changes);
-
-                    // If there are conflicts we append the task sequentially
-                    if !task_scoped || changes_conflict {
-                        // Join existing branches and concatenate the workflow after the join
-                        let new_dag = Dag::new(branches) + task_workflow.0;
+                    // Check if the task domain conflicts with the cumulative domain from branches
+                    let dag = if domains_are_conflicting(&cumulative_domain, task_domain.iter()) {
+                        // If so, join the existing branches and concatenate the returned workflow
+                        let new_dag = Dag::new(branches) + dag;
                         branches = Vec::new();
 
-                        // Apply cumulative changes to state for sequential execution
-                        cur_state = temp_state;
-                        pending_changes.extend(cumulative_changes);
-                        pending_changes.extend(task_changes);
-                        cumulative_changes = Vec::new();
-
-                        // Add the new workflow to the list of branches
-                        branches.push(new_dag);
+                        new_dag
                     } else {
-                        // Task is scoped and doesn't conflict, then we can assume the
-                        // changes will be the same if running concurrently
-                        branches.push(task_workflow.0);
-                        cumulative_changes.extend(task_changes);
-                    }
+                        dag
+                    };
+
+                    // Apply the task changes
+                    cur_state
+                        .patch(Patch(task_changes.to_vec()))
+                        .with_context(|| format!("failed to apply patch {task_changes:?}"))?;
+
+                    // Add the new dag to the list of branches and update the cummulative domain
+                    branches.push(dag);
+                    cumulative_domain.extend(task_domain);
+
+                    // Append the changes to the parent list
+                    changes.extend(task_changes);
                 }
 
                 // After all tasks are evaluated, join remaining branches
                 let cur_plan = Workflow(cur_plan.0 + Dag::new(branches));
-                pending_changes.extend(cumulative_changes);
+                domain.extend(cumulative_domain);
 
-                let patch = Patch(pending_changes.to_vec());
+                let patch = Patch(changes.to_vec());
                 span.record("selected", display(true));
                 span.record("changes", display(patch));
 
@@ -381,12 +375,14 @@ impl Planner {
                             trace!("found job for operation: {op}");
                             let task = job.new_task(context.clone());
                             let mut changes = Vec::new();
+                            let mut domain = BTreeSet::new();
 
                             // Try applying this task to the current state
                             match self.try_task(
                                 &task,
                                 &cur_state,
                                 Workflow::default(),
+                                &mut domain,
                                 &mut changes,
                             ) {
                                 Ok(Workflow(workflow)) if !changes.is_empty() => {
@@ -394,7 +390,7 @@ impl Planner {
                                         workflow,
                                         changes,
                                         path: task.path().clone(),
-                                        concurrent: task.is_scoped(&cur_state),
+                                        domain,
                                         is_method: task.is_method(),
                                         operation: job.operation().clone(),
                                         priority: job.priority(),
@@ -450,21 +446,24 @@ impl Planner {
                 candidates.iter().map(|Candidate { path, .. }| path),
             );
 
-            // Find candidates that can run concurrently using both path and change-based conflict detection
+            // Find candidates that can run concurrently using both path and domain-based conflict detection
             let mut concurrent_candidates: BTreeMap<Path, Candidate> = BTreeMap::new();
-            let mut cumulative_concurrent_changes: Vec<PatchOperation> = Vec::new();
+            let mut cumulative_domain = BTreeSet::new();
 
             for candidate in candidates.iter() {
-                // If the candidate is scoped, path is non-conflicting, no duplicate path, and changes don't conflict
-                if candidate.concurrent
-                    && !concurrent_candidates.contains_key(&candidate.path)
-                    && non_conflicting_paths.iter().any(|p| p == &candidate.path)
-                    && changes_are_non_conflicting(
-                        &cumulative_concurrent_changes,
-                        &candidate.changes,
-                    )
+                if let Some(prev_candidate) = concurrent_candidates.get(&candidate.path) {
+                    if prev_candidate >= candidate {
+                        // skip the candidate is there is a previous candidate for the path
+                        // higher priority
+                        continue;
+                    }
+                }
+
+                // If the domain of the candidate doesn't conflict with the cumulative domain
+                if non_conflicting_paths.iter().any(|p| p == &candidate.path)
+                    && !domains_are_conflicting(&cumulative_domain, candidate.domain.iter())
                 {
-                    cumulative_concurrent_changes.extend(candidate.changes.clone());
+                    cumulative_domain.extend(candidate.domain.clone());
                     concurrent_candidates.insert(candidate.path.clone(), candidate.clone());
                 }
             }
@@ -472,31 +471,30 @@ impl Planner {
             if concurrent_candidates.len() > 1 {
                 let mut branches = Vec::new();
                 let mut changes = Vec::new();
+                let mut domain = BTreeSet::new();
                 let mut total_priority = 0;
                 // The path for the candidate is the longest common prefix between child paths
-                // XXX: maybe we need to skip the candidate if there is a method for the
-                // same path?
                 let path = longest_common_prefix(concurrent_candidates.keys());
                 for Candidate {
                     workflow,
-                    changes: pending,
+                    changes: candidate_changes,
+                    domain: candidate_domain,
                     priority,
                     ..
                 } in concurrent_candidates.into_values()
                 {
                     branches.push(workflow);
-                    changes.extend(pending);
+                    changes.extend(candidate_changes);
+                    domain.extend(candidate_domain);
                     // Aggregate each branch priority
                     total_priority += priority;
                 }
 
                 // Construct a new candidate using the concurrent branches
-                // NOTE: we could keep adding branches to the DAG as long as there are non conflicting
-                // paths with the candidate path. For now we just do this operation once
                 candidates.push(Candidate {
                     workflow: Dag::new(branches),
                     changes,
-                    concurrent: true,
+                    domain,
                     path,
                     // If there is a method for the same path, give more priority to the method
                     is_method: false,
