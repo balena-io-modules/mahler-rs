@@ -38,9 +38,6 @@ enum SearchFailed {
     #[error("task not applicable")]
     EmptyTask,
 
-    #[error("loop detected")]
-    LoopDetected,
-
     // this is probably a bug if this error
     // happens
     #[error("internal error: {0:?}")]
@@ -190,12 +187,6 @@ impl Planner {
         match task {
             Task::Action(action) => {
                 let work_id = WorkUnit::new_id(action, cur_state.root());
-
-                // Detect loops first, if the same action is being applied to the same
-                // state then abort this search branch
-                if cur_plan.as_dag().any(|a| a.id == work_id) {
-                    return Err(SearchFailed::LoopDetected)?;
-                }
 
                 // Simulate the task and get the list of changes
                 let patch = action.dry_run(cur_state).map_err(SearchFailed::BadTask)?;
@@ -398,8 +389,7 @@ impl Planner {
                                 }
 
                                 // Non-critical errors are ignored (loop, empty, condition failure)
-                                Err(SearchFailed::LoopDetected)
-                                | Err(SearchFailed::EmptyTask)
+                                Err(SearchFailed::EmptyTask)
                                 | Err(SearchFailed::BadTask(task::Error::ConditionFailed)) => {}
 
                                 // Critical internal errors terminate the search
@@ -520,11 +510,17 @@ impl Planner {
                     .with_context(|| "failed to apply patch")
                     .map_err(InternalError::from)?;
 
+                // Check if the new workflow contains any visited tasks
+                if cur_plan.0.any(|unit| workflow.any(|u| u.id == unit.id)) {
+                    // skip this candidate because it is creating a loop
+                    continue;
+                }
+
                 // Extend current plan
                 let Workflow(cur_plan) = cur_plan.clone();
                 let new_plan = Workflow(cur_plan + workflow);
 
-                // Add updated plan/state to the search stack
+                // Add the new plan to the search stack
                 stack.push((new_sys, new_plan, depth + 1));
             }
         }
