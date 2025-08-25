@@ -38,9 +38,6 @@ enum SearchFailed {
     #[error("task not applicable")]
     EmptyTask,
 
-    #[error("loop detected")]
-    LoopDetected,
-
     // this is probably a bug if this error
     // happens
     #[error("internal error: {0:?}")]
@@ -190,12 +187,6 @@ impl Planner {
         match task {
             Task::Action(action) => {
                 let work_id = WorkUnit::new_id(action, cur_state.root());
-
-                // Detect loops first, if the same action is being applied to the same
-                // state then abort this search branch
-                if cur_plan.as_dag().any(|a| a.id == work_id) {
-                    return Err(SearchFailed::LoopDetected)?;
-                }
 
                 // Simulate the task and get the list of changes
                 let patch = action.dry_run(cur_state).map_err(SearchFailed::BadTask)?;
@@ -398,8 +389,7 @@ impl Planner {
                                 }
 
                                 // Non-critical errors are ignored (loop, empty, condition failure)
-                                Err(SearchFailed::LoopDetected)
-                                | Err(SearchFailed::EmptyTask)
+                                Err(SearchFailed::EmptyTask)
                                 | Err(SearchFailed::BadTask(task::Error::ConditionFailed)) => {}
 
                                 // Critical internal errors terminate the search
@@ -520,11 +510,17 @@ impl Planner {
                     .with_context(|| "failed to apply patch")
                     .map_err(InternalError::from)?;
 
+                // Check if the new workflow contains any visited tasks
+                if cur_plan.0.any(|unit| workflow.any(|u| u.id == unit.id)) {
+                    // skip this candidate because it is creating a loop
+                    continue;
+                }
+
                 // Extend current plan
                 let Workflow(cur_plan) = cur_plan.clone();
                 let new_plan = Workflow(cur_plan + workflow);
 
-                // Add updated plan/state to the search stack
+                // Add the new plan to the search stack
                 stack.push((new_sys, new_plan, depth + 1));
             }
         }
@@ -807,6 +803,145 @@ mod tests {
             "mahler::planner::tests::plus_one(/one)",
             "mahler::planner::tests::plus_one(/two)",
         );
+
+        assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
+    // This test forces the planner to backtrack and try multiple plans.
+    // Because of an issue with the implementation in DAG, this would terminate
+    // with a wrong plan with duplicate tasks
+    //
+    // ```
+    // - store device configuration
+    // - ensure cleanup
+    // + ~ - update device name
+    //   - initialize app with uuid 'my-app-uuid'
+    // ~ - initialize app with uuid 'my-app-uuid'
+    //   - update device name
+    // ```
+    #[test]
+    fn it_finds_a_correct_path_through_backtracking() {
+        init();
+
+        #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+        struct App {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+        }
+
+        type Config = HashMap<String, String>;
+
+        #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
+        struct Device {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+            #[serde(default)]
+            apps: HashMap<String, App>,
+            #[serde(default)]
+            config: Config,
+            #[serde(default)]
+            needs_cleanup: bool,
+        }
+
+        /// Store configuration in memory
+        fn store_config(
+            mut config: View<Config>,
+            Target(tgt_config): Target<Config>,
+        ) -> View<Config> {
+            // If a new config received, just update the in-memory state, the config will be handled
+            // by the legacy supervisor
+            *config = tgt_config;
+            config
+        }
+
+        fn set_device_name(
+            mut name: View<Option<String>>,
+            Target(tgt): Target<Option<String>>,
+        ) -> View<Option<String>> {
+            *name = tgt;
+            name
+        }
+
+        fn ensure_cleanup(mut device: View<Device>) -> View<Device> {
+            device.needs_cleanup = true;
+            device
+        }
+
+        fn complete_cleanup(mut device: View<Device>) -> View<Device> {
+            device.needs_cleanup = false;
+            device
+        }
+
+        fn dummy_task() {}
+
+        fn do_cleanup(
+            System(device): System<Device>,
+            Target(tgt_device): Target<Device>,
+        ) -> Vec<Task> {
+            let into_tgt = Device {
+                needs_cleanup: false,
+                ..device.clone()
+            };
+            if into_tgt != tgt_device || !device.needs_cleanup {
+                return vec![];
+            }
+
+            vec![dummy_task.into_task(), complete_cleanup.into_task()]
+        }
+
+        fn prepare_app(
+            mut app: View<Option<App>>,
+            Target(tgt_app): Target<App>,
+        ) -> View<Option<App>> {
+            app.replace(tgt_app);
+            app
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/name",
+                any(set_device_name).with_description(|| "set device name"),
+            )
+            .job(
+                "/config",
+                task::update(store_config).with_description(|| "store configuration"),
+            )
+            .jobs(
+                "",
+                [
+                    update(ensure_cleanup).with_description(|| "ensure cleanup"),
+                    update(do_cleanup),
+                    none(complete_cleanup).with_description(|| "complete cleanup"),
+                ],
+            )
+            .job("", none(dummy_task).with_description(|| "dummy task"))
+            .job(
+                "/apps/{app_uuid}",
+                create(prepare_app).with_description(|Args(app_uuid): Args<String>| {
+                    format!("prepare app {app_uuid}")
+                }),
+            );
+
+        let initial = serde_json::from_value::<Device>(json!({})).unwrap();
+        let target = serde_json::from_value::<Device>(json!({
+            "name": "my-device",
+            "apps": {
+                "my-app": {"name": "my-app-name"}
+            },
+            "config": {
+                "some-var": "some-value"
+            }
+        }))
+        .unwrap();
+
+        let planner = Planner::new(domain);
+        // We expect a parallel dag for this specific target
+        let expected: Dag<&str> = seq!(
+            "store configuration",
+            "set device name",
+            "prepare app my-app",
+        );
+        let workflow = find_plan(planner, initial, target).unwrap();
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
     }

@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use std::fmt;
 use std::ops::Add;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use super::channel::Sender;
 use super::{AggregateError, Interrupt};
 
-type Link<T> = Option<Arc<RwLock<Node<T>>>>;
+type Link<T> = Option<Arc<Node<T>>>;
 
 /// DAG node type
 ///
@@ -25,14 +25,17 @@ type Link<T> = Option<Arc<RwLock<Node<T>>>>;
 /// will contain 7 value nodes (a-g), one fork node (after b) and one join node
 /// (before g)
 enum Node<T> {
-    Item { value: T, next: Link<T> },
+    Item { value: Arc<T>, next: Link<T> },
     Fork { next: Vec<Link<T>> },
     Join { next: Link<T> },
 }
 
 impl<T> Node<T> {
     pub fn item(value: T, next: Link<T>) -> Self {
-        Node::Item { value, next }
+        Node::Item {
+            value: Arc::new(value),
+            next,
+        }
     }
 
     pub fn join(next: Link<T>) -> Self {
@@ -44,7 +47,7 @@ impl<T> Node<T> {
     }
 
     pub fn into_link(self) -> Link<T> {
-        Some(Arc::new(RwLock::new(self)))
+        Some(Arc::new(self))
     }
 }
 
@@ -57,18 +60,17 @@ struct Iter<T> {
 }
 
 impl<T> Iterator for Iter<T> {
-    type Item = Arc<RwLock<Node<T>>>;
+    type Item = Arc<Node<T>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((link, branching)) = self.stack.pop() {
-            if let Some(node_rc) = link {
-                let node_ref = node_rc.read().unwrap();
-                match &*node_ref {
+            if let Some(node_arc) = link {
+                match node_arc.as_ref() {
                     Node::Item { next, .. } => {
                         // Push the next node onto the stack for continuation
                         self.stack.push((next.clone(), branching));
                         // Yield the current node
-                        return Some(node_rc.clone());
+                        return Some(node_arc);
                     }
                     Node::Fork { next } => {
                         // Push all branches onto the stack
@@ -79,7 +81,7 @@ impl<T> Iterator for Iter<T> {
                             self.stack.push((branch_head.clone(), branching));
                         }
                         // Yield the fork node itself
-                        return Some(node_rc.clone());
+                        return Some(node_arc);
                     }
                     Node::Join { next } => {
                         let mut branching = branching;
@@ -92,7 +94,7 @@ impl<T> Iterator for Iter<T> {
                                 self.stack.push((next.clone(), branching));
 
                                 // Yield the join node itself
-                                return Some(node_rc.clone());
+                                return Some(node_arc);
                             }
                         }
                     }
@@ -103,7 +105,6 @@ impl<T> Iterator for Iter<T> {
     }
 }
 
-#[derive(Clone)]
 /// Utility type to operate with Directed Acyclic Graphs (DAG)
 ///
 /// This type is exported as a testing utility, to allow review of generated workflows using
@@ -303,18 +304,15 @@ impl<T> Iterator for Iter<T> {
 ///         )
 ///     );
 /// ```
+#[derive(Clone)]
 pub struct Dag<T> {
     head: Link<T>,
-    tail: Link<T>,
 }
 
 impl<T> Default for Dag<T> {
     /// Create an empty DAG
     fn default() -> Self {
-        Dag {
-            head: None,
-            tail: None,
-        }
+        Dag { head: None }
     }
 }
 
@@ -328,7 +326,7 @@ impl<T: PartialEq> PartialEq for Dag<T> {
                 Node::Item {
                     value: rght_value, ..
                 },
-            ) = (&*left.read().unwrap(), &*rght.read().unwrap())
+            ) = (left.as_ref(), rght.as_ref())
             {
                 if left_value != rght_value {
                     return false;
@@ -382,36 +380,23 @@ impl<T> Dag<T> {
             return branches.pop().unwrap();
         }
 
-        let mut next: Vec<Link<T>> = Vec::new();
-        let tail = Node::<T>::join(None).into_link();
-        for branch in branches {
-            // Add the head link to the fork list
-            next.push(branch.head);
-
-            debug_assert!(branch.tail.is_some());
-            // Link each branch tail to the join node
-            if let Some(tail_rc) = branch.tail {
-                match *tail_rc.write().unwrap() {
-                    Node::Item { ref mut next, .. } => {
-                        *next = tail.clone();
-                    }
-                    Node::Join { ref mut next } => {
-                        *next = tail.clone();
-                    }
-                    // The tail should never point to a fork
-                    Node::Fork { .. } => unreachable!(),
-                }
-            }
-        }
-
-        // Return an empty DAG if no branches remain
-        if next.is_empty() {
+        // Return empty DAG if no branches remain
+        if branches.is_empty() {
             return Dag::default();
         }
 
+        // Create the Join node that all branches will converge to
+        let join = Node::<T>::join(None).into_link();
+
+        let mut fork_branches = Vec::new();
+        for branch in branches {
+            // create a new branch that connects to the join node
+            let new_branch = branch.clone_with_tail(&join);
+            fork_branches.push(new_branch.head);
+        }
+
         Dag {
-            head: Node::fork(next).into_link(),
-            tail,
+            head: Node::fork(fork_branches).into_link(),
         }
     }
 
@@ -431,26 +416,24 @@ impl<T> Dag<T> {
     /// assert_eq!(dag.to_string(), "- 1\n- 2\n- 3");
     /// ```
     pub fn seq(elems: impl IntoIterator<Item = impl Into<T>>) -> Dag<T> {
-        let mut iter = elems.into_iter();
-        let mut head: Link<T> = None;
-        let mut tail: Link<T> = None;
+        let mut values: Vec<T> = elems.into_iter().map(|v| v.into()).collect();
 
-        if let Some(value) = iter.next() {
-            head = Node::item(value.into(), None).into_link();
-            tail = head.clone();
-
-            for value in iter {
-                let new_node = Node::item(value.into(), None).into_link();
-                if let Some(tail_node) = tail {
-                    if let Node::Item { ref mut next, .. } = *tail_node.write().unwrap() {
-                        *next = new_node.clone();
-                    }
-                }
-                tail = new_node;
-            }
+        if values.is_empty() {
+            return Dag::default();
         }
 
-        Dag { head, tail }
+        // Start with the last element (tail) - it has no next
+        let tail = Node::item(values.pop().unwrap(), None).into_link();
+        let mut head = tail.clone();
+
+        // Build backwards through the remaining elements
+        for value in values.into_iter().rev() {
+            head = Node::item(value, head).into_link();
+        }
+
+        Dag {
+            head, // Last created node is the head
+        }
     }
 
     /// Return `true` if the DAG is empty
@@ -463,32 +446,79 @@ impl<T> Dag<T> {
     /// assert!(dag.is_empty());
     /// ```
     pub fn is_empty(&self) -> bool {
-        self.tail.is_none()
+        self.head.is_none()
+    }
+
+    /// Common rebuild function used by both concat and new methods
+    fn clone_with_tail(&self, tail: &Link<T>) -> Self {
+        fn rebuild_with_tail<T>(node: Link<T>, tail: &Link<T>, branching: Vec<bool>) -> Link<T> {
+            if let Some(current_node) = node {
+                match current_node.as_ref() {
+                    Node::Item { value, next } => {
+                        // if we reached the end of the DAG, connect to the new tail
+                        let new_next = if next.is_none() {
+                            tail.clone()
+                        } else {
+                            rebuild_with_tail(next.clone(), tail, branching)
+                        };
+
+                        Node::Item {
+                            value: value.clone(),
+                            next: new_next,
+                        }
+                        .into_link()
+                    }
+                    Node::Fork { next: branches } => {
+                        let new_branches: Vec<Link<T>> = branches
+                            .iter()
+                            .enumerate()
+                            .map(|(br_idx, branch)| {
+                                let mut updated_branching = branching.clone();
+                                updated_branching.push(br_idx == branches.len() - 1);
+                                rebuild_with_tail(branch.clone(), tail, updated_branching)
+                            })
+                            .collect();
+                        Node::Fork { next: new_branches }.into_link()
+                    }
+                    Node::Join { next } => {
+                        // Use same logic as display: only process if this is the last branch
+                        let mut branching = branching;
+                        if let Some(true) = branching.pop() {
+                            // if we reached the end of the DAG, connect to the new tail
+                            let new_next = if next.is_none() {
+                                tail.clone()
+                            } else {
+                                rebuild_with_tail(next.clone(), tail, branching)
+                            };
+                            return Node::Join { next: new_next }.into_link();
+                        }
+                        // Not the last branch, return original join unchanged
+                        Some(current_node)
+                    }
+                }
+            } else {
+                None
+            }
+        }
+
+        let head = rebuild_with_tail(self.head.clone(), tail, Vec::new());
+        Self { head }
     }
 
     /// Join two DAGs
     pub fn concat(self, other: impl Into<Dag<T>>) -> Self {
         let other = other.into();
-        if let Some(tail_node) = self.tail {
-            match *tail_node.write().unwrap() {
-                Node::Item { ref mut next, .. } => {
-                    *next = other.head;
-                }
-                Node::Join { ref mut next } => {
-                    *next = other.head;
-                }
-                // The tail should never point to a fork
-                Node::Fork { .. } => unreachable!(),
-            }
-        } else {
-            // this dag is empty
+
+        // If self is empty, return other
+        if self.head.is_none() {
             return other;
         }
 
-        Dag {
-            head: self.head,
-            tail: other.tail,
+        // If other is empty, return self
+        if other.head.is_none() {
+            return self;
         }
+        self.clone_with_tail(&other.head)
     }
 
     /// Return an iterator over the DAG
@@ -504,7 +534,7 @@ impl<T> Dag<T> {
     /// Return `true` if there is any node in the DAG that meets the given condition
     pub fn any(&self, condition: impl Fn(&T) -> bool) -> bool {
         for node in self.iter() {
-            if let Node::Item { value, .. } = &*node.read().unwrap() {
+            if let Node::Item { value, .. } = node.as_ref() {
                 if condition(value) {
                     return true;
                 }
@@ -516,7 +546,7 @@ impl<T> Dag<T> {
     /// Return `true` if the given condition is met for every node in the DAG
     pub fn all(&self, condition: impl Fn(&T) -> bool) -> bool {
         for node in self.iter() {
-            if let Node::Item { value, .. } = &*node.read().unwrap() {
+            if let Node::Item { value, .. } = node.as_ref() {
                 if !condition(value) {
                     return false;
                 }
@@ -578,7 +608,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
                     write!(f, "- {value}")?;
 
                     if let Some(next_rc) = next {
-                        fmt_node(f, &*next_rc.read().unwrap(), indent, index + 1, branching)?;
+                        fmt_node(f, next_rc.as_ref(), indent, index + 1, branching)?;
                     }
                 }
                 Node::Fork { next } => {
@@ -593,13 +623,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
                             let mut updated_branching = branching.clone();
                             updated_branching.push((index, br_idx == next.len() - 1));
 
-                            fmt_node(
-                                f,
-                                &*branch_head.read().unwrap(),
-                                indent + 2,
-                                0,
-                                updated_branching,
-                            )?;
+                            fmt_node(f, branch_head.as_ref(), indent + 2, 0, updated_branching)?;
                         }
                     }
                 }
@@ -608,13 +632,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
                     if let Some((index, is_last)) = branching.pop() {
                         if is_last {
                             if let Some(next_rc) = next {
-                                fmt_node(
-                                    f,
-                                    &*next_rc.read().unwrap(),
-                                    indent - 2,
-                                    index + 1,
-                                    branching,
-                                )?;
+                                fmt_node(f, next_rc.as_ref(), indent - 2, index + 1, branching)?;
                             }
                         }
                     }
@@ -626,7 +644,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
         if let Some(root) = &self.head {
             fmt_node(
                 f,
-                &*root.read().unwrap(),
+                root.as_ref(),
                 0,          // Initial indent level
                 0,          // Initial index
                 Vec::new(), // Initial branching
@@ -780,9 +798,9 @@ where
 
                 // We get the node data in advance to avoid holding
                 // the node across the await
-                let node = match &*node_rc.read().unwrap() {
+                let node = match node_rc.as_ref() {
                     Node::Item { value, next } => InnerNode::Item {
-                        task: value.clone(),
+                        task: (**value).clone(), // Extract T from Arc<T> by cloning
                         next: next.clone(),
                     },
                     Node::Fork { next } => InnerNode::Fork {
@@ -895,8 +913,8 @@ mod tests {
     use super::*;
     use crate::workflow::channel;
 
-    fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
-        if let Node::Item { .. } = &*node.read().unwrap() {
+    fn is_item<T>(node: &Arc<Node<T>>) -> bool {
+        if let Node::Item { .. } = node.as_ref() {
             return true;
         }
         false
@@ -906,7 +924,6 @@ mod tests {
     fn test_empty_dag() {
         let dag: Dag<i32> = Dag::default();
         assert!(dag.head.is_none());
-        assert!(dag.tail.is_none());
     }
 
     #[test]
@@ -921,9 +938,9 @@ mod tests {
                 if let Node::Item {
                     value: node_value,
                     next,
-                } = &*head_rc.read().unwrap()
+                } = head_rc.as_ref()
                 {
-                    assert_eq!(*node_value, value);
+                    assert_eq!(**node_value, value);
                     head = next.clone();
                 } else {
                     panic!("expected an item node");
@@ -949,8 +966,12 @@ mod tests {
         assert!(dag.head.is_some());
         // a dag from single branch is just a list
         if let Some(head_rc) = dag.head {
-            let node = &*head_rc.read().unwrap();
-            assert!(matches!(node, Node::Item { value: 1, .. }));
+            let node = head_rc.as_ref();
+            if let Node::Item { value, .. } = node {
+                assert_eq!(**value, 1);
+            } else {
+                panic!("Expected Item node");
+            }
         }
     }
 
@@ -960,14 +981,12 @@ mod tests {
 
         assert!(dag.head.is_some());
         if let Some(head_rc) = dag.head {
-            let node = &*head_rc.read().unwrap();
-            assert!(matches!(node, Node::Item { value: 1, .. }));
-        }
-
-        assert!(dag.tail.is_some());
-        if let Some(tail_rc) = dag.tail {
-            let node = &*tail_rc.read().unwrap();
-            assert!(matches!(node, Node::Item { value: 4, .. }));
+            let node = head_rc.as_ref();
+            if let Node::Item { value, .. } = node {
+                assert_eq!(**value, 1);
+            } else {
+                panic!("Expected Item node");
+            }
         }
     }
 
@@ -980,9 +999,9 @@ mod tests {
         let mut result = Vec::new();
 
         for node in dag.iter() {
-            let node_ref = node.read().unwrap();
-            match &*node_ref {
-                Node::Item { value, .. } => result.push(*value), // Collect the value
+            let node_ref = node.as_ref();
+            match node_ref {
+                Node::Item { value, .. } => result.push(**value), // Collect the value
                 Node::Fork { .. } => panic!("unexpected fork node in a linear graph"),
                 Node::Join { .. } => panic!("unexpected join node in a linear graph"),
             }
@@ -1003,8 +1022,8 @@ mod tests {
         let elems: Vec<i32> = dag
             .iter()
             .filter(is_item)
-            .map(|node| match &*node.read().unwrap() {
-                Node::Item { value, .. } => *value,
+            .map(|node| match node.as_ref() {
+                Node::Item { value, .. } => **value,
                 _ => unreachable!(),
             })
             .collect();
@@ -1031,6 +1050,161 @@ mod tests {
                 "#
             )
         );
+    }
+
+    #[test]
+    fn modifying_a_clone_should_not_affect_the_original() {
+        let dag: Dag<char> = seq!('A') + par!('B', 'C', 'D');
+
+        let new_dag = dag.clone() + seq!('E');
+
+        assert_str_eq!(
+            new_dag.to_string(),
+            dedent!(
+                r#"
+                - A
+                + ~ - B
+                  ~ - C
+                  ~ - D
+                - E
+                "#
+            )
+        );
+        assert_str_eq!(
+            dag.to_string(),
+            dedent!(
+                r#"
+                - A
+                + ~ - B
+                  ~ - C
+                  ~ - D
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_concatenation_with_empty_dag() {
+        // Test 1: Non-empty + Empty
+        let non_empty: Dag<i32> = seq!(1, 2, 3);
+        let empty: Dag<i32> = Dag::default();
+
+        assert!(!non_empty.is_empty());
+        assert!(empty.is_empty());
+
+        let result = non_empty.clone() + empty.clone();
+        assert!(!result.is_empty());
+        assert_eq!(result.to_string(), "- 1\n- 2\n- 3");
+
+        // Test 2: Empty + Non-empty
+        let result2 = empty + non_empty;
+        assert!(!result2.is_empty());
+        assert_eq!(result2.to_string(), "- 1\n- 2\n- 3");
+    }
+
+    #[test]
+    fn test_concatenation_with_forked_empty_dag() {
+        // Test concatenating with a DAG that has empty branches
+        let non_empty: Dag<i32> = seq!(1, 2);
+        let forked_with_empty: Dag<i32> = dag!(seq!(3), Dag::default());
+
+        let result = non_empty + forked_with_empty;
+        assert!(!result.is_empty());
+        // The empty branch should be filtered out during construction
+        assert_eq!(result.to_string(), "- 1\n- 2\n- 3");
+    }
+
+    #[test]
+    fn test_empty_dag_concatenation_preserves_tail() {
+        // This test checks if tail is properly preserved when concatenating with empty DAGs
+        let first: Dag<i32> = seq!(1);
+        let second: Dag<i32> = Dag::default(); // Empty
+        let third: Dag<i32> = seq!(2);
+
+        // Chain: first + empty + third
+        let result = first + second + third;
+        assert!(!result.is_empty());
+        assert_eq!(result.to_string(), "- 1\n- 2");
+    }
+
+    #[test]
+    fn test_basic_concatenation_of_sequences() {
+        // This test checks if tail is properly preserved when concatenating with empty DAGs
+        let first: Dag<i32> = seq!(1, 2);
+        let second: Dag<i32> = Dag::default(); // Empty
+        let third: Dag<i32> = seq!(3);
+
+        // Chain: first + empty + third
+        let result = first + second + third;
+        assert!(!result.is_empty());
+        assert_eq!(result.to_string(), "- 1\n- 2\n- 3");
+    }
+
+    #[test]
+    fn test_dag_new_with_shared_nodes() {
+        // This test checks if DAG::new() properly handles cases where branches might share nodes
+        let single_element: Dag<i32> = seq!(42);
+
+        // Create a fork where one branch is the single element DAG
+        let branch1 = single_element.clone();
+        let branch2 = seq!(1, 2);
+
+        let forked_dag = dag!(branch1, branch2);
+
+        // Check that the original single_element DAG wasn't corrupted
+        assert_eq!(single_element.to_string(), "- 42");
+        assert_eq!(forked_dag.to_string(), "+ ~ - 42\n  ~ - 1\n    - 2");
+    }
+
+    #[test]
+    fn test_dag_new_with_multiple_single_elements() {
+        // Test forking multiple single-element DAGs
+        let elem1: Dag<i32> = seq!(1);
+        let elem2: Dag<i32> = seq!(2);
+        let elem3: Dag<i32> = seq!(3);
+
+        let forked = dag!(elem1.clone(), elem2.clone(), elem3.clone());
+
+        // Original elements should be unchanged
+        assert_eq!(elem1.to_string(), "- 1");
+        assert_eq!(elem2.to_string(), "- 2");
+        assert_eq!(elem3.to_string(), "- 3");
+
+        // Forked DAG should be correct
+        assert_eq!(forked.to_string(), "+ ~ - 1\n  ~ - 2\n  ~ - 3");
+    }
+
+    #[test]
+    fn test_dag_new_edge_cases() {
+        // Test empty branches
+        let empty1: Dag<i32> = Dag::default();
+        let empty2: Dag<i32> = Dag::default();
+        let non_empty: Dag<i32> = seq!(42);
+
+        // DAG with only empty branches should return empty
+        let all_empty = dag!(empty1.clone(), empty2.clone());
+        assert!(all_empty.is_empty());
+
+        // DAG with mix of empty and non-empty should work
+        let mixed = dag!(empty1, non_empty.clone(), empty2);
+        assert_eq!(mixed.to_string(), "- 42");
+
+        // Single non-empty branch should return the branch directly
+        let single_branch = dag!(non_empty);
+        assert_eq!(single_branch.to_string(), "- 42");
+    }
+
+    #[test]
+    fn test_dag_seq_edge_cases() {
+        // Empty sequence should create empty DAG
+        let empty_seq: Dag<i32> = Dag::seq(Vec::<i32>::new());
+        assert!(empty_seq.is_empty());
+        assert_eq!(empty_seq.to_string(), "");
+
+        // Single element sequence
+        let single: Dag<i32> = seq!(42);
+        assert!(!single.is_empty());
+        assert_eq!(single.to_string(), "- 42");
     }
 
     #[test]

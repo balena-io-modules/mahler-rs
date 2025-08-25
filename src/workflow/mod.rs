@@ -158,10 +158,6 @@ impl From<ExecutionStatus> for WorkflowStatus {
 }
 
 impl Workflow {
-    pub(crate) fn as_dag(&self) -> &Dag<WorkUnit> {
-        &self.0
-    }
-
     /// Return `true` if the Workflow's internal graph has no elements
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
