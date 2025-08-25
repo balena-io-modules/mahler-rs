@@ -573,6 +573,15 @@ impl<T> Dag<T> {
         }
     }
 
+    /// Concatenate a DAG at the head
+    /// rather than the tail.
+    ///
+    /// This allows to build the DAG backwards and reverse
+    /// it later using [`Self::reverse`]
+    pub fn prepend(self, other: impl Into<Dag<T>>) -> Dag<T> {
+        other.into().concat(self)
+    }
+
     /// Return an iterator over the DAG
     ///
     /// This function is not public as not to expose the Dag internal implementation
@@ -605,6 +614,151 @@ impl<T> Dag<T> {
             }
         }
         true
+    }
+
+    /// Creates a shallow clone of the DAG by cloning only the head and tail references.
+    ///
+    /// # Warning
+    ///
+    /// <div class="warning">
+    /// This creates shared ownership of the internal DAG structure. Modifying nodes
+    /// through one DAG instance will affect all shallow clones since they share the
+    /// same underlying references.
+    /// </div>
+    ///
+    /// This method is primarily used internally for efficient DAG manipulation during
+    /// planning where we need temporary DAG handles without full deep cloning.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use mahler::{Dag, seq};
+    ///
+    /// let original: Dag<i32> = seq!(1, 2, 3);
+    /// let new_dag = original.shallow_clone().concat(3);
+    ///
+    /// // Both `original` and `shallow` reference the same internal nodes so the
+    /// // original will be modified too
+    /// assert_eq!(original.to_string(), new_dag.to_string());
+    ///
+    /// ```
+    pub fn shallow_clone(&self) -> Self {
+        Self {
+            head: self.head.clone(),
+            tail: self.tail.clone(),
+        }
+    }
+
+    /// Reverses the execution order of the DAG.
+    ///
+    /// This method consumes the original DAG and returns a new DAG where:
+    /// - Sequential items are reversed in order
+    /// - Fork/join structures are preserved but their contents are reversed
+    /// - The original DAG's tail becomes the new head, and vice versa
+    ///
+    /// # Example
+    ///
+    /// Reversing this DAG:
+    /// ```text
+    ///         + - c - d - +
+    /// a - b - +           + - g
+    ///         + - e - f - +
+    /// ```
+    ///
+    /// Returns:
+    /// ```text
+    ///     + - d - c - +
+    /// g - +           + - b - a
+    ///     + - f - e - +
+    /// ```
+    pub fn reverse(self) -> Dag<T> {
+        let Dag { head, .. } = self;
+
+        // The original head becomes the new tail after reversal
+        let tail = head.clone();
+
+        // Stack format: (current_node, previous_node, branch_path)
+        // - current_node: The node we're currently processing
+        // - previous_node: What this node should point to after reversal
+        // - branch_path: Track nested fork positions for join reconstruction
+        let mut stack = vec![(head, None as Link<T>, Vec::<usize>::new())];
+
+        // Accumulates branch results until we can construct a fork node
+        let mut results: Vec<Link<T>> = Vec::new();
+
+        // Depth-first traversal that rewires nodes to point backward
+        while let Some((head, prev, branching)) = stack.pop() {
+            if let Some(node_rc) = head.clone() {
+                match *node_rc.write().unwrap() {
+                    Node::Item { ref mut next, .. } => {
+                        // Store the current next node before rewiring
+                        let newhead = next.clone();
+
+                        // Rewire this node to point backward (to previous node)
+                        *next = prev;
+
+                        // Continue processing the original next node
+                        // This node becomes the "previous" for the next iteration
+                        stack.push((newhead, head, branching));
+                    }
+
+                    Node::Fork { ref next } => {
+                        // In reversal, a fork becomes a join point that branches converge to
+                        let prev = Node::join(prev).into_link();
+
+                        // Process branches in reverse order to preserve their relative positioning
+                        // after reversal (branch 0 stays branch 0, etc.)
+                        for (i, br_head) in next.iter().rev().enumerate() {
+                            // Track this branch's position in the fork for later join reconstruction
+                            let mut branching = branching.clone();
+                            branching.push(i);
+
+                            // Each branch will be processed independently and converge at prev
+                            stack.push((br_head.clone(), prev.clone(), branching));
+                        }
+                    }
+
+                    Node::Join { ref next } => {
+                        // In reversal, a join becomes a fork point that branches diverge from
+                        // Accumulate the branch result for later fork construction
+                        results.push(prev);
+
+                        let mut branching = branching;
+                        if let Some(branch) = branching.pop() {
+                            // Only construct the fork when we've processed all branches
+                            // Branch 0 is processed last (due to reverse iteration)
+                            if branch == 0 {
+                                // Create a fork node from all accumulated branch results
+                                let head = Node::fork(results).into_link();
+                                stack.push((next.clone(), head, branching));
+
+                                // Reset for next potential fork construction
+                                results = Vec::new();
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Handle None nodes (end of a branch) by storing the previous node
+                results.push(prev);
+            }
+        }
+
+        // Construct the final reversed DAG from accumulated results
+        if results.is_empty() {
+            // Empty DAG case
+            Dag::default()
+        } else {
+            // Should have exactly one result representing the new head
+            debug_assert!(
+                results.len() == 1,
+                "Expected exactly one result after reversal"
+            );
+
+            let head = results.pop().unwrap();
+
+            Dag { head, tail }
+        }
     }
 }
 
@@ -1249,6 +1403,30 @@ mod tests {
     }
 
     #[test]
+    fn test_basic_prepend() {
+        // This test checks if tail is properly preserved when concatenating with empty DAGs
+        let first: Dag<i32> = seq!(1, 2);
+        let second: Dag<i32> = Dag::default(); // Empty
+        let third: Dag<i32> = seq!(3);
+
+        let result = third.prepend(second).prepend(first);
+        assert!(!result.is_empty());
+        assert_eq!(result.to_string(), "- 1\n- 2\n- 3");
+    }
+
+    #[test]
+    fn test_prepend_with_forked_empty_dag() {
+        // Test concatenating with a DAG that has empty branches
+        let non_empty: Dag<i32> = seq!(1, 2);
+        let forked_with_empty: Dag<i32> = dag!(seq!(3), Dag::default());
+
+        let result = forked_with_empty.prepend(non_empty);
+        assert!(!result.is_empty());
+        // The empty branch should be filtered out during construction
+        assert_eq!(result.to_string(), "- 1\n- 2\n- 3");
+    }
+
+    #[test]
     fn test_dag_new_with_shared_nodes() {
         // This test checks if DAG::new() properly handles cases where branches might share nodes
         let single_element: Dag<i32> = seq!(42);
@@ -1629,5 +1807,218 @@ mod tests {
         // Only successful tasks should have sent their changes
         let results = results.read().await;
         assert_eq!(*results, vec!["A", "E", "B"]);
+    }
+
+    #[test]
+    fn test_contructing_linear_inverted_dag() {
+        let dag: Dag<i32> = Dag::default().prepend(1).prepend(2).prepend(3);
+
+        let elems: Vec<i32> = dag
+            .iter()
+            .filter(is_item)
+            .map(|node| match &*node.read().unwrap() {
+                Node::Item { value, .. } => *value,
+                _ => unreachable!(),
+            })
+            .collect();
+
+        assert_eq!(elems, vec![3, 2, 1])
+    }
+
+    #[test]
+    fn test_contructing_forking_inverted_dag() {
+        let dag: Dag<i32> = Dag::default()
+            .prepend(1)
+            .prepend(2)
+            .prepend(3)
+            .prepend(par!(5, 4))
+            .prepend(6);
+
+        let elems: Vec<i32> = dag
+            .iter()
+            .filter(is_item)
+            .map(|node| match &*node.read().unwrap() {
+                Node::Item { value, .. } => *value,
+                _ => unreachable!(),
+            })
+            .collect();
+
+        assert_eq!(elems, vec![6, 5, 4, 3, 2, 1])
+    }
+
+    #[test]
+    fn test_reverse_dag() {
+        let dag: Dag<i32> = Dag::default()
+            .prepend(1)
+            .prepend(2)
+            .prepend(3)
+            .prepend(par!(4, 5))
+            .prepend(6)
+            .reverse();
+
+        let elems: Vec<i32> = dag
+            .iter()
+            .filter(is_item)
+            .map(|node| match &*node.read().unwrap() {
+                Node::Item { value, .. } => *value,
+
+                _ => unreachable!(),
+            })
+            .collect();
+
+        assert_eq!(elems, vec![1, 2, 3, 4, 5, 6])
+    }
+
+    #[test]
+    fn test_reverse_empty_dag() {
+        let dag: Dag<i32> = Dag::default().reverse();
+        assert!(dag.head.is_none());
+        assert!(dag.tail.is_none());
+    }
+
+    #[test]
+    fn test_reverse_dag_with_forks() {
+        let dag: Dag<char> = seq!('A') + dag!(seq!('B', 'C'), seq!('D')) + seq!('E');
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - E
+                + ~ - C
+                    - B
+                  ~ - D
+                - A
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_single_item() {
+        let dag: Dag<i32> = seq!(42);
+        let reversed = dag.reverse();
+
+        let elems: Vec<i32> = reversed
+            .iter()
+            .filter(is_item)
+            .map(|node| match &*node.read().unwrap() {
+                Node::Item { value, .. } => *value,
+                _ => unreachable!(),
+            })
+            .collect();
+
+        assert_eq!(elems, vec![42]);
+    }
+
+    #[test]
+    fn test_reverse_nested_forks() {
+        // Create a DAG with nested parallel sections:
+        // A -> (B -> (C, D), E) -> F
+        let inner_fork = dag!(seq!('C'), seq!('D'));
+        let branch1 = seq!('B') + inner_fork;
+        let branch2 = seq!('E');
+        let dag: Dag<char> = seq!('A') + dag!(branch1, branch2) + seq!('F');
+
+        let reversed = dag.reverse();
+
+        // Should become: F -> ((C, D) -> B, E) -> A
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - F
+                + ~ + ~ - C
+                      ~ - D
+                    - B
+                  ~ - E
+                - A
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_multiple_sequential_sections() {
+        let dag: Dag<i32> = seq!(1, 2) + dag!(seq!(3, 4), seq!(5, 6)) + seq!(7, 8);
+        let reversed = dag.reverse();
+
+        let elems: Vec<i32> = reversed
+            .iter()
+            .filter(is_item)
+            .map(|node| match &*node.read().unwrap() {
+                Node::Item { value, .. } => *value,
+                _ => unreachable!(),
+            })
+            .collect();
+
+        // Original order: 1, 2, [3, 4 || 5, 6], 7, 8
+        // Reversed order: 8, 7, [4, 3 || 6, 5], 2, 1
+        assert_eq!(elems, vec![8, 7, 4, 3, 6, 5, 2, 1]);
+    }
+
+    #[test]
+    fn test_reverse_three_way_fork() {
+        let dag: Dag<char> = seq!('A') + dag!(seq!('B'), seq!('C'), seq!('D')) + seq!('E');
+        let reversed = dag.reverse();
+
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - E
+                + ~ - B
+                  ~ - C
+                  ~ - D
+                - A
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_preserves_execution_semantics() {
+        // Test that reversing twice returns to original execution order
+        let original: Dag<i32> = seq!(1, 2) + dag!(seq!(3, 4), seq!(5)) + seq!(6);
+        let double_reversed = original.shallow_clone().reverse().reverse();
+
+        let original_elems: Vec<i32> = original
+            .iter()
+            .filter(is_item)
+            .map(|node| match &*node.read().unwrap() {
+                Node::Item { value, .. } => *value,
+                _ => unreachable!(),
+            })
+            .collect();
+
+        let double_reversed_elems: Vec<i32> = double_reversed
+            .iter()
+            .filter(is_item)
+            .map(|node| match &*node.read().unwrap() {
+                Node::Item { value, .. } => *value,
+                _ => unreachable!(),
+            })
+            .collect();
+
+        assert_eq!(original_elems, double_reversed_elems);
+    }
+
+    #[test]
+    fn test_reverse_empty_branches() {
+        // Test DAG with some empty branches (should be filtered out)
+        let dag: Dag<i32> = dag!(seq!(1, 2), Dag::default(), seq!(3));
+        let reversed = dag.reverse();
+
+        let elems: Vec<i32> = reversed
+            .iter()
+            .filter(is_item)
+            .map(|node| match &*node.read().unwrap() {
+                Node::Item { value, .. } => *value,
+                _ => unreachable!(),
+            })
+            .collect();
+
+        // Empty branch should be filtered out
+        assert_eq!(elems, vec![2, 1, 3]);
     }
 }
