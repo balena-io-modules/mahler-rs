@@ -1,4 +1,33 @@
 - commits:
+    - subject: Fix Clone for DAG.
+      hash: 8af774562d6118684d5434b51587a3b6efad41a2
+      body: |
+        The previous DAG implementation was doing a shallow clone, only copying
+        the references to the head and tail nodes. This means that when cloning,
+        if the clone is modified, then the original also gets modified.
+
+        This now iterates over the whole DAG creating new nodes during clone.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Fix cycle detection on the planner
+      hash: fcce0a6c808f3b99b1144c8b0744b83bd5462d1e
+      body: |
+        Loop detection was being performed in the wrong step in the planning
+        process. This now moves detection when selecting candidates to make sure
+        none of the tasks in the new candidate workflow conflict with any
+        existing tasks.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.19.5
+  title: ""
+  date: 2025-08-26T15:18:53.404Z
+- commits:
     - subject: Refactor conflict detection in planner
       hash: 24c821cb4a0a7deca8878ee98ba5f4f64b5c0d16
       body: |
