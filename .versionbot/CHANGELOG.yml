@@ -1,4 +1,22 @@
 - commits:
+    - subject: Construct workflow in reverse in planner
+      hash: dcb135eaa56536d20109ec0b43ce71d7e77c60ad
+      body: |
+        Constructing the workflow in reverse avoids the need for expensive deep
+        cloning the DAG when selecting candidates and still prevents the problem
+        of modifying the existing workflow when backtracking.
+
+        This change also cleans up the internal interfaces of the planner which
+        result in better code readability.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.19.6
+  title: ""
+  date: 2025-08-26T15:58:05.435Z
+- commits:
     - subject: Fix Clone for DAG.
       hash: 8af774562d6118684d5434b51587a3b6efad41a2
       body: |
