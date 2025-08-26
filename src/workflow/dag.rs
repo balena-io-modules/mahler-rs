@@ -103,7 +103,6 @@ impl<T> Iterator for Iter<T> {
     }
 }
 
-#[derive(Clone)]
 /// Utility type to operate with Directed Acyclic Graphs (DAG)
 ///
 /// This type is exported as a testing utility, to allow review of generated workflows using
@@ -308,6 +307,90 @@ pub struct Dag<T> {
     tail: Link<T>,
 }
 
+impl<T: Clone> Clone for Dag<T> {
+    fn clone(&self) -> Self {
+        fn deep_clone<T: Clone>(head: Link<T>) -> (Link<T>, Link<T>) {
+            if let Some(node_rc) = head {
+                let node_ref = node_rc.read().unwrap();
+                match &*node_ref {
+                    Node::Item { value, next } => {
+                        let (next, tail) = deep_clone(next.clone());
+                        let node = Node::Item {
+                            value: (*value).clone(),
+                            next,
+                        }
+                        .into_link();
+
+                        // use this node as the tail if there is no tail
+                        let tail = tail.or(node.clone());
+
+                        (node, tail)
+                    }
+                    Node::Fork { next } => {
+                        let mut heads: Vec<Link<T>> = Vec::new();
+                        let mut tails: Vec<Link<T>> = Vec::new();
+                        for branch in next {
+                            let (h, t) = deep_clone(branch.clone());
+                            heads.push(h);
+                            tails.push(t);
+                        }
+
+                        // use one of the tails to proceed with the recursion
+                        if let Some(tail) = tails.last() {
+                            // If the tail exists use its `next` property
+                            let (join, tail) = if let Some(tail_rc) = tail {
+                                let next = match &*tail_rc.read().unwrap() {
+                                    Node::Item { next, .. } => next.clone(),
+                                    Node::Join { next, .. } => next.clone(),
+                                    _ => unreachable!("tail cannot be a fork"),
+                                };
+
+                                // follow the next node of the tail to create the join node
+                                let (next, tail) = deep_clone(next);
+
+                                // create a join node and the tail of the dag
+                                let join = Node::Join { next }.into_link();
+                                let tail = tail.or(join.clone());
+                                (join, tail)
+                            } else {
+                                // if the tail is none, the join node was the last element
+                                // of the dag so we need to re-create it
+                                let join = Node::Join { next: None }.into_link();
+                                (join.clone(), join)
+                            };
+
+                            // modify all tails to point to the new join node
+                            for t_rc in tails.into_iter().flatten() {
+                                match &mut *t_rc.write().unwrap() {
+                                    Node::Item { ref mut next, .. } => *next = join.clone(),
+                                    Node::Join { ref mut next, .. } => *next = join.clone(),
+                                    _ => unreachable!("tail cannot be a fork"),
+                                }
+                            }
+
+                            // return the fork node
+                            (Node::Fork { next: heads }.into_link(), tail)
+                        } else {
+                            // the fork is empty
+                            (None, None)
+                        }
+                    }
+                    Node::Join { next } => {
+                        // break the recursion here, the next node will be used when cloning
+                        // the fork node
+                        (next.clone(), None)
+                    }
+                }
+            } else {
+                (None, None)
+            }
+        }
+
+        let (head, tail) = deep_clone(self.head.clone());
+        Self { head, tail }
+    }
+}
+
 impl<T> Default for Dag<T> {
     /// Create an empty DAG
     fn default() -> Self {
@@ -469,7 +552,7 @@ impl<T> Dag<T> {
     /// Join two DAGs
     pub fn concat(self, other: impl Into<Dag<T>>) -> Self {
         let other = other.into();
-        if let Some(tail_node) = self.tail {
+        if let Some(tail_node) = &self.tail {
             match *tail_node.write().unwrap() {
                 Node::Item { ref mut next, .. } => {
                     *next = other.head;
@@ -477,8 +560,7 @@ impl<T> Dag<T> {
                 Node::Join { ref mut next } => {
                     *next = other.head;
                 }
-                // The tail should never point to a fork
-                Node::Fork { .. } => unreachable!(),
+                _ => unreachable!("tail cannot be a fork"),
             }
         } else {
             // this dag is empty
@@ -487,7 +569,7 @@ impl<T> Dag<T> {
 
         Dag {
             head: self.head,
-            tail: other.tail,
+            tail: other.tail.or(self.tail),
         }
     }
 
@@ -906,7 +988,6 @@ mod tests {
     fn test_empty_dag() {
         let dag: Dag<i32> = Dag::default();
         assert!(dag.head.is_none());
-        assert!(dag.tail.is_none());
     }
 
     #[test]
@@ -972,6 +1053,50 @@ mod tests {
     }
 
     #[test]
+    fn test_clone_sequence() {
+        let dag: Dag<i32> = seq!(1, 2, 3);
+        let clone = dag.clone();
+        assert_eq!(clone.to_string(), "- 1\n- 2\n- 3");
+    }
+
+    #[test]
+    fn test_clone_fork() {
+        let dag: Dag<i32> = seq!(1) + par!(2, 3, 4) + seq!(5);
+        let clone = dag.clone();
+        assert_eq!(clone.to_string(), "- 1\n+ ~ - 2\n  ~ - 3\n  ~ - 4\n- 5");
+    }
+
+    #[test]
+    fn test_clone_deep_nested_dag() {
+        let dag: Dag<char> = seq!('A')
+            + dag!(
+                seq!('B', 'C') + dag!(seq!('D', 'E'), seq!('F')),
+                seq!('G', 'H', 'I')
+            )
+            + seq!('J', 'K');
+
+        let dag = dag.clone();
+        assert_str_eq!(
+            dag.to_string(),
+            dedent!(
+                r#"
+                - A
+                + ~ - B
+                    - C
+                    + ~ - D
+                        - E
+                      ~ - F
+                  ~ - G
+                    - H
+                    - I
+                - J
+                - K
+                "#
+            )
+        );
+    }
+
+    #[test]
     fn test_iterate_linear_graph() {
         let elements = vec![1, 2, 3];
         let dag = Dag::<i32>::seq(elements.clone());
@@ -1031,6 +1156,163 @@ mod tests {
                 "#
             )
         );
+    }
+
+    #[test]
+    fn modifying_a_clone_should_not_affect_the_original() {
+        let dag: Dag<char> = seq!('A') + par!('B', 'C', 'D');
+
+        let new_dag = dag.clone() + seq!('E');
+
+        assert_str_eq!(
+            new_dag.to_string(),
+            dedent!(
+                r#"
+                - A
+                + ~ - B
+                  ~ - C
+                  ~ - D
+                - E
+                "#
+            ),
+            "new dag should contain the new element"
+        );
+        assert_str_eq!(
+            dag.to_string(),
+            dedent!(
+                r#"
+                - A
+                + ~ - B
+                  ~ - C
+                  ~ - D
+                "#
+            ),
+            "old dag should remain the same"
+        );
+    }
+
+    #[test]
+    fn test_concatenation_with_empty_dag() {
+        // Test 1: Non-empty + Empty
+        let non_empty: Dag<i32> = seq!(1, 2, 3);
+        let empty: Dag<i32> = Dag::default();
+
+        assert!(!non_empty.is_empty());
+        assert!(empty.is_empty());
+
+        let result = non_empty.clone() + empty.clone();
+        assert!(!result.is_empty());
+        assert_eq!(result.to_string(), "- 1\n- 2\n- 3");
+
+        // Test 2: Empty + Non-empty
+        let result2 = empty + non_empty;
+        assert!(!result2.is_empty());
+        assert_eq!(result2.to_string(), "- 1\n- 2\n- 3");
+    }
+
+    #[test]
+    fn test_concatenation_with_forked_empty_dag() {
+        // Test concatenating with a DAG that has empty branches
+        let non_empty: Dag<i32> = seq!(1, 2);
+        let forked_with_empty: Dag<i32> = dag!(seq!(3), Dag::default());
+
+        let result = non_empty + forked_with_empty;
+        assert!(!result.is_empty());
+        // The empty branch should be filtered out during construction
+        assert_eq!(result.to_string(), "- 1\n- 2\n- 3");
+    }
+
+    #[test]
+    fn test_empty_dag_concatenation_preserves_tail() {
+        // This test checks if tail is properly preserved when concatenating with empty DAGs
+        let first: Dag<i32> = seq!(1);
+        let second: Dag<i32> = Dag::default(); // Empty
+        let third: Dag<i32> = seq!(2);
+
+        // Chain: first + empty + third
+        let result = first + second + third;
+        assert!(!result.is_empty());
+        assert_eq!(result.to_string(), "- 1\n- 2");
+    }
+
+    #[test]
+    fn test_basic_concatenation_of_sequences() {
+        // This test checks if tail is properly preserved when concatenating with empty DAGs
+        let first: Dag<i32> = seq!(1, 2);
+        let second: Dag<i32> = Dag::default(); // Empty
+        let third: Dag<i32> = seq!(3);
+
+        // Chain: first + empty + third
+        let result = first + second + third;
+        assert!(!result.is_empty());
+        assert_eq!(result.to_string(), "- 1\n- 2\n- 3");
+    }
+
+    #[test]
+    fn test_dag_new_with_shared_nodes() {
+        // This test checks if DAG::new() properly handles cases where branches might share nodes
+        let single_element: Dag<i32> = seq!(42);
+
+        // Create a fork where one branch is the single element DAG
+        let branch1 = single_element.clone();
+        let branch2 = seq!(1, 2);
+
+        let forked_dag = dag!(branch1, branch2);
+
+        // Check that the original single_element DAG wasn't corrupted
+        assert_eq!(single_element.to_string(), "- 42");
+        assert_eq!(forked_dag.to_string(), "+ ~ - 42\n  ~ - 1\n    - 2");
+    }
+
+    #[test]
+    fn test_dag_new_with_multiple_single_elements() {
+        // Test forking multiple single-element DAGs
+        let elem1: Dag<i32> = seq!(1);
+        let elem2: Dag<i32> = seq!(2);
+        let elem3: Dag<i32> = seq!(3);
+
+        let forked = dag!(elem1.clone(), elem2.clone(), elem3.clone());
+
+        // Original elements should be unchanged
+        assert_eq!(elem1.to_string(), "- 1");
+        assert_eq!(elem2.to_string(), "- 2");
+        assert_eq!(elem3.to_string(), "- 3");
+
+        // Forked DAG should be correct
+        assert_eq!(forked.to_string(), "+ ~ - 1\n  ~ - 2\n  ~ - 3");
+    }
+
+    #[test]
+    fn test_dag_new_edge_cases() {
+        // Test empty branches
+        let empty1: Dag<i32> = Dag::default();
+        let empty2: Dag<i32> = Dag::default();
+        let non_empty: Dag<i32> = seq!(42);
+
+        // DAG with only empty branches should return empty
+        let all_empty = dag!(empty1.clone(), empty2.clone());
+        assert!(all_empty.is_empty());
+
+        // DAG with mix of empty and non-empty should work
+        let mixed = dag!(empty1, non_empty.clone(), empty2);
+        assert_eq!(mixed.to_string(), "- 42");
+
+        // Single non-empty branch should return the branch directly
+        let single_branch = dag!(non_empty);
+        assert_eq!(single_branch.to_string(), "- 42");
+    }
+
+    #[test]
+    fn test_dag_seq_edge_cases() {
+        // Empty sequence should create empty DAG
+        let empty_seq: Dag<i32> = Dag::seq(Vec::<i32>::new());
+        assert!(empty_seq.is_empty());
+        assert_eq!(empty_seq.to_string(), "");
+
+        // Single element sequence
+        let single: Dag<i32> = seq!(42);
+        assert!(!single.is_empty());
+        assert_eq!(single.to_string(), "- 42");
     }
 
     #[test]
