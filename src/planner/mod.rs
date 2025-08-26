@@ -122,7 +122,7 @@ where
 
 #[derive(Clone, PartialEq, Eq)]
 struct Candidate {
-    workflow: Dag<WorkUnit>,
+    partial_plan: Dag<WorkUnit>,
     changes: Vec<PatchOperation>,
     path: Path,
     domain: BTreeSet<Path>,
@@ -179,10 +179,9 @@ impl Planner {
         &self,
         task: &Task,
         cur_state: &System,
-        cur_plan: Workflow,
         domain: &mut BTreeSet<Path>,
         changes: &mut Vec<PatchOperation>,
-    ) -> Result<Workflow, SearchFailed> {
+    ) -> Result<Dag<WorkUnit>, SearchFailed> {
         let span = Span::current();
         match task {
             Task::Action(action) => {
@@ -199,16 +198,15 @@ impl Planner {
                 span.record("changes", display(&patch));
 
                 let Patch(ops) = patch;
-                let Workflow(dag) = cur_plan;
 
-                // Append a new node to the workflow, include a copy
+                // Prepend a new node to the workflow, include a copy
                 // of the changes for validation during runtime
-                let dag = dag + WorkUnit::new(work_id, action.clone(), ops.clone());
+                let new_plan = Dag::from(WorkUnit::new(work_id, action.clone(), ops.clone()));
 
                 domain.insert(action.domain());
                 changes.extend(ops);
 
-                Ok(Workflow(dag))
+                Ok(new_plan)
             }
             Task::Method(method) => {
                 // Get the list of referenced tasks
@@ -254,7 +252,7 @@ impl Planner {
                     extended_tasks.push(task);
                 }
 
-                let mut branches = Vec::new();
+                let mut plan_branches = Vec::new();
                 let mut cumulative_domain = BTreeSet::new();
                 let mut cur_state = cur_state.clone();
 
@@ -263,24 +261,21 @@ impl Planner {
                     // Run the task as if it was a sequential plan
                     let mut task_domain = BTreeSet::new();
                     let mut task_changes = Vec::new();
-                    let Workflow(dag) = self.try_task(
-                        &task,
-                        &cur_state,
-                        Workflow::default(),
-                        &mut task_domain,
-                        &mut task_changes,
-                    )?;
+                    let partial_plan =
+                        self.try_task(&task, &cur_state, &mut task_domain, &mut task_changes)?;
 
                     // Check if the task domain conflicts with the cumulative domain from branches
-                    let dag = if domains_are_conflicting(&cumulative_domain, task_domain.iter()) {
-                        // If so, join the existing branches and concatenate the returned workflow
-                        let new_dag = Dag::new(branches) + dag;
-                        branches = Vec::new();
+                    let partial_plan =
+                        if domains_are_conflicting(&cumulative_domain, task_domain.iter()) {
+                            // If so, join the existing branches and concatenate the returned workflow
+                            // we reverse the branches to preserve the expected order of tasks in the plan
+                            let dag = Dag::new(plan_branches).prepend(partial_plan);
+                            plan_branches = Vec::new();
 
-                        new_dag
-                    } else {
-                        dag
-                    };
+                            dag
+                        } else {
+                            partial_plan
+                        };
 
                     // Apply the task changes
                     cur_state
@@ -288,7 +283,7 @@ impl Planner {
                         .with_context(|| format!("failed to apply patch {task_changes:?}"))?;
 
                     // Add the new dag to the list of branches and update the cummulative domain
-                    branches.push(dag);
+                    plan_branches.push(partial_plan);
                     cumulative_domain.extend(task_domain);
 
                     // Append the changes to the parent list
@@ -296,7 +291,7 @@ impl Planner {
                 }
 
                 // After all tasks are evaluated, join remaining branches
-                let cur_plan = Workflow(cur_plan.0 + Dag::new(branches));
+                let new_plan = Dag::new(plan_branches);
                 domain.extend(cumulative_domain);
 
                 let patch = Patch(changes.to_vec());
@@ -304,7 +299,7 @@ impl Planner {
                 span.record("changes", display(patch));
 
                 // Include changes in the returned plan
-                Ok(cur_plan)
+                Ok(new_plan)
             }
         }
     }
@@ -315,7 +310,7 @@ impl Planner {
         T: Serialize + DeserializeOwned,
     {
         // The search stack stores (current_state, current_plan, depth)
-        let mut stack = vec![(system.clone(), Workflow::default(), 0)];
+        let mut stack = vec![(system.clone(), Dag::default(), 0)];
         let find_workflow_span = Span::current();
 
         while let Some((cur_state, cur_plan, depth)) = stack.pop() {
@@ -336,7 +331,8 @@ impl Planner {
 
             // If no difference, we’ve reached the goal
             if distance.is_empty() {
-                return Ok(cur_plan);
+                // we need to reverse the plan before returning
+                return Ok(Workflow(cur_plan.reverse()));
             }
 
             let next_span = trace_span!("find_next", cur = %&cur_state.root(), tgt=%tgt, candidates=field::Empty);
@@ -369,16 +365,10 @@ impl Planner {
                             let mut domain = BTreeSet::new();
 
                             // Try applying this task to the current state
-                            match self.try_task(
-                                &task,
-                                &cur_state,
-                                Workflow::default(),
-                                &mut domain,
-                                &mut changes,
-                            ) {
-                                Ok(Workflow(workflow)) if !changes.is_empty() => {
+                            match self.try_task(&task, &cur_state, &mut domain, &mut changes) {
+                                Ok(partial_plan) if !changes.is_empty() => {
                                     candidates.push(Candidate {
-                                        workflow,
+                                        partial_plan,
                                         changes,
                                         path: task.path().clone(),
                                         domain,
@@ -459,21 +449,21 @@ impl Planner {
             }
 
             if concurrent_candidates.len() > 1 {
-                let mut branches = Vec::new();
+                let mut plan_branches = Vec::new();
                 let mut changes = Vec::new();
                 let mut domain = BTreeSet::new();
                 let mut total_priority = 0;
                 // The path for the candidate is the longest common prefix between child paths
                 let path = longest_common_prefix(concurrent_candidates.keys());
                 for Candidate {
-                    workflow,
+                    partial_plan,
                     changes: candidate_changes,
                     domain: candidate_domain,
                     priority,
                     ..
                 } in concurrent_candidates.into_values()
                 {
-                    branches.push(workflow);
+                    plan_branches.push(partial_plan);
                     changes.extend(candidate_changes);
                     domain.extend(candidate_domain);
                     // Aggregate each branch priority
@@ -482,7 +472,7 @@ impl Planner {
 
                 // Construct a new candidate using the concurrent branches
                 candidates.push(Candidate {
-                    workflow: Dag::new(branches),
+                    partial_plan: Dag::new(plan_branches),
                     changes,
                     domain,
                     path,
@@ -501,7 +491,9 @@ impl Planner {
 
             // For each candidate add a new plan to the stack
             for Candidate {
-                workflow, changes, ..
+                partial_plan,
+                changes,
+                ..
             } in candidates.into_iter()
             {
                 let mut new_sys = cur_state.clone();
@@ -511,14 +503,13 @@ impl Planner {
                     .map_err(InternalError::from)?;
 
                 // Check if the new workflow contains any visited tasks
-                if cur_plan.0.any(|unit| workflow.any(|u| u.id == unit.id)) {
+                if cur_plan.any(|unit| partial_plan.any(|u| u.id == unit.id)) {
                     // skip this candidate because it is creating a loop
                     continue;
                 }
 
                 // Extend current plan
-                let Workflow(cur_plan) = cur_plan.clone();
-                let new_plan = Workflow(cur_plan + workflow);
+                let new_plan = cur_plan.shallow_clone().prepend(partial_plan);
 
                 // Add the new plan to the search stack
                 stack.push((new_sys, new_plan, depth + 1));
