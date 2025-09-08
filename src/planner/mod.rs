@@ -453,7 +453,7 @@ impl Planner {
 
             for candidate in candidates.iter() {
                 if let Some(prev_candidate) = concurrent_candidates.get(&candidate.path) {
-                    if prev_candidate >= candidate {
+                    if *prev_candidate >= *candidate {
                         // skip the candidate is there is a previous candidate for the path
                         // higher priority
                         continue;
@@ -474,21 +474,30 @@ impl Planner {
                 let mut changes = Vec::new();
                 let mut domain = BTreeSet::new();
                 let mut total_priority = 0;
+                let mut is_method = true;
                 // The path for the candidate is the longest common prefix between child paths
                 let path = longest_common_prefix(concurrent_candidates.keys());
-                for Candidate {
-                    partial_plan,
-                    changes: candidate_changes,
-                    domain: candidate_domain,
-                    priority,
-                    ..
-                } in concurrent_candidates.into_values()
-                {
+                for candidate in concurrent_candidates.into_values() {
+                    // Do not use the candidate individually if already selected as part
+                    // of a concurrent candidate
+                    candidates.retain(|c| *c != candidate);
+
+                    let Candidate {
+                        partial_plan,
+                        changes: candidate_changes,
+                        domain: candidate_domain,
+                        is_method: candidate_is_method,
+                        priority,
+                        ..
+                    } = candidate;
                     plan_branches.push(partial_plan);
                     changes.extend(candidate_changes);
                     domain.extend(candidate_domain);
                     // Aggregate each branch priority
                     total_priority += priority;
+                    // Treat the candidate as a method when sorting if all children
+                    // are methods
+                    is_method = is_method && candidate_is_method;
                 }
 
                 // Construct a new candidate using the concurrent branches
@@ -497,8 +506,7 @@ impl Planner {
                     changes,
                     domain,
                     path,
-                    // If there is a method for the same path, give more priority to the method
-                    is_method: false,
+                    is_method,
                     operation: Operation::Update,
                     priority: total_priority,
                 })
