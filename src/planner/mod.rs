@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::{Patch, PatchOperation};
@@ -118,6 +119,19 @@ where
     let buf = PointerBuf::from_tokens(&prefix);
 
     Path::new(&buf)
+}
+
+fn hash_state(state: &System) -> u64 {
+    let value = state.root();
+
+    // Create a DefaultHasher
+    let mut hasher = DefaultHasher::new();
+
+    // Hash the data
+    value.hash(&mut hasher);
+
+    // Retrieve the hash value
+    hasher.finish()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -311,6 +325,10 @@ impl Planner {
     {
         // The search stack stores (current_state, current_plan, depth)
         let mut stack = vec![(system.clone(), Dag::default(), 0)];
+
+        // Keep track of visited states
+        let mut visited_states = HashSet::new();
+
         let find_workflow_span = Span::current();
 
         while let Some((cur_state, cur_plan, depth)) = stack.pop() {
@@ -325,6 +343,9 @@ impl Planner {
                 .state::<T>()
                 .and_then(System::try_from)
                 .map_err(SerializationError::from)?;
+
+            // add the current state to the visited list
+            visited_states.insert(hash_state(&cur_state));
 
             // Compute the difference between current and target state
             let distance = Distance::new(&cur, tgt);
@@ -496,11 +517,19 @@ impl Planner {
                 ..
             } in candidates.into_iter()
             {
-                let mut new_sys = cur_state.clone();
-                new_sys
+                let mut new_state = cur_state.clone();
+                new_state
                     .patch(Patch(changes))
                     .with_context(|| "failed to apply patch")
                     .map_err(InternalError::from)?;
+
+                // Ignore the candidate if it takes us to a state the planner has visited before,
+                // this avoids the planner just trying tasks in a different order or potentially
+                // looping forever jumping between a few visited states
+                let state_hash = hash_state(&new_state);
+                if visited_states.contains(&state_hash) {
+                    continue;
+                }
 
                 // Check if the new workflow contains any visited tasks
                 if cur_plan.any(|unit| partial_plan.any(|u| u.id == unit.id)) {
@@ -512,7 +541,7 @@ impl Planner {
                 let new_plan = cur_plan.shallow_clone().prepend(partial_plan);
 
                 // Add the new plan to the search stack
-                stack.push((new_sys, new_plan, depth + 1));
+                stack.push((new_state, new_plan, depth + 1));
             }
         }
 
