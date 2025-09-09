@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Debug;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::{Patch, PatchOperation};
@@ -118,6 +119,19 @@ where
     let buf = PointerBuf::from_tokens(&prefix);
 
     Path::new(&buf)
+}
+
+fn hash_state(state: &System) -> u64 {
+    let value = state.root();
+
+    // Create a DefaultHasher
+    let mut hasher = DefaultHasher::new();
+
+    // Hash the data
+    value.hash(&mut hasher);
+
+    // Retrieve the hash value
+    hasher.finish()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -311,6 +325,10 @@ impl Planner {
     {
         // The search stack stores (current_state, current_plan, depth)
         let mut stack = vec![(system.clone(), Dag::default(), 0)];
+
+        // Keep track of visited states
+        let mut visited_states = HashSet::new();
+
         let find_workflow_span = Span::current();
 
         while let Some((cur_state, cur_plan, depth)) = stack.pop() {
@@ -325,6 +343,9 @@ impl Planner {
                 .state::<T>()
                 .and_then(System::try_from)
                 .map_err(SerializationError::from)?;
+
+            // add the current state to the visited list
+            visited_states.insert(hash_state(&cur_state));
 
             // Compute the difference between current and target state
             let distance = Distance::new(&cur, tgt);
@@ -432,7 +453,7 @@ impl Planner {
 
             for candidate in candidates.iter() {
                 if let Some(prev_candidate) = concurrent_candidates.get(&candidate.path) {
-                    if prev_candidate >= candidate {
+                    if *prev_candidate >= *candidate {
                         // skip the candidate is there is a previous candidate for the path
                         // higher priority
                         continue;
@@ -453,21 +474,30 @@ impl Planner {
                 let mut changes = Vec::new();
                 let mut domain = BTreeSet::new();
                 let mut total_priority = 0;
+                let mut is_method = true;
                 // The path for the candidate is the longest common prefix between child paths
                 let path = longest_common_prefix(concurrent_candidates.keys());
-                for Candidate {
-                    partial_plan,
-                    changes: candidate_changes,
-                    domain: candidate_domain,
-                    priority,
-                    ..
-                } in concurrent_candidates.into_values()
-                {
+                for candidate in concurrent_candidates.into_values() {
+                    // Do not use the candidate individually if already selected as part
+                    // of a concurrent candidate
+                    candidates.retain(|c| *c != candidate);
+
+                    let Candidate {
+                        partial_plan,
+                        changes: candidate_changes,
+                        domain: candidate_domain,
+                        is_method: candidate_is_method,
+                        priority,
+                        ..
+                    } = candidate;
                     plan_branches.push(partial_plan);
                     changes.extend(candidate_changes);
                     domain.extend(candidate_domain);
                     // Aggregate each branch priority
                     total_priority += priority;
+                    // Treat the candidate as a method when sorting if all children
+                    // are methods
+                    is_method = is_method && candidate_is_method;
                 }
 
                 // Construct a new candidate using the concurrent branches
@@ -476,8 +506,7 @@ impl Planner {
                     changes,
                     domain,
                     path,
-                    // If there is a method for the same path, give more priority to the method
-                    is_method: false,
+                    is_method,
                     operation: Operation::Update,
                     priority: total_priority,
                 })
@@ -496,11 +525,19 @@ impl Planner {
                 ..
             } in candidates.into_iter()
             {
-                let mut new_sys = cur_state.clone();
-                new_sys
+                let mut new_state = cur_state.clone();
+                new_state
                     .patch(Patch(changes))
                     .with_context(|| "failed to apply patch")
                     .map_err(InternalError::from)?;
+
+                // Ignore the candidate if it takes us to a state the planner has visited before,
+                // this avoids the planner just trying tasks in a different order or potentially
+                // looping forever jumping between a few visited states
+                let state_hash = hash_state(&new_state);
+                if visited_states.contains(&state_hash) {
+                    continue;
+                }
 
                 // Check if the new workflow contains any visited tasks
                 if cur_plan.any(|unit| partial_plan.any(|u| u.id == unit.id)) {
@@ -512,7 +549,7 @@ impl Planner {
                 let new_plan = cur_plan.shallow_clone().prepend(partial_plan);
 
                 // Add the new plan to the search stack
-                stack.push((new_sys, new_plan, depth + 1));
+                stack.push((new_state, new_plan, depth + 1));
             }
         }
 
