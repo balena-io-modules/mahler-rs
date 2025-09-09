@@ -1,4 +1,34 @@
 - commits:
+    - subject: Skip candidate job if used in a concurrent cnadidate
+      hash: da9954f0e41728a25b64ba5483fe93123ec02efa
+      body: |
+        For independent tasks, when task is used as part of a concurrent
+        candidate it doesn't make sense to also test the task individually.
+
+        This change will probably provide some marginal performance improvement
+        by pruning some branches from the search tree.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Keep track of visited states during planning
+      hash: f88ed11f6d53fb635245947a54b07cca2782bb76
+      body: |
+        This greatly reduces search time as it quickly discards plans that are
+        reordering of other plans and don't advance the search. This also
+        greatly reduces (and perhaps removes) the probability of infinite loops
+        during planning as there is no longer the posibility of jumping between
+        two visited states forever.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.19.7
+  title: ""
+  date: 2025-09-09T04:42:27.108Z
+- commits:
     - subject: Construct workflow in reverse in planner
       hash: dcb135eaa56536d20109ec0b43ce71d7e77c60ad
       body: |
