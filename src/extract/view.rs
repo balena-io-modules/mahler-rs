@@ -393,7 +393,7 @@ mod tests {
 
         assert_eq!(view.as_ref(), None);
 
-        let value = view.get_or_insert_default();
+        let value = view.get_or_insert(0);
         *value = 3;
 
         // Get the list changes to the view
