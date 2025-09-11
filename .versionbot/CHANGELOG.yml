@@ -1,4 +1,21 @@
 - commits:
+    - subject: Remove backtracking from planner search
+      hash: 5f53bf76781e03c12954bece2bdb8e028e04f676
+      body: |
+        Replaces depth-first search with greedy approach to avoid
+        combinatorial explosion. Refactors Distance struct to store
+        original patch data for better tracing.
+      footer:
+        Change-type: minor
+        change-type: minor
+        Closes: "#57"
+        closes: "#57"
+      author: felipe
+      nested: []
+  version: 0.20.0
+  title: ""
+  date: 2025-09-11T15:09:56.997Z
+- commits:
     - subject: Skip candidate job if used in a concurrent cnadidate
       hash: da9954f0e41728a25b64ba5483fe93123ec02efa
       body: |
