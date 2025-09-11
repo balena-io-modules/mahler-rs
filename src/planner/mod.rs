@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 use tracing::field::display;
-use tracing::{error, field, instrument, trace, trace_span, warn, Level, Span};
+use tracing::{error, field, instrument, trace, trace_span, warn, Span};
 
 use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
@@ -188,7 +188,6 @@ impl Planner {
         Self(domain)
     }
 
-    #[instrument(level="trace", skip_all, fields(id=%task.id(), path=%task.path(), selected=field::Empty, changes=field::Empty), err(level=Level::TRACE))]
     fn try_task(
         &self,
         task: &Task,
@@ -318,11 +317,12 @@ impl Planner {
         }
     }
 
-    #[instrument(level = "trace", skip_all)]
+    #[instrument(level = "trace", skip_all, err(level = "trace"))]
     pub(crate) fn find_workflow<T>(&self, system: &System, tgt: &Value) -> Result<Workflow, Error>
     where
         T: Serialize + DeserializeOwned,
     {
+        trace!(initial=%system, target=%tgt, "searching for workflow");
         // The search stack stores (current_state, current_plan, depth)
         let mut stack = vec![(system.clone(), Dag::default(), 0)];
 
@@ -356,14 +356,18 @@ impl Planner {
                 return Ok(Workflow(cur_plan.reverse()));
             }
 
-            let next_span = trace_span!("find_next", cur = %&cur_state.root(), tgt=%tgt, candidates=field::Empty);
+            let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
+            next_span.in_scope(|| {
+                // make a copy of the plan for the logs if in the tracing scope
+                next_span.record("cur_plan", field::display(cur_plan.clone().reverse()));
+            });
             let _enter = next_span.enter();
 
             // List of candidate plans at this level in the stack
             let mut candidates: Vec<Candidate> = Vec::new();
 
             // Iterate over distance operations and jobs to find possible candidates
-            for op in distance.iter() {
+            for op in distance.operations() {
                 let path = Path::new(op.path());
 
                 // Retrieve matching jobs at this path
@@ -380,7 +384,6 @@ impl Planner {
                     // Filter `None` jobs from the list
                     for job in jobs.filter(|j| j.operation() != &Operation::None) {
                         if op.matches(job.operation()) || job.operation() == &Operation::Any {
-                            trace!("found job for operation: {op}");
                             let task = job.new_task(context.clone());
                             let mut changes = Vec::new();
                             let mut domain = BTreeSet::new();
@@ -516,14 +519,14 @@ impl Planner {
             candidates.sort();
 
             // Record candidates found for this planning step
-            next_span.record("candidates", candidates.len());
+            trace!(candidates=%candidates.len());
 
-            // For each candidate add a new plan to the stack
+            // Insert the best candidate that doesn't introduce cycles into the stack
             for Candidate {
                 partial_plan,
                 changes,
                 ..
-            } in candidates.into_iter()
+            } in candidates.into_iter().rev()
             {
                 let mut new_state = cur_state.clone();
                 new_state
@@ -550,6 +553,13 @@ impl Planner {
 
                 // Add the new plan to the search stack
                 stack.push((new_state, new_plan, depth + 1));
+
+                // Only add the most qualified candidate (greedy search)
+                break;
+            }
+
+            if stack.is_empty() {
+                trace!(last_evaluated_state=%cur_state, "no plan was found");
             }
         }
 
@@ -835,20 +845,12 @@ mod tests {
         assert_eq!(workflow.to_string(), expected.to_string(),);
     }
 
-    // This test forces the planner to backtrack and try multiple plans.
-    // Because of an issue with the implementation in DAG, this would terminate
-    // with a wrong plan with duplicate tasks
-    //
-    // ```
-    // - store device configuration
-    // - ensure cleanup
-    // + ~ - update device name
-    //   - initialize app with uuid 'my-app-uuid'
-    // ~ - initialize app with uuid 'my-app-uuid'
-    //   - update device name
+    // This test will fail to find a plan due to a bug in the task definitions,
+    // with backtracking, the planner might find a correct candidated but the planner avoids
+    // backtracking to prevent combinatorial explosion.
     // ```
     #[test]
-    fn it_finds_a_correct_path_through_backtracking() {
+    fn it_fails_to_find_a_plan_for_a_buggy_task() {
         init();
 
         #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -914,6 +916,7 @@ mod tests {
                 return vec![];
             }
 
+            // dummy task is always empty so do_cleanup will never be picked
             vec![dummy_task.into_task(), complete_cleanup.into_task()]
         }
 
@@ -963,15 +966,8 @@ mod tests {
         .unwrap();
 
         let planner = Planner::new(domain);
-        // We expect a parallel dag for this specific target
-        let expected: Dag<&str> = seq!(
-            "store configuration",
-            "set device name",
-            "prepare app my-app",
-        );
-        let workflow = find_plan(planner, initial, target).unwrap();
-
-        assert_eq!(workflow.to_string(), expected.to_string(),);
+        let workflow = find_plan(planner, initial, target);
+        assert!(workflow.is_err(), "unexpected plan:\n{}", workflow.unwrap());
     }
 
     #[test]

@@ -3,15 +3,57 @@ use jsonptr::Pointer;
 use serde_json::Value;
 use std::collections::btree_set::Iter;
 use std::fmt::{self, Display};
-use std::{
-    cmp::Ordering,
-    collections::{BTreeSet, LinkedList},
-};
+use std::{cmp::Ordering, collections::BTreeSet};
 
 use crate::task::Operation as JobOperation;
 
 #[derive(Debug)]
-pub struct Distance(BTreeSet<Operation>);
+pub struct Distance {
+    changes: Patch,
+    operations: BTreeSet<Operation>,
+}
+
+fn insert_remove_ops(ops: &mut BTreeSet<Operation>, path: &Pointer, value: &Value) {
+    let mut queue = Vec::new();
+    queue.push((path.to_buf(), value));
+
+    while let Some((path, value)) = queue.pop() {
+        if value.is_object() {
+            let obj = value.as_object().unwrap();
+            for (k, v) in obj.iter() {
+                let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
+                // Insert a remove operation for each child
+                ops.insert(Operation::from(PatchOperation::Remove(RemoveOperation {
+                    path: path.clone(),
+                })));
+
+                // Append the value to the queue
+                queue.push((path, v));
+            }
+        }
+
+        if value.is_array() {
+            let obj = value.as_array().unwrap();
+            for (k, v) in obj.iter().enumerate() {
+                let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
+
+                // Insert a remove operation for each child
+                ops.insert(Operation::from(PatchOperation::Remove(RemoveOperation {
+                    path: path.clone(),
+                })));
+
+                // Append the value to the queue
+                queue.push((path, v));
+            }
+        }
+    }
+}
+
+impl Display for Distance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.changes.fmt(f)
+    }
+}
 
 impl Distance {
     /// Calculate the distance between some state and target
@@ -30,12 +72,12 @@ impl Distance {
     /// The distance encodes all the possible operations that can be used to move
     /// between two states
     pub fn new(src: &Value, tgt: &Value) -> Distance {
-        let mut distance = Distance(BTreeSet::new());
+        let mut operations = BTreeSet::new();
 
         // calculate differences between the system root and
         // the target
-        let Patch(changes) = diff(src, tgt);
-        for op in changes {
+        let changes = diff(src, tgt);
+        for op in &changes.0 {
             // For every operation on the list of changes
             let path = op.path();
 
@@ -53,7 +95,7 @@ impl Distance {
                 });
 
                 // Insert a replace operation for each one
-                distance.insert(Operation::from(PatchOperation::Replace(ReplaceOperation {
+                operations.insert(Operation::from(PatchOperation::Replace(ReplaceOperation {
                     path: newparent.to_buf(),
                     value: value.clone(),
                 })));
@@ -72,63 +114,26 @@ impl Distance {
                     )
                 });
 
-                //
-                distance.insert_remove_ops(path, value);
+                // add remove operations for inner values
+                insert_remove_ops(&mut operations, path, value);
             }
 
             // Finally insert the actual operation
-            distance.insert(Operation::from(op));
+            operations.insert(Operation::from(op.clone()));
         }
 
-        distance
-    }
-
-    fn insert(&mut self, o: Operation) {
-        self.0.insert(o);
+        Distance {
+            changes,
+            operations,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.changes.is_empty()
     }
 
-    pub fn iter(&self) -> Iter<'_, Operation> {
-        self.0.iter()
-    }
-
-    fn insert_remove_ops(&mut self, path: &Pointer, value: &Value) {
-        let mut queue = LinkedList::new();
-        queue.push_back((path.to_buf(), value));
-
-        while let Some((path, value)) = queue.pop_front() {
-            if value.is_object() {
-                let obj = value.as_object().unwrap();
-                for (k, v) in obj.iter() {
-                    let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
-                    // Insert a remove operation for each child
-                    self.insert(Operation::from(PatchOperation::Remove(RemoveOperation {
-                        path: path.clone(),
-                    })));
-
-                    // Append the value to the queue
-                    queue.push_back((path, v));
-                }
-            }
-
-            if value.is_array() {
-                let obj = value.as_array().unwrap();
-                for (k, v) in obj.iter().enumerate() {
-                    let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
-
-                    // Insert a remove operation for each child
-                    self.insert(Operation::from(PatchOperation::Remove(RemoveOperation {
-                        path: path.clone(),
-                    })));
-
-                    // Append the value to the queue
-                    queue.push_back((path, v));
-                }
-            }
-        }
+    pub fn operations(&self) -> Iter<'_, Operation> {
+        self.operations.iter()
     }
 }
 
@@ -192,7 +197,7 @@ mod tests {
 
         // Serialize results to make comparison easier
         let ops: Vec<Value> = distance
-            .iter()
+            .operations()
             .map(|Operation(o)| serde_json::to_value(o).unwrap())
             .collect();
 

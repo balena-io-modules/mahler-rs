@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
+    fmt::Display,
     ops::Deref,
     sync::Arc,
 };
@@ -57,6 +58,12 @@ impl std::fmt::Debug for System {
             .field("state", &self.state)
             .field("resources", &"Resources { ... }")
             .finish()
+    }
+}
+
+impl Display for System {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.state.fmt(f)
     }
 }
 
