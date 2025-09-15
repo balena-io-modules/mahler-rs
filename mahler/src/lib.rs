@@ -11,7 +11,7 @@
 //! - Declaratively access System state and resources using extractors.
 //! - Intelligent planner. Automatically discover a workflow to transition from the current system state to a given target state.
 //! - Concurrent execution of jobs. The planner automatically detects when operations can be performed concurrently and adjusts the execution graph accorddingly.
-//! - Observable runtime. Monitor the evolving state of the system from the Worker API. For more detailed logging, the library uses the [tracing crate](`tracing`).
+//! - Observable runtime. Monitor the evolving state of the system from the Worker API. For more detailed logging, the library uses the [tracing crate](https://crates.io/crates/tracing).
 //! - Easy to debug. Agent observable state and known goals allow easy replicability when issues occur.
 //!
 //! # Worker
@@ -78,10 +78,10 @@
 //!
 //! ## State
 //!
-//! The library relies on [JSON values](`serde_json::Value`) for internal state
+//! The library relies on [JSON values](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) for internal state
 //! representation. Parts of the state can be referenced using [JSON pointers](https://docs.rs/jsonptr/latest/jsonptr/)
 //! (see [RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901)) and state differences are calculated using
-//! [JSON patch](`json_patch`) (see [RFC 6902](https://datatracker.ietf.org/doc/html/rfc6902)).
+//! [JSON patch](https://crates.io/crates/json_patch) (see [RFC 6902](https://datatracker.ietf.org/doc/html/rfc6902)).
 //!
 //! For this reason, the system state can only be modelled using [serializable data structures](https://serde.rs). Moreover,
 //! non-serializable fields (annotated with [skip_serializing](https://serde.rs/attr-skip-serializing.html) will be
@@ -209,7 +209,7 @@
 //! ```
 //!
 //! Internally, the cumulative changes to the `View` extractors are converted by the planner to a
-//! [Patch](`json_patch::Patch`) and used to determine
+//! [Patch](https://docs.rs/json-patch/latest/json_patch/struct.Patch.html) and used to determine
 //! the applicability of the task to a given target (if no changes are performed by the task at planning,
 //! then the task is not applicable). At runtime, the same patch is used first to
 //! determine if the task is safe to apply, and later to update the internal worker state.
@@ -415,18 +415,9 @@
 //! - [run_task](`worker::Worker::run_task`) allows to run a task in the context of a worker. This
 //!   may be helpful to diagnose any extraction/expansion errors with the task definition or for
 //!   debugging of a specific task.
+pub use mahler_core::*;
 
-mod path;
-mod planner;
-mod system;
-
-pub mod errors;
-pub mod extract;
-pub mod task;
-pub mod worker;
-pub mod workflow;
-
-// TODO: this should not be exported from this crate.
-// It would more sense to re-export it, including the seq
-// and dag macros, from a "mahler-test" crate
-pub use workflow::Dag;
+#[cfg(feature = "derive")]
+pub mod derive {
+    pub use mahler_derive::*;
+}

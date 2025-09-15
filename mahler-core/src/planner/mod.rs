@@ -665,8 +665,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "mahler::planner::tests::plus_one()",
-            "mahler::planner::tests::plus_one()"
+            "mahler_core::planner::tests::plus_one()",
+            "mahler_core::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -705,8 +705,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "mahler::planner::tests::plus_one()",
-            "mahler::planner::tests::plus_one()"
+            "mahler_core::planner::tests::plus_one()",
+            "mahler_core::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -736,11 +736,11 @@ mod tests {
 
         // We expect counters to be updated concurrently
         let expected: Dag<&str> = par!(
-            "mahler::planner::tests::plus_one(/counters/one)",
-            "mahler::planner::tests::plus_one(/counters/two)",
+            "mahler_core::planner::tests::plus_one(/counters/one)",
+            "mahler_core::planner::tests::plus_one(/counters/two)",
         ) + par!(
-            "mahler::planner::tests::plus_one(/counters/one)",
-            "mahler::planner::tests::plus_one(/counters/two)",
+            "mahler_core::planner::tests::plus_one(/counters/one)",
+            "mahler_core::planner::tests::plus_one(/counters/two)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -771,12 +771,12 @@ mod tests {
         // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(
             seq!(
-                "mahler::planner::tests::plus_one(/counters/one)",
-                "mahler::planner::tests::plus_one(/counters/one)",
+                "mahler_core::planner::tests::plus_one(/counters/one)",
+                "mahler_core::planner::tests::plus_one(/counters/one)",
             ),
             seq!(
-                "mahler::planner::tests::plus_one(/counters/two)",
-                "mahler::planner::tests::plus_one(/counters/two)",
+                "mahler_core::planner::tests::plus_one(/counters/two)",
+                "mahler_core::planner::tests::plus_one(/counters/two)",
             )
         );
 
@@ -808,9 +808,9 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "mahler::planner::tests::plus_one(/counters/one)",
-            "mahler::planner::tests::plus_one(/counters/one)",
-            "mahler::planner::tests::plus_one(/counters/one)",
+            "mahler_core::planner::tests::plus_one(/counters/one)",
+            "mahler_core::planner::tests::plus_one(/counters/one)",
+            "mahler_core::planner::tests::plus_one(/counters/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -838,8 +838,8 @@ mod tests {
 
         // We expect a parallel dag for this specific target
         let expected: Dag<&str> = par!(
-            "mahler::planner::tests::plus_one(/one)",
-            "mahler::planner::tests::plus_one(/two)",
+            "mahler_core::planner::tests::plus_one(/one)",
+            "mahler_core::planner::tests::plus_one(/two)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -1285,10 +1285,10 @@ mod tests {
         let workflow = find_plan(planner, initial, target).unwrap();
 
         // Should run concurrently because different array elements and map keys don't conflict
-        let expected: Dag<&str> = par!("mahler::planner::tests::test_array_element_conflicts::update_config(/configs/database)",
-                "mahler::planner::tests::test_array_element_conflicts::update_config(/configs/server)",
-                "mahler::planner::tests::test_array_element_conflicts::update_item(/items/0)",
-                "mahler::planner::tests::test_array_element_conflicts::update_item(/items/1)",
+        let expected: Dag<&str> = par!("mahler_core::planner::tests::test_array_element_conflicts::update_config(/configs/database)",
+                "mahler_core::planner::tests::test_array_element_conflicts::update_config(/configs/server)",
+                "mahler_core::planner::tests::test_array_element_conflicts::update_item(/items/0)",
+                "mahler_core::planner::tests::test_array_element_conflicts::update_item(/items/1)",
             );
 
         assert_eq!(workflow.to_string(), expected.to_string());

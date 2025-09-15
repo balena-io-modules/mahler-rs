@@ -1,0 +1,20 @@
+[package]
+name = "mahler-derive"
+description = "Derive macros for mahler"
+keywords = ["job", "orchestration", "workflow", "derive", "macro"]
+version.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0"
+proc-macro2 = "1.0"
+syn = { version = "2.0", features = ["full"] }

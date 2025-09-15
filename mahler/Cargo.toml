@@ -1,0 +1,27 @@
+[package]
+name = "mahler"
+description = "An automated job orchestration library that builds and executes dynamic workflows"
+keywords = ["job", "orchestration", "workflow", "library"]
+documentation = "https://docs.rs/mahler"
+version.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mahler-core = { path = "../mahler-core" }
+mahler-derive = { path = "../mahler-derive", optional = true }
+
+[features]
+default = ["derive"]
+derive = ["dep:mahler-derive"]
+
+# docs.rs-specific configuration
+[package.metadata.docs.rs]
+# document all features
+all-features = true
+# defines the configuration attribute `docsrs`
+rustdoc-args = ["--cfg", "docsrs"]

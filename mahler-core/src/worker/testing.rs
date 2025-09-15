@@ -310,9 +310,9 @@ mod tests {
 
         // We expect a linear DAG with three tasks
         let expected: Dag<&str> = par!(
-            "mahler::worker::testing::tests::plus_one(/one)",
-            "mahler::worker::testing::tests::plus_one(/two)"
-        ) + seq!("mahler::worker::testing::tests::plus_one(/one)",);
+            "mahler_core::worker::testing::tests::plus_one(/one)",
+            "mahler_core::worker::testing::tests::plus_one(/two)"
+        ) + seq!("mahler_core::worker::testing::tests::plus_one(/one)",);
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
     }
