@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.98"
-mahler = { path = "../../" }
+mahler = { path = "../../mahler" }
 tracing-subscriber = { version = "0.3.19", default-features = false, features = [
   "fmt",
   "env-filter",

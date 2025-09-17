@@ -583,9 +583,6 @@ mod tests {
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    struct Counters(HashMap<String, i32>);
-
     fn init() {
         tracing_subscriber::registry()
             .with(

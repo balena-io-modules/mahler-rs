@@ -3,6 +3,7 @@ use bollard::container::{CreateContainerOptions, StartContainerOptions};
 use bollard::secret::{ContainerInspectResponse, ContainerState, ContainerStateStatusEnum};
 use futures_util::stream::StreamExt;
 use mahler::worker::{Uninitialized, Worker};
+use mahler::State;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -13,7 +14,7 @@ use bollard::Docker;
 use mahler::extract::{Args, Res, System, Target, View};
 use mahler::task::prelude::*;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Default)]
+#[derive(State, Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Default)]
 pub enum ServiceStatus {
     #[default]
     Created,
@@ -25,23 +26,8 @@ fn default_status() -> Option<ServiceStatus> {
     Some(ServiceStatus::default())
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TargetService {
-    //// Image URL
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-
-    /// Service status
-    #[serde(skip_serializing_if = "Option::is_none", default = "default_status")]
-    pub status: Option<ServiceStatus>,
-
-    /// Container command configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cmd: Option<Vec<String>>,
-}
-
-impl From<TargetService> for bollard::container::Config<String> {
-    fn from(tgt: TargetService) -> bollard::container::Config<String> {
+impl From<ServiceTarget> for bollard::container::Config<String> {
+    fn from(tgt: ServiceTarget) -> bollard::container::Config<String> {
         bollard::container::Config {
             image: tgt.image,
             cmd: tgt.cmd,
@@ -50,29 +36,36 @@ impl From<TargetService> for bollard::container::Config<String> {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(State, Serialize, Deserialize, Debug, Clone)]
 pub struct Service {
     /// Container id for the service
+    #[mahler(internal)]
     pub id: Option<String>,
 
     //// Image URL
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
     /// Service status
+    #[serde(skip_serializing_if = "Option::is_none", default = "default_status")]
     pub status: Option<ServiceStatus>,
 
     /// Container creation date, not used as part
     /// of the target state
+    #[mahler(internal)]
     pub created_at: Option<String>,
 
     /// Container last start date, not used as part
+    #[mahler(internal)]
     pub started_at: Option<String>,
 
     /// Container last stop date, not used as part
     /// of the target state
+    #[mahler(internal)]
     pub finished_at: Option<String>,
 
     /// Container command configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cmd: Option<Vec<String>>,
 }
 
@@ -82,8 +75,8 @@ struct ServiceConfig {
     pub cmd: Option<Vec<String>>,
 }
 
-impl From<TargetService> for ServiceConfig {
-    fn from(tgt: TargetService) -> Self {
+impl From<ServiceTarget> for ServiceConfig {
+    fn from(tgt: ServiceTarget) -> Self {
         Self {
             image: tgt.image,
             cmd: tgt.cmd,
@@ -100,7 +93,7 @@ impl From<Service> for ServiceConfig {
     }
 }
 
-impl From<Service> for TargetService {
+impl From<Service> for ServiceTarget {
     fn from(svc: Service) -> Self {
         Self {
             image: svc.image,
@@ -156,9 +149,9 @@ impl From<ContainerInspectResponse> for Service {
     }
 }
 
-impl From<TargetService> for Service {
-    fn from(tgt: TargetService) -> Self {
-        let TargetService {
+impl From<ServiceTarget> for Service {
+    fn from(tgt: ServiceTarget) -> Self {
+        let ServiceTarget {
             image,
             status,
             cmd: command,
@@ -181,7 +174,7 @@ pub struct Image {
     pub id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(State, Serialize, Deserialize, Debug, Clone)]
 pub struct Project {
     /// Project name
     pub name: String,
@@ -190,6 +183,7 @@ pub struct Project {
     pub services: HashMap<String, Service>,
 
     /// List of managed images
+    #[mahler(internal)]
     pub images: HashMap<String, Image>,
 }
 
@@ -201,15 +195,6 @@ impl Project {
             images: HashMap::new(),
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TargetProject {
-    /// Project name
-    pub name: String,
-
-    /// List of target services
-    pub services: HashMap<String, TargetService>,
 }
 
 #[derive(Debug, Error)]
@@ -330,7 +315,7 @@ fn remove_image(
 /// Pull an image from the registry, this task is applicable to
 /// the creation of a service, as pulling an image is only needed
 /// in that case.
-fn fetch_service_image(Target(tgt): Target<TargetService>) -> Option<Task> {
+fn fetch_service_image(Target(tgt): Target<ServiceTarget>) -> Option<Task> {
     tgt.image.map(|img| fetch_image.with_arg("image_name", img))
 }
 
@@ -361,7 +346,7 @@ fn install_service(
     mut svc_ptr: View<Option<Service>>,
     Args(service_name): Args<String>,
     System(project): System<Project>,
-    Target(tgt): Target<TargetService>,
+    Target(tgt): Target<ServiceTarget>,
     docker: Res<Docker>,
 ) -> IO<Option<Service>, InstallServiceError> {
     let tgt_img = tgt.image.clone();
@@ -456,7 +441,7 @@ pub struct StartServiceError(#[from] anyhow::Error);
 fn start_service(
     mut svc_view: View<Service>,
     Args(service_name): Args<String>,
-    Target(tgt): Target<TargetService>,
+    Target(tgt): Target<ServiceTarget>,
     docker: Res<Docker>,
 ) -> IO<Service, StartServiceError> {
     let svc_config = ServiceConfig::from(svc_view.clone());
@@ -511,7 +496,7 @@ pub struct StopServiceError(#[from] anyhow::Error);
 fn stop_service(
     mut svc_view: View<Service>,
     Args(service_name): Args<String>,
-    Target(tgt): Target<TargetService>,
+    Target(tgt): Target<ServiceTarget>,
     docker: Res<Docker>,
 ) -> IO<Service, StartServiceError> {
     let tgt_img = tgt.image.clone();
@@ -603,7 +588,7 @@ fn uninstall_service(
 }
 
 /// Recreate the service on configuration change
-fn update_service(svc_view: View<Service>, Target(tgt): Target<TargetService>) -> Vec<Task> {
+fn update_service(svc_view: View<Service>, Target(tgt): Target<ServiceTarget>) -> Vec<Task> {
     let mut tasks = Vec::new();
     if svc_view.image != tgt.image {
         tasks.push(fetch_service_image.with_target(tgt.clone()));
@@ -626,7 +611,7 @@ fn update_service(svc_view: View<Service>, Target(tgt): Target<TargetService>) -
 fn stop_and_uninstall_service(svc_view: View<Service>) -> Vec<Task> {
     let mut actions = vec![];
     if matches!(svc_view.status, Some(ServiceStatus::Running)) {
-        actions.push(stop_service.with_target(TargetService::from(svc_view.to_owned())));
+        actions.push(stop_service.with_target(ServiceTarget::from(svc_view.to_owned())));
     }
 
     actions.push(uninstall_service.into_task());
@@ -646,7 +631,7 @@ fn purge_service(svc_view: View<Service>) -> Vec<Task> {
     actions
 }
 
-pub fn create_worker() -> Worker<Project, Uninitialized, TargetProject> {
+pub fn create_worker() -> Worker<Project, Uninitialized, ProjectTarget> {
     // Initialize the connection
     let docker = Docker::connect_with_defaults().unwrap();
 
@@ -794,7 +779,7 @@ mod tests {
         let worker = create_worker()
             .initial_state(Project::new(PROJECT_NAME))
             .unwrap();
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
                 "my-service": {
@@ -844,7 +829,7 @@ mod tests {
         }))
         .unwrap();
         let worker = create_worker();
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
                 "my-service": {
@@ -884,7 +869,7 @@ mod tests {
         }))
         .unwrap();
         let worker = create_worker();
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
                 "my-service": {
@@ -925,7 +910,7 @@ mod tests {
         }))
         .unwrap();
         let worker = create_worker();
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
                 "my-service": {
@@ -971,7 +956,7 @@ mod tests {
         }))
         .unwrap();
         let worker = create_worker();
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
                 "my-service": {
@@ -1001,7 +986,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
                 "my-service": {
@@ -1025,7 +1010,7 @@ mod tests {
         let worker = create_worker()
             .initial_state(Project::new(PROJECT_NAME))
             .unwrap();
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
                 "my-service": {
@@ -1070,7 +1055,7 @@ mod tests {
         );
         let old_container_id = container.id;
 
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
                 "my-service": {
@@ -1098,7 +1083,7 @@ mod tests {
             Some(ContainerStateStatusEnum::RUNNING)
         );
 
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
                 "my-service": {
@@ -1125,7 +1110,7 @@ mod tests {
             Some(ContainerStateStatusEnum::EXITED)
         );
 
-        let target = serde_json::from_value::<TargetProject>(json!({
+        let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {}
         }))

@@ -415,9 +415,9 @@
 //! - [run_task](`worker::Worker::run_task`) allows to run a task in the context of a worker. This
 //!   may be helpful to diagnose any extraction/expansion errors with the task definition or for
 //!   debugging of a specific task.
+pub use mahler_core::state::State;
 pub use mahler_core::*;
 
 #[cfg(feature = "derive")]
-pub mod derive {
-    pub use mahler_derive::*;
-}
+#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
+pub use mahler_derive::*;
