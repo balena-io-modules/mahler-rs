@@ -30,11 +30,12 @@
 //! ```rust,no_run
 //! use serde::{Deserialize, Serialize};
 //!
+//! use mahler::State;
 //! use mahler::worker::Worker;
 //! use mahler::task::prelude::*;
 //!
-//! #[derive(Serialize, Deserialize)]
-//! struct StateModel;
+//! #[derive(State, Serialize, Deserialize)]
+//! struct MySystem;
 //!
 //! let mut worker = Worker::new()
 //!         // assign possible jobs to worker
@@ -42,7 +43,7 @@
 //!         .job("/{foo}", update(foo))
 //!         .job("/{foo}/{bar}", create(foo_bar))
 //!         // initialize the worker state
-//!         .initial_state(StateModel {/* .. */})
+//!         .initial_state(MySystem {/* .. */})
 //!         .unwrap();
 //!
 //! fn global() {}
@@ -51,7 +52,7 @@
 //!
 //! # tokio_test::block_on(async {
 //! // Control the system by providing a new target state
-//! worker.seek_target(StateModel { /* .. */ }).await.unwrap();
+//! worker.seek_target(MySystemTarget { /* .. */ }).await.unwrap();
 //! # })
 //! ```
 //!
@@ -90,8 +91,10 @@
 //! ```rust
 //! use serde::{Deserialize, Serialize};
 //!
-//! #[derive(Serialize, Deserialize)]
-//! struct MySystemState {
+//! use mahler::State;
+//!
+//! #[derive(State, Serialize, Deserialize)]
+//! struct MySystem {
 //!     // can be accessed from jobs
 //!     some_value: String,
 //!   
@@ -112,18 +115,20 @@
 //!
 //! ```rust,no_run
 //! use serde::{Deserialize, Serialize};
-//! use mahler::worker::{Worker, Ready};
 //!
-//! #[derive(Serialize, Deserialize)]
-//! struct MySystemState;
+//! use mahler::State;
+//! use mahler::worker::Worker;
+//!
+//! #[derive(State, Serialize, Deserialize)]
+//! struct MySystem;
 //!
 //! // MyConnection represents a shared resource
 //! struct MyConnection;
 //! let conn = MyConnection {/* .. */};
 //!
-//! let worker: Worker<MySystemState, Ready> = Worker::new()
+//! let worker = Worker::new()
 //!         .resource::<MyConnection>(conn)
-//!         .initial_state(MySystemState {/* .. */})
+//!         .initial_state(MySystem {/* .. */})
 //!         .unwrap();
 //! ```
 //!
@@ -150,7 +155,7 @@
 //! use mahler::extract::{View, Args, Target, System, Res};
 //!
 //! struct MyConnection;
-//! struct MySystemState;
+//! struct MySystem;
 //!
 //!  // `View` gives you a view into the relevant part of the
 //! // state for the handler.
@@ -169,7 +174,7 @@
 //!
 //! // `System` provides a view into the top level system state.
 //! // A Job using the System extractor cannot run concurrently to other jobs
-//! fn system(System(state): System<MySystemState>) {}
+//! fn system(System(state): System<MySystem>) {}
 //!
 //! // `Res` allows to access a shared resource
 //! fn res(res: Res<MyConnection>) {}

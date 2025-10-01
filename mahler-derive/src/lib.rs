@@ -24,6 +24,7 @@
 //! #[derive(State, Serialize, Deserialize, Debug, Clone)]
 //! struct Service {
 //!     name: String,
+//!
 //!     #[serde(skip_serializing_if = "Option::is_none")]
 //!     image: Option<String>,
 //!
