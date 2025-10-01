@@ -315,7 +315,7 @@ fn remove_image(
 /// Pull an image from the registry, this task is applicable to
 /// the creation of a service, as pulling an image is only needed
 /// in that case.
-fn fetch_service_image(Target(tgt): Target<ServiceTarget>) -> Option<Task> {
+fn fetch_service_image(Target(tgt): Target<Service>) -> Option<Task> {
     tgt.image.map(|img| fetch_image.with_arg("image_name", img))
 }
 
@@ -346,7 +346,7 @@ fn install_service(
     mut svc_ptr: View<Option<Service>>,
     Args(service_name): Args<String>,
     System(project): System<Project>,
-    Target(tgt): Target<ServiceTarget>,
+    Target(tgt): Target<Service>,
     docker: Res<Docker>,
 ) -> IO<Option<Service>, InstallServiceError> {
     let tgt_img = tgt.image.clone();
@@ -441,7 +441,7 @@ pub struct StartServiceError(#[from] anyhow::Error);
 fn start_service(
     mut svc_view: View<Service>,
     Args(service_name): Args<String>,
-    Target(tgt): Target<ServiceTarget>,
+    Target(tgt): Target<Service>,
     docker: Res<Docker>,
 ) -> IO<Service, StartServiceError> {
     let svc_config = ServiceConfig::from(svc_view.clone());
@@ -496,7 +496,7 @@ pub struct StopServiceError(#[from] anyhow::Error);
 fn stop_service(
     mut svc_view: View<Service>,
     Args(service_name): Args<String>,
-    Target(tgt): Target<ServiceTarget>,
+    Target(tgt): Target<Service>,
     docker: Res<Docker>,
 ) -> IO<Service, StartServiceError> {
     let tgt_img = tgt.image.clone();
@@ -588,7 +588,7 @@ fn uninstall_service(
 }
 
 /// Recreate the service on configuration change
-fn update_service(svc_view: View<Service>, Target(tgt): Target<ServiceTarget>) -> Vec<Task> {
+fn update_service(svc_view: View<Service>, Target(tgt): Target<Service>) -> Vec<Task> {
     let mut tasks = Vec::new();
     if svc_view.image != tgt.image {
         tasks.push(fetch_service_image.with_target(tgt.clone()));
