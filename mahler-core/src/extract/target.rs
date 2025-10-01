@@ -22,27 +22,27 @@ use crate::task::{Context, FromContext, FromSystem};
 /// use serde::{Serialize, Deserialize};
 ///
 /// #[derive(Serialize,Deserialize)]
-/// struct SystemState {/* ... */};
+/// struct MySystem {/* ... */};
 ///
 /// fn with_target(Target(tgt): Target<i32>) {
 ///     // ...
 /// }
 ///
-/// let worker: Worker<SystemState, Ready> = Worker::new()
+/// let worker = Worker::new()
 ///     .job("/{foo}/{bar}", update(with_target))
-///     .initial_state(SystemState {/* ... */})
+///     .initial_state(MySystem {/* ... */})
 ///     .unwrap();
 /// ```
 ///
 /// Note that for non-primitive types, this extractor requires that the type implements
-/// [State](`mahler::state::State`)
+/// [State](`crate::state::State`)
 ///
 /// ```rust,no_run
 /// use mahler::{
 ///     State,
 ///     extract::Target,
 ///     task::{Handler, update},
-///     worker::{Worker, Ready}
+///     worker::Worker
 /// };
 /// use serde::{Serialize, Deserialize};
 ///
@@ -59,7 +59,7 @@ use crate::task::{Context, FromContext, FromSystem};
 ///     // ...
 /// }
 ///
-/// let worker: Worker<App, Ready> = Worker::new()
+/// let worker = Worker::new()
 ///     .job("/{foo}/{bar}", update(with_target))
 ///     .initial_state(App {/* ... */})
 ///     .unwrap();

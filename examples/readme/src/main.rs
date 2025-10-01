@@ -9,12 +9,13 @@ use tracing_subscriber::EnvFilter;
 use mahler::extract::{Args, Target, View};
 use mahler::task::prelude::*;
 use mahler::worker::Worker;
+use mahler::State;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 // The state model needs to be Serializable and Deserializable
 // since the library uses JSON internally to access parts
 // of the state
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(State, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Counters(BTreeMap<String, i32>);
 
 // `plus_one` defines a job that updates a counter if it is below some target.
@@ -89,7 +90,7 @@ async fn main() -> Result<()> {
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
     let _status = worker
-        .seek_target(Counters(BTreeMap::from([
+        .seek_target(CountersTarget(BTreeMap::from([
             ("a".to_string(), 1),
             ("b".to_string(), 2),
         ])))
