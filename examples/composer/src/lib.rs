@@ -631,7 +631,7 @@ fn purge_service(svc_view: View<Service>) -> Vec<Task> {
     actions
 }
 
-pub fn create_worker() -> Worker<Project, Uninitialized, ProjectTarget> {
+pub fn create_worker() -> Worker<Project, Uninitialized> {
     // Initialize the connection
     let docker = Docker::connect_with_defaults().unwrap();
 
