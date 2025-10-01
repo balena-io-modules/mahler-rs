@@ -578,6 +578,7 @@ mod tests {
 
     use super::*;
     use crate::extract::{Args, System, Target, View};
+    use crate::state::State;
     use crate::{dag, par, task::*};
     use crate::{seq, Dag};
     use tracing_subscriber::fmt::format::FmtSpan;
@@ -856,6 +857,10 @@ mod tests {
             name: Option<String>,
         }
 
+        impl State for App {
+            type Target = Self;
+        }
+
         type Config = HashMap<String, String>;
 
         #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -868,6 +873,10 @@ mod tests {
             config: Config,
             #[serde(default)]
             needs_cleanup: bool,
+        }
+
+        impl State for Device {
+            type Target = Self;
         }
 
         /// Store configuration in memory
@@ -976,11 +985,15 @@ mod tests {
             image: String,
         }
 
+        impl State for Service {
+            type Target = Self;
+        }
+
         #[derive(Serialize, Deserialize)]
         struct Image {}
 
         #[derive(Serialize, Deserialize)]
-        struct State {
+        struct MySys {
             services: HashMap<String, Service>,
             images: HashMap<String, Image>,
         }
@@ -997,7 +1010,7 @@ mod tests {
 
         fn create_service_image(
             Target(tgt): Target<Service>,
-            System(state): System<State>,
+            System(state): System<MySys>,
         ) -> Option<Task> {
             if !state.images.contains_key(&tgt.image) {
                 return Some(create_image.with_arg("image_name", tgt.image));
@@ -1008,7 +1021,7 @@ mod tests {
         fn create_service(
             mut view: View<Option<Service>>,
             Target(tgt): Target<Service>,
-            System(state): System<State>,
+            System(state): System<MySys>,
         ) -> View<Option<Service>> {
             if state.images.contains_key(&tgt.image) {
                 *view = Some(tgt);
@@ -1034,7 +1047,7 @@ mod tests {
             );
 
         let initial =
-            serde_json::from_value::<State>(json!({ "images": {}, "services": {} })).unwrap();
+            serde_json::from_value::<MySys>(json!({ "images": {}, "services": {} })).unwrap();
         let target = serde_json::from_value::<TargetState>(
             json!({ "services": {"one":{"image": "ubuntu"}, "two": {"image": "ubuntu"}} }),
         )
@@ -1207,9 +1220,13 @@ mod tests {
         init();
 
         #[derive(Serialize, Deserialize)]
-        struct State {
+        struct MySys {
             items: Vec<String>,
             configs: HashMap<String, String>,
+        }
+
+        impl State for MySys {
+            type Target = Self;
         }
 
         fn update_item(mut item: View<String>, Target(tgt): Target<String>) -> View<String> {
@@ -1238,7 +1255,7 @@ mod tests {
             config
         }
 
-        fn non_conflicting_updates(Target(tgt): Target<State>) -> Vec<Task> {
+        fn non_conflicting_updates(Target(tgt): Target<MySys>) -> Vec<Task> {
             vec![
                 update_item
                     .with_arg("index", "0")
@@ -1262,7 +1279,7 @@ mod tests {
             .job("/configs/{key}", create(create_config))
             .job("/", update(non_conflicting_updates));
 
-        let initial = State {
+        let initial = MySys {
             items: vec!["old1".to_string(), "old2".to_string()],
             configs: HashMap::from([
                 ("server".to_string(), "oldserver".to_string()),
@@ -1270,7 +1287,7 @@ mod tests {
             ]),
         };
 
-        let target = State {
+        let target = MySys {
             items: vec!["new1".to_string(), "new2".to_string()],
             configs: HashMap::from([
                 ("server".to_string(), "newserver".to_string()),
@@ -1302,6 +1319,10 @@ mod tests {
             C,
         }
 
+        impl State for Block {
+            type Target = Self;
+        }
+
         impl Display for Block {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{self:?}")
@@ -1315,6 +1336,10 @@ mod tests {
             Hand,
         }
 
+        impl State for Location {
+            type Target = Self;
+        }
+
         impl Location {
             fn is_block(&self) -> bool {
                 matches!(self, Location::Blk(_))
@@ -1324,7 +1349,7 @@ mod tests {
         type Blocks = HashMap<Block, Location>;
 
         #[derive(Serialize, Deserialize, Debug)]
-        struct State {
+        struct World {
             blocks: Blocks,
         }
 
@@ -1352,7 +1377,7 @@ mod tests {
         // Get a block from the table
         fn pickup(
             mut loc: View<Location>,
-            System(sys): System<State>,
+            System(sys): System<World>,
             Args(block): Args<Block>,
         ) -> View<Location> {
             // if the block is clear and we are not holding any other blocks
@@ -1370,7 +1395,7 @@ mod tests {
         // Unstack a block from other block
         fn unstack(
             mut loc: View<Location>,
-            System(sys): System<State>,
+            System(sys): System<World>,
             Args(block): Args<Block>,
         ) -> Option<View<Location>> {
             // if the block is clear and we are not holding any other blocks
@@ -1401,7 +1426,7 @@ mod tests {
         fn stack(
             mut loc: View<Location>,
             Target(tgt): Target<Location>,
-            System(sys): System<State>,
+            System(sys): System<World>,
         ) -> View<Location> {
             // If we are holding the block and the target is clear
             // then we can modify the block location
@@ -1414,7 +1439,7 @@ mod tests {
 
         fn take(
             loc: View<Location>,
-            System(sys): System<State>,
+            System(sys): System<World>,
             Args(block): Args<Block>,
         ) -> Option<Task> {
             if is_clear(&sys.blocks, &Location::Blk(block)) {
@@ -1512,14 +1537,14 @@ mod tests {
 
         let planner = Planner::new(domain);
 
-        let initial = State {
+        let initial = World {
             blocks: HashMap::from([
                 (Block::A, Location::Table),
                 (Block::B, Location::Blk(Block::A)),
                 (Block::C, Location::Blk(Block::B)),
             ]),
         };
-        let target = State {
+        let target = World {
             blocks: HashMap::from([
                 (Block::A, Location::Blk(Block::B)),
                 (Block::B, Location::Blk(Block::C)),
