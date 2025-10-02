@@ -1,0 +1,31 @@
+[package]
+name = "mahler-derive"
+description = "Derive macros for mahler"
+keywords = ["job", "orchestration", "workflow", "derive", "macro"]
+version.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = { version = "1.0", default-features = false, features = ["proc-macro"] }
+proc-macro2 = { version = "1.0", default-features = false, features = [
+  "proc-macro",
+] }
+syn = { version = "2.0", default-features = false, features = [
+  "derive",
+  "parsing",
+  "printing",
+  "proc-macro",
+] }
+
+[dev-dependencies]
+mahler = { path = "../mahler" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

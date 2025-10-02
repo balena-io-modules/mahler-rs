@@ -1,0 +1,40 @@
+[package]
+name = "mahler"
+description = "An automated job orchestration library that builds and executes dynamic workflows"
+keywords = ["job", "orchestration", "workflow", "library"]
+documentation = "https://docs.rs/mahler"
+version.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[dependencies]
+mahler-core = { path = "../mahler-core", version = "0" }
+mahler-derive = { path = "../mahler-derive", version = "0", optional = true }
+
+[features]
+default = ["derive"]
+derive = ["dep:mahler-derive"]
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing-subscriber = { version = "0.3.19", default-features = false, features = [
+  "ansi",
+  "registry",
+  "fmt",
+  "env-filter",
+] }
+tokio = { version = "1.36.0", features = ["rt-multi-thread", "time"] }
+tokio-test = "0.4.4"
+
+
+# docs.rs-specific configuration
+[package.metadata.docs.rs]
+# document all features
+all-features = true
+# defines the configuration attribute `docsrs`
+rustdoc-args = ["--cfg", "docsrs"]

@@ -4,9 +4,12 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+# do not inherit the workspace from the top-level folder
+[workspace]
+
 [dependencies]
 anyhow = "1.0.98"
-mahler = { path = "../../" }
+mahler = { path = "../../mahler" }
 tracing-subscriber = { version = "0.3.19", default-features = false, features = [
   "fmt",
   "env-filter",
