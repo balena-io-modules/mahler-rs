@@ -1,4 +1,18 @@
 - commits:
+    - subject: Only create derived type if different than source type
+      hash: 06ec285a9f599439dfb81844d9149076048e3be1
+      body: |
+        Otherwise just implement `State` and create a type alias for the target
+        type.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.21.1
+  title: ""
+  date: 2025-10-02T14:18:52.166Z
+- commits:
     - subject: Implement State trait and derive macros
       hash: bc71f2cf55621492810cf80f272003fdd5c1e089
       body: >
