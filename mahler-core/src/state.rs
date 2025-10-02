@@ -141,6 +141,21 @@ where
     type Target = std::collections::BTreeMap<K::Target, V::Target>;
 }
 
+// HashSet and BTreeSet
+impl<T: State> State for std::collections::HashSet<T>
+where
+    T::Target: std::hash::Hash + Eq,
+{
+    type Target = std::collections::HashSet<T::Target>;
+}
+
+impl<T: State> State for std::collections::BTreeSet<T>
+where
+    T::Target: Ord,
+{
+    type Target = std::collections::BTreeSet<T::Target>;
+}
+
 // Tuple implementations (up to 8 values)
 macro_rules! tuple_impl {
     () => {
