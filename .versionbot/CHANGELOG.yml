@@ -1,4 +1,16 @@
 - commits:
+    - subject: Implement State for HashSet and BTreeSet
+      hash: 965806c6712e87db9d75f99fbf44d8b4760f59b6
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.21.2
+  title: ""
+  date: 2025-10-02T14:28:51.210Z
+- commits:
     - subject: Only create derived type if different than source type
       hash: 06ec285a9f599439dfb81844d9149076048e3be1
       body: |
