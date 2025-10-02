@@ -24,6 +24,7 @@ pub use testing::*;
 
 use crate::errors::{IOError, InternalError, SerializationError};
 use crate::planner::{Domain, Error as PlannerError, Planner};
+use crate::state::State;
 use crate::system::{Resources, System};
 use crate::task::{Error as TaskError, Job};
 use crate::workflow::{channel, AggregateError, AutoInterrupt, Interrupt, Sender, WorkflowStatus};
@@ -168,10 +169,11 @@ impl WithResources for Ready {
 /// use std::collections::HashMap;
 /// use serde::{Deserialize, Serialize};
 ///
+/// use mahler::State;
 /// use mahler::worker::{Worker, SeekStatus};
 /// use mahler::task::prelude::*;
 ///
-/// #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// #[derive(State, Debug, Serialize, Deserialize, PartialEq, Eq)]
 /// struct Counters(HashMap<String, i32>);
 ///
 /// // A simple job to update a counter
@@ -196,7 +198,7 @@ impl WithResources for Ready {
 ///         .with_context(|| "failed to initialize worker")?;
 ///
 ///     // start searching for a target
-///     let status = worker.seek_target(Counters(HashMap::from([
+///     let status = worker.seek_target(CountersTarget(HashMap::from([
 ///         ("a".to_string(), 1),
 ///         ("b".to_string(), 2),
 ///     ])))
@@ -215,11 +217,15 @@ impl WithResources for Ready {
 ///
 /// # State type compatibility
 ///
-/// Note that the Worker may use a different type for the internal state `<O>`
-/// and the target state `<I>`. This is because the internal state may have additional
+/// Note that the worker requires that the internal type `<O>` implements
+/// [State](`crate::state::State`), which provides a `Target` associated type for the valid target
+/// state type. This is because the internal state may have additional
 /// fields that may not be desirable to consider when comparing states (e.g runtime states
-/// timestamps, variable data, etc.). These types must be compatible to ensure the Worker
+/// timestamps, variable data, etc.). These types must be structurally compatible to ensure the Worker
 /// can convert between them without issues.
+///
+/// While the requirement of the `State` trait doesn't guarantee structural compatibility, if
+/// implemented via the `State` derive macro, it will ensure that states remain compatible.
 ///
 /// In the example below, `InternalState` can be serialized into `TargetState` and
 /// vice-versa.
@@ -227,14 +233,21 @@ impl WithResources for Ready {
 /// ```rust
 /// use serde::{Deserialize, Serialize};
 ///
+/// use mahler::State;
+///
 /// #[derive(Debug, Serialize, Deserialize)]
-/// struct SystemState {
+/// struct InternalState {
 ///     pub config: String,
 ///     pub last_update: Option<String>,
 /// }
 ///
+/// #[derive(Debug, Serialize, Deserialize)]
 /// struct TargetState {
 ///     pub config: String,
+/// }
+///
+/// impl State for InternalState {
+///     type Target = TargetState;
 /// }
 /// ```
 ///
@@ -243,29 +256,81 @@ impl WithResources for Ready {
 /// ```rust
 /// use serde::{Deserialize, Serialize};
 ///
+/// use mahler::State;
+///
 /// #[derive(Debug, Serialize, Deserialize)]
-/// struct SystemState {
+/// struct InternalState {
 ///     pub config: String,
 ///     pub other_config: String,
 /// }
 ///
+/// #[derive(Debug, Serialize, Deserialize)]
 /// struct TargetState {
 ///     pub config: String,
 /// }
+///
+/// impl State for InternalState {
+///     type Target = TargetState;
+/// }
 /// ```
-pub struct Worker<O, S: WorkerState = Uninitialized, I = O> {
+///
+/// This can lead to subtle bugs, for instance the types below are compatible, but serialization is
+/// different which can cause issues at planning.
+///
+/// ```rust
+/// use serde::{Deserialize, Serialize};
+///
+/// use mahler::State;
+///
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct InternalState {
+///     // this will result in unexpected results during planning due to the way
+///     // the property is serialized in the internal and target states
+///     #[serde(skip_serializing_if = "Option::is_none")]
+///     pub config: Option<String>,
+///     pub other_config: String,
+/// }
+///
+/// #[derive(Debug, Serialize, Deserialize)]
+/// struct TargetState {
+///     pub config: Option<String>,
+/// }
+///
+/// impl State for InternalState {
+///     type Target = TargetState;
+/// }
+/// ```
+///
+/// The best way to avoid this is to use the `State` derive macro.
+///
+/// ```rust
+/// use serde::{Deserialize, Serialize};
+///
+/// use mahler::State;
+///
+/// #[derive(State, Debug, Serialize, Deserialize)]
+/// struct InternalState {
+///     #[serde(skip_serializing_if = "Option::is_none")]
+///     pub config: Option<String>,
+///
+///     #[mahler(internal)]
+///     pub other_config: String,
+/// }
+/// ```
+///
+/// Using the macro above will result in a new type `InternalStateTarget` to be generated, ensuring
+/// structural compatibility.
+pub struct Worker<O, S: WorkerState = Uninitialized> {
     inner: S,
     _output: std::marker::PhantomData<O>,
-    _input: std::marker::PhantomData<I>,
 }
 
-impl<O, S: WorkerState, I> Worker<O, S, I> {
+impl<O, S: WorkerState> Worker<O, S> {
     /// Create a worker from a inner [`WorkerState`]
     fn from_inner(inner: S) -> Self {
         Worker {
             inner,
             _output: std::marker::PhantomData,
-            _input: std::marker::PhantomData,
         }
     }
 
@@ -273,7 +338,7 @@ impl<O, S: WorkerState, I> Worker<O, S, I> {
     ///
     /// This drops all internal structure for the Worker and no further
     /// operations can be performed after this is called.
-    pub fn stop(self) -> Worker<O, Stopped, I> {
+    pub fn stop(self) -> Worker<O, Stopped> {
         Worker::from_inner(Stopped {})
     }
 }
@@ -286,7 +351,7 @@ impl<O> Default for Worker<O, Uninitialized> {
     }
 }
 
-impl<O, I> Worker<O, Uninitialized, I> {
+impl<O> Worker<O, Uninitialized> {
     /// Create a new uninitialized Worker instance
     pub fn new() -> Self {
         Worker::from_inner(Uninitialized {
@@ -296,7 +361,7 @@ impl<O, I> Worker<O, Uninitialized, I> {
     }
 }
 
-impl<O, S: WorkerState + WithResources, I> Worker<O, S, I> {
+impl<O, S: WorkerState + WithResources> Worker<O, S> {
     /// Add a shared resource to use within tasks
     ///
     /// Resources are stored by [TypeId](`std::any::TypeId`),
@@ -397,7 +462,7 @@ impl<O, S: WorkerState + WithResources, I> Worker<O, S, I> {
     }
 }
 
-impl<O, I> Worker<O, Uninitialized, I> {
+impl<O> Worker<O, Uninitialized> {
     /// Add a [Job](`crate::task::Job`) to the worker domain
     pub fn job(mut self, route: &'static str, job: Job) -> Self {
         self.inner.domain = self.inner.domain.job(route, job);
@@ -440,7 +505,7 @@ impl<O, I> Worker<O, Uninitialized, I> {
     /// # Errors
     /// The method will throw a [SerializationError](`crate::errors::SerializationError`) if the
     /// provided state cannot be converted to the internal state representation.
-    pub fn initial_state(self, state: O) -> Result<Worker<O, Ready, I>, SerializationError>
+    pub fn initial_state(self, state: O) -> Result<Worker<O, Ready>, SerializationError>
     where
         O: Serialize,
     {
@@ -570,7 +635,7 @@ where
     )
 }
 
-impl<O, I> Worker<O, Ready, I> {
+impl<O: State> Worker<O, Ready> {
     /// Read the current system state from the worker
     ///
     /// The system state is behind a [RwLock](`tokio::sync::RwLock`)
@@ -598,15 +663,16 @@ impl<O, I> Worker<O, Ready, I> {
     /// ```rust,no_run
     /// use serde::{Deserialize, Serialize};
     /// use mahler::worker::Worker;
+    /// use mahler::State;
     /// use tokio_stream::StreamExt;
     ///
-    /// #[derive(Debug, Serialize, Deserialize)]
-    /// struct SystemState;
+    /// #[derive(State, Debug, Serialize, Deserialize)]
+    /// struct MySystem;
     ///
     /// # tokio_test::block_on(async move {
     /// let mut worker = Worker::new()
     ///     // todo: configure jobs
-    ///     .initial_state(SystemState {/* .. */}).unwrap();
+    ///     .initial_state(MySystem {/* .. */}).unwrap();
     ///
     /// // Get a state stream
     /// let mut update_stream = worker.follow();
@@ -617,7 +683,7 @@ impl<O, I> Worker<O, Ready, I> {
     /// });
     ///
     /// // Start state search
-    /// worker.seek_target(SystemState {/* .. */})
+    /// worker.seek_target(MySystemTarget {/* .. */})
     ///     .await
     ///     .unwrap();
     /// # })
@@ -656,12 +722,9 @@ impl<O, I> Worker<O, Ready, I> {
     /// planning.
     pub async fn seek_with_interrupt(
         &mut self,
-        tgt: I,
+        tgt: O::Target,
         interrupt: Interrupt,
-    ) -> Result<SeekStatus, SeekError>
-    where
-        I: Serialize + DeserializeOwned,
-    {
+    ) -> Result<SeekStatus, SeekError> {
         let tgt = serde_json::to_value(tgt).map_err(SerializationError::from)?;
 
         let Ready {
@@ -788,7 +851,7 @@ impl<O, I> Worker<O, Ready, I> {
                             return Err(InternalError::from(anyhow!("state patch failed, worker state possibly tainted")))?;
                         }
 
-                        res = find_and_run_workflow::<I>(&planner, &sys_reader, &tgt, &patch_tx, &interrupt) => {
+                        res = find_and_run_workflow::<O::Target>(&planner, &sys_reader, &tgt, &patch_tx, &interrupt) => {
                             match res {
                                 Ok(InnerSeekResult::TargetReached) => {
                                     info!("target state applied");
@@ -871,10 +934,7 @@ impl<O, I> Worker<O, Ready, I> {
     /// The method will result in a [`SeekError`] if a serialization issue occurs while converting
     /// between state types, if the worker runtime panics or there is an unexpected error during
     /// planning.
-    pub async fn seek_target(&mut self, tgt: I) -> Result<SeekStatus, SeekError>
-    where
-        I: Serialize + DeserializeOwned,
-    {
+    pub async fn seek_target(&mut self, tgt: O::Target) -> Result<SeekStatus, SeekError> {
         self.seek_with_interrupt(tgt, Interrupt::new()).await
     }
 }
@@ -894,6 +954,10 @@ mod tests {
 
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct Counters(HashMap<String, i32>);
+
+    impl State for Counters {
+        type Target = Self;
+    }
 
     fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
         if *counter < tgt {

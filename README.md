@@ -97,10 +97,12 @@ a HashMap.
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
+use mahler::State;
+
 // The state model needs to be Serializable and Deserializable
 // since the library uses JSON internally to access parts
 // of the state
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(State, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Counters(HashMap<String, i32>);
 ```
 
@@ -119,7 +121,7 @@ let mut worker = Worker::new()
     ])))
     .unwrap();
 
-worker.seek_target(Counters(HashMap::from([
+worker.seek_target(CountersTarget(HashMap::from([
     ("a".to_string(), 1),
     ("b".to_string(), 2),
 ])))
@@ -134,6 +136,7 @@ Here's the full runnable example with logging and error handling:
 
 ```rust
 use anyhow::{Context, Result};
+use mahler::State;
 use mahler::worker::Worker;
 use mahler::task::prelude::*;
 use mahler::extract::Args;
@@ -173,7 +176,7 @@ async fn main() -> Result<()> {
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
     worker
-        .seek_target(Counters(HashMap::from([
+        .seek_target(CountersTarget(HashMap::from([
             ("a".to_string(), 1),
             ("b".to_string(), 2),
         ])))
