@@ -117,6 +117,46 @@ fn has_mahler_internal_attribute(attrs: &[Attribute]) -> Result<bool> {
     Ok(false)
 }
 
+fn extract_mahler_derives(attrs: &[Attribute]) -> Result<Option<proc_macro2::TokenStream>> {
+    for attr in attrs {
+        if attr.path().is_ident("mahler") {
+            if let Meta::List(meta_list) = &attr.meta {
+                let tokens_str = meta_list.tokens.to_string();
+
+                // Check if it starts with "derive"
+                if let Some(derives_part) = tokens_str.strip_prefix("derive") {
+                    // Parse the derives - expect format: (Trait1, Trait2, ...)
+                    let derives_part = derives_part.trim();
+                    if derives_part.starts_with('(') && derives_part.ends_with(')') {
+                        let inner = &derives_part[1..derives_part.len() - 1];
+
+                        // Parse the comma-separated list of trait names
+                        let traits: Vec<_> = inner
+                            .split(',')
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+
+                        if !traits.is_empty() {
+                            // Build the token stream for derives
+                            let trait_tokens: Vec<proc_macro2::TokenStream> = traits
+                                .iter()
+                                .map(|t| {
+                                    let ident = syn::Ident::new(t, proc_macro2::Span::call_site());
+                                    quote! { #ident }
+                                })
+                                .collect();
+
+                            return Ok(Some(quote! { #(#trait_tokens),* }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn filter_attributes(attrs: &[Attribute]) -> Vec<&Attribute> {
     attrs
         .iter()
@@ -137,7 +177,7 @@ fn filter_field_attributes(attrs: &[Attribute]) -> Vec<&Attribute> {
         .collect()
 }
 
-fn expand_model_derive(input: DeriveInput) -> Result<TokenStream> {
+fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
     let struct_name = &input.ident;
     let target_name = format_ident!("{}Target", struct_name);
     let visibility = &input.vis;
@@ -158,14 +198,21 @@ fn expand_model_derive(input: DeriveInput) -> Result<TokenStream> {
 
                     // Check if there are internal fields by comparing lengths
                     let has_internal_fields = target_fields.len() < fields.named.len();
+                    let extra_derives = extract_mahler_derives(&input.attrs)?;
 
                     if has_internal_fields {
                         // Generate a new target struct only if there are internal fields
                         let struct_attrs = filter_attributes(&input.attrs);
 
+                        let derives = if let Some(extra) = extra_derives {
+                            quote! { #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone, #extra)] }
+                        } else {
+                            quote! { #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)] }
+                        };
+
                         let expanded = quote! {
                             // Generate the target struct with sensible default derives
-                            #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
+                            #derives
                             #(#struct_attrs)*
                             #visibility struct #target_name #generics #where_clause {
                                 #(#target_fields,)*
@@ -180,6 +227,15 @@ fn expand_model_derive(input: DeriveInput) -> Result<TokenStream> {
                         Ok(expanded.into())
                     } else {
                         // No internal fields: create type alias and use Self as Target
+                        // Error if #[mahler(derive(...))] is present since the user should
+                        // add those derives to the parent type directly
+                        if extra_derives.is_some() {
+                            return Err(Error::new_spanned(
+                                struct_name,
+                                "#[mahler(derive(...))] cannot be used on types without #[mahler(internal)] fields. Add the derives directly to the parent type instead."
+                            ));
+                        }
+
                         let expanded = quote! {
                             // Create a type alias for consistency
                             #visibility type #target_name #generics = #struct_name #ty_generics #where_clause;
@@ -205,6 +261,15 @@ fn expand_model_derive(input: DeriveInput) -> Result<TokenStream> {
                     }
 
                     // Tuple structs never have internal fields (not supported)
+                    // Error if #[mahler(derive(...))] is present
+                    let extra_derives = extract_mahler_derives(&input.attrs)?;
+                    if extra_derives.is_some() {
+                        return Err(Error::new_spanned(
+                            struct_name,
+                            "#[mahler(derive(...))] cannot be used on tuple structs. Add the derives directly to the parent type instead."
+                        ));
+                    }
+
                     // Create type alias and use Target = Self
                     let expanded = quote! {
                         // Create a type alias for consistency
@@ -220,6 +285,15 @@ fn expand_model_derive(input: DeriveInput) -> Result<TokenStream> {
                 }
                 Fields::Unit => {
                     // Unit structs never have internal fields
+                    // Error if #[mahler(derive(...))] is present
+                    let extra_derives = extract_mahler_derives(&input.attrs)?;
+                    if extra_derives.is_some() {
+                        return Err(Error::new_spanned(
+                            struct_name,
+                            "#[mahler(derive(...))] cannot be used on unit structs. Add the derives directly to the parent type instead."
+                        ));
+                    }
+
                     // Create type alias and use Target = Self
                     let expanded = quote! {
                         // Create a type alias for consistency
@@ -237,6 +311,15 @@ fn expand_model_derive(input: DeriveInput) -> Result<TokenStream> {
         }
         Data::Enum(_) => {
             // For enums, Target = Self since enums don't have internal fields
+            // Error if #[mahler(derive(...))] is present
+            let extra_derives = extract_mahler_derives(&input.attrs)?;
+            if extra_derives.is_some() {
+                return Err(Error::new_spanned(
+                    struct_name,
+                    "#[mahler(derive(...))] cannot be used on enums. Add the derives directly to the parent type instead."
+                ));
+            }
+
             let expanded = quote! {
                 // Implement the State trait for enums
                 impl #impl_generics #model_path for #struct_name #ty_generics #where_clause {
@@ -271,6 +354,10 @@ fn expand_model_derive(input: DeriveInput) -> Result<TokenStream> {
 /// - `#[mahler(internal)]` - Marks a struct field as internal-only, excluding it from the target type.
 ///   Only supported on named struct fields. Using this attribute on tuple struct fields will result
 ///   in a compile error.
+///
+/// - `#[mahler(derive(Trait1, Trait2, ...))]` - Adds additional derives to the generated target struct.
+///   Only applies when a new target struct is created (i.e., when there are internal fields).
+///   The derives are added in addition to the default `Serialize`, `Deserialize`, `Debug`, and `Clone` derives.
 ///
 /// # Examples
 ///
@@ -312,9 +399,21 @@ fn expand_model_derive(input: DeriveInput) -> Result<TokenStream> {
 /// }
 /// // Generates: pub type StatusTarget = Status;
 /// // And: impl State for Status { type Target = Self; }
+///
+/// // Struct with additional derives on target
+/// #[derive(State, Serialize, Deserialize)]
+/// #[mahler(derive(PartialEq, Eq))]
+/// struct Database {
+///     host: String,
+///     port: u16,
+///     #[mahler(internal)]
+///     connection_pool: Option<String>,
+/// }
+/// // Generates: #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// //            pub struct DatabaseTarget { host: String, port: u16 }
 /// ```
 #[proc_macro_derive(State, attributes(mahler))]
-pub fn derive_model(input: TokenStream) -> TokenStream {
+pub fn derive_state(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    expand_model_derive(input).unwrap_or_else(|err| err.to_compile_error().into())
+    expand_state_derive(input).unwrap_or_else(|err| err.to_compile_error().into())
 }
