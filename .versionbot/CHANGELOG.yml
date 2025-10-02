@@ -1,4 +1,39 @@
 - commits:
+    - subject: Implement State trait and derive macros
+      hash: bc71f2cf55621492810cf80f272003fdd5c1e089
+      body: >
+        This introduces the `State` trait and corresponding derive macro to
+
+        simplify working with Mahler models and state management.
+
+
+        The derive crate in particular allows to ensure structural compatibility
+        between
+
+        the input and output types passed to the Worker, avoiding possible
+
+        issues derived from having different serialization configurations for
+
+        the current and target types.
+      footer:
+        Change-type: minor
+        change-type: minor
+        Closes: "#48"
+        closes: "#48"
+      author: felipe
+      nested: []
+    - subject: Re-structure workspace to introduce derive crate
+      hash: 60c4d60e4d819373287c318178aec3d267bd9a39
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+  version: 0.21.0
+  title: ""
+  date: 2025-10-02T08:18:41.676Z
+- commits:
     - subject: Remove backtracking from planner search
       hash: 5f53bf76781e03c12954bece2bdb8e028e04f676
       body: |

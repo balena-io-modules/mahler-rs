@@ -1,9 +1,9 @@
 [workspace]
-members = ["mahler", "mahler-core", "mahler-derive"]
+members = [ "mahler", "mahler-core", "mahler-derive" ]
 resolver = "2"
 
 [workspace.package]
-version = "0.20.0"
+version = "0.21.0"
 edition = "2021"
 homepage = "https://github.com/balena-io-modules/mahler-rs"
 repository = "https://github.com/balena-io-modules/mahler-rs"
