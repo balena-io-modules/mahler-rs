@@ -393,39 +393,6 @@ fn test_tuple_with_model_types() {
 }
 
 #[test]
-fn test_derive_extraction() {
-    // Test that target structs get Debug and Clone by default
-    #[derive(State, Serialize, Deserialize, Debug, Clone, PartialEq)]
-    struct TestDeriveExtraction {
-        name: String,
-        #[mahler(internal)]
-        internal_field: Option<String>,
-    }
-
-    let test = TestDeriveExtraction {
-        name: "test".to_string(),
-        internal_field: Some("internal".to_string()),
-    };
-
-    let target = to_target(&test).unwrap();
-
-    // Basic functionality test
-    assert_eq!(target.name, "test");
-
-    // Test that Clone and Debug are available on the target type
-    let cloned_target = target.clone();
-    assert_eq!(cloned_target.name, "test");
-
-    // Test Debug formatting works
-    let debug_str = format!("{target:?}");
-    assert!(debug_str.contains("test"));
-
-    // Test that the basic derives work as expected
-    // Note: Only Debug and Clone are automatically derived
-    // Additional derives like Hash would need to be manually added
-}
-
-#[test]
 fn test_serde_attribute_propagation() {
     use serde::{Deserialize, Serialize};
 
@@ -465,4 +432,43 @@ fn test_serde_attribute_propagation() {
 
     // Test that field-level serde attributes work
     assert!(!target_json.contains("optionalField")); // Should be skipped when None
+}
+
+#[test]
+fn test_mahler_derive_attribute() {
+    #[derive(State, Serialize, Deserialize)]
+    #[mahler(derive(PartialEq, Eq))]
+    struct Database {
+        host: String,
+        port: u16,
+        #[mahler(internal)]
+        connection_pool: Option<String>,
+    }
+
+    let db = Database {
+        host: "localhost".to_string(),
+        port: 5432,
+        connection_pool: Some("pool".to_string()),
+    };
+
+    let target = to_target(&db).unwrap();
+
+    // Test that the derives work
+    assert_eq!(target.host, "localhost");
+    assert_eq!(target.port, 5432);
+
+    // Test Debug derive (default)
+    let debug_str = format!("{target:?}");
+    assert!(debug_str.contains("localhost"));
+
+    // Test Clone derive (default)
+    let cloned = target.clone();
+    assert_eq!(cloned.host, "localhost");
+
+    // Test PartialEq and Eq derives (from #[mahler(derive(...))])
+    let target2 = DatabaseTarget {
+        host: "localhost".to_string(),
+        port: 5432,
+    };
+    assert_eq!(target, target2);
 }
