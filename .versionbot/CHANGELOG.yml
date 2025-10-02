@@ -1,4 +1,18 @@
 - commits:
+    - subject: Allow defining target type derives in derive macro
+      hash: 4e4a76455b8c61f41de0da0d56251cac5b5d8405
+      body: |
+        This adds support for the attribute #[mahler(derive(...traits))] which
+        adds the given list of traits to the derived target type
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.21.3
+  title: ""
+  date: 2025-10-02T16:11:34.804Z
+- commits:
     - subject: Implement State for HashSet and BTreeSet
       hash: 965806c6712e87db9d75f99fbf44d8b4760f59b6
       body: ""
