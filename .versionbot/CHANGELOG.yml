@@ -1,4 +1,39 @@
 - commits:
+    - subject: Revert "Only create derived type if different than source type"
+      hash: bb82ba468f36efca6cd55dd3956788fc849a55fd
+      body: >
+        This reverts commit 06ec285a9f599439dfb81844d9149076048e3be1.
+
+
+        This is needed because its possible to have structures such as
+
+
+        ```rust
+
+        struct Component  {
+            pub name: String,
+            #[mahler(internal)]
+            pub index: u32,
+        }
+
+
+        // we need ParentTarget to be defined with `ComponentTarget` instead of
+        `Component`
+
+        // even it it has no internal fields
+
+        struct Parent(Component)
+
+        ```
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.21.4
+  title: ""
+  date: 2025-10-11T06:44:11.157Z
+- commits:
     - subject: Allow defining target type derives in derive macro
       hash: 4e4a76455b8c61f41de0da0d56251cac5b5d8405
       body: |
