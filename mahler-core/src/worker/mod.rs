@@ -166,15 +166,14 @@ impl WithResources for Ready {
 ///
 /// ```rust,no_run
 /// use anyhow::{Context, Result};
-/// use std::collections::HashMap;
 /// use serde::{Deserialize, Serialize};
 ///
-/// use mahler::State;
+/// use mahler::state::{State, Map};
 /// use mahler::worker::{Worker, SeekStatus};
 /// use mahler::task::prelude::*;
 ///
-/// #[derive(State, Debug, Serialize, Deserialize, PartialEq, Eq)]
-/// struct Counters(HashMap<String, i32>);
+/// #[derive(State, Debug, PartialEq, Eq)]
+/// struct Counters(Map<String, i32>);
 ///
 /// // A simple job to update a counter
 /// fn plus_one() -> IO<i32> { todo!() }
@@ -190,7 +189,7 @@ impl WithResources for Ready {
 ///         .job("/{counter}", update(plus_one))
 ///         .job("/{counter}", update(plus_two))
 ///         // initialize the worker moving it to the `Ready` state
-///         .initial_state(Counters(HashMap::from([
+///         .initial_state(Counters(Map::from([
 ///             ("a".to_string(), 0),
 ///             ("b".to_string(), 0),
 ///         ])))
@@ -198,7 +197,7 @@ impl WithResources for Ready {
 ///         .with_context(|| "failed to initialize worker")?;
 ///
 ///     // start searching for a target
-///     let status = worker.seek_target(CountersTarget(HashMap::from([
+///     let status = worker.seek_target(CountersTarget(Map::from([
 ///         ("a".to_string(), 1),
 ///         ("b".to_string(), 2),
 ///     ])))
@@ -233,7 +232,7 @@ impl WithResources for Ready {
 /// ```rust
 /// use serde::{Deserialize, Serialize};
 ///
-/// use mahler::State;
+/// use mahler::state::State;
 ///
 /// #[derive(Debug, Serialize, Deserialize)]
 /// struct InternalState {
@@ -256,7 +255,7 @@ impl WithResources for Ready {
 /// ```rust
 /// use serde::{Deserialize, Serialize};
 ///
-/// use mahler::State;
+/// use mahler::state::State;
 ///
 /// #[derive(Debug, Serialize, Deserialize)]
 /// struct InternalState {
@@ -280,7 +279,7 @@ impl WithResources for Ready {
 /// ```rust
 /// use serde::{Deserialize, Serialize};
 ///
-/// use mahler::State;
+/// use mahler::state::State;
 ///
 /// #[derive(Debug, Serialize, Deserialize)]
 /// struct InternalState {
@@ -306,11 +305,11 @@ impl WithResources for Ready {
 /// ```rust
 /// use serde::{Deserialize, Serialize};
 ///
-/// use mahler::State;
+/// use mahler::state::State;
 ///
-/// #[derive(State, Debug, Serialize, Deserialize)]
+/// #[derive(State, Debug)]
 /// struct InternalState {
-///     #[serde(skip_serializing_if = "Option::is_none")]
+///     // this will be serialized in a consistent way by mahler
 ///     pub config: Option<String>,
 ///
 ///     #[mahler(internal)]
@@ -663,10 +662,10 @@ impl<O: State> Worker<O, Ready> {
     /// ```rust,no_run
     /// use serde::{Deserialize, Serialize};
     /// use mahler::worker::Worker;
-    /// use mahler::State;
+    /// use mahler::state::State;
     /// use tokio_stream::StreamExt;
     ///
-    /// #[derive(State, Debug, Serialize, Deserialize)]
+    /// #[derive(State, Debug)]
     /// struct MySystem;
     ///
     /// # tokio_test::block_on(async move {

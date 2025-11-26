@@ -16,8 +16,7 @@ use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
 use crate::system::System;
 use crate::task::{self, Context, Operation, Task};
-use crate::workflow::{WorkUnit, Workflow};
-use crate::Dag;
+use crate::workflow::{Dag, WorkUnit, Workflow};
 
 mod distance;
 mod domain;
@@ -573,14 +572,13 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
     use std::fmt::Display;
 
     use super::*;
     use crate::extract::{Args, System, Target, View};
-    use crate::state::State;
-    use crate::{dag, par, task::*};
-    use crate::{seq, Dag};
+    use crate::state::{Map, State};
+    use crate::{dag, par, seq, task::*, workflow::Dag};
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
 
@@ -861,7 +859,7 @@ mod tests {
             type Target = Self;
         }
 
-        type Config = HashMap<String, String>;
+        type Config = Map<String, String>;
 
         #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
         struct Device {
@@ -1067,12 +1065,12 @@ mod tests {
     #[test]
     fn it_calculates_concurrent_workflows_from_non_conflicting_paths() {
         init();
-        type Config = HashMap<String, String>;
+        type Config = Map<String, String>;
 
         #[derive(Serialize, Deserialize)]
         struct MyState {
             config: Config,
-            counters: HashMap<String, i32>,
+            counters: Map<String, i32>,
         }
 
         fn new_counter(
@@ -1131,11 +1129,15 @@ mod tests {
     #[test]
     fn it_finds_concurrent_plans_with_nested_forks() {
         init();
-        type Counters = BTreeMap<String, i32>;
+        type Counters = Map<String, i32>;
 
         #[derive(Serialize, Deserialize, Debug)]
         struct MyState {
             counters: Counters,
+        }
+
+        impl State for MyState {
+            type Target = Self;
         }
 
         // This is a very dumb example to test how the planner
@@ -1187,7 +1189,7 @@ mod tests {
             .job("/counters", none(multi_increment));
 
         let initial = MyState {
-            counters: BTreeMap::from([
+            counters: Map::from([
                 ("a".to_string(), 0),
                 ("b".to_string(), 0),
                 ("c".to_string(), 0),
@@ -1196,7 +1198,7 @@ mod tests {
         };
 
         let target = MyState {
-            counters: BTreeMap::from([
+            counters: Map::from([
                 ("a".to_string(), 3),
                 ("b".to_string(), 2),
                 ("c".to_string(), 2),
@@ -1312,7 +1314,7 @@ mod tests {
     fn test_stacking_problem() {
         init();
 
-        #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Debug)]
+        #[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
         enum Block {
             A,
             B,
@@ -1346,11 +1348,15 @@ mod tests {
             }
         }
 
-        type Blocks = HashMap<Block, Location>;
+        type Blocks = Map<Block, Location>;
 
         #[derive(Serialize, Deserialize, Debug)]
         struct World {
             blocks: Blocks,
+        }
+
+        impl State for World {
+            type Target = Self;
         }
 
         fn is_clear(blocks: &Blocks, loc: &Location) -> bool {
@@ -1538,14 +1544,14 @@ mod tests {
         let planner = Planner::new(domain);
 
         let initial = World {
-            blocks: HashMap::from([
+            blocks: Map::from([
                 (Block::A, Location::Table),
                 (Block::B, Location::Blk(Block::A)),
                 (Block::C, Location::Blk(Block::B)),
             ]),
         };
         let target = World {
-            blocks: HashMap::from([
+            blocks: Map::from([
                 (Block::A, Location::Blk(Block::B)),
                 (Block::B, Location::Blk(Block::C)),
                 (Block::C, Location::Table),

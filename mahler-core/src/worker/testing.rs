@@ -5,8 +5,8 @@ use super::{Ready, Uninitialized, Worker, WorkerState};
 use crate::planner::{Domain, Error as PlannerError, Planner};
 use crate::state::State;
 use crate::system::{Resources, System};
-use crate::task::{self, Context};
-use crate::{task::Task, workflow::Workflow};
+use crate::task::{self, Context, Task};
+use crate::workflow::Workflow;
 
 #[derive(Debug, Error)]
 #[error("workflow not found")]
@@ -48,7 +48,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     /// use mahler::task::{self, prelude::*};
     /// use mahler::extract::{View, Target};
     /// use mahler::worker::Worker;
-    /// use mahler::{Dag, seq};
+    /// use mahler::workflow::{Dag, seq};
     ///
     /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
     ///    if *counter < tgt {
@@ -202,7 +202,7 @@ mod tests {
 
     use super::*;
     use crate::extract::{Target, View};
-    use crate::{par, seq, task::*, Dag};
+    use crate::{par, seq, task::*, workflow::Dag};
 
     fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {

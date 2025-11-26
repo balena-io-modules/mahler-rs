@@ -1,22 +1,20 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use mahler::extract::{Args, Target, View};
+use mahler::state::{Map, State};
 use mahler::task::prelude::*;
 use mahler::worker::Worker;
-use mahler::State;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 // The state model needs to be Serializable and Deserializable
 // since the library uses JSON internally to access parts
 // of the state
-#[derive(State, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Counters(BTreeMap<String, i32>);
+#[derive(State, Debug, PartialEq, Eq)]
+struct Counters(Map<String, i32>);
 
 // `plus_one` defines a job that updates a counter if it is below some target.
 // The job makes use of two extractors:
@@ -81,7 +79,7 @@ async fn main() -> Result<()> {
         .job("/{counter}", update(plus_two))
         // We initialize the worker with two counters
         // `a` and `b` with value 0
-        .initial_state(Counters(BTreeMap::from([
+        .initial_state(Counters(Map::from([
             ("a".to_string(), 0),
             ("b".to_string(), 0),
         ])))
@@ -90,7 +88,7 @@ async fn main() -> Result<()> {
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
     let _status = worker
-        .seek_target(CountersTarget(BTreeMap::from([
+        .seek_target(CountersTarget(Map::from([
             ("a".to_string(), 1),
             ("b".to_string(), 2),
         ])))
@@ -107,9 +105,7 @@ async fn main() -> Result<()> {
 
     assert_eq!(
         state,
-        Counters(BTreeMap::from(
-            [("a".to_string(), 1), ("b".to_string(), 2),]
-        ))
+        Counters(Map::from([("a".to_string(), 1), ("b".to_string(), 2),]))
     );
 
     println!("The system state is now {state:?}");

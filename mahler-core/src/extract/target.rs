@@ -21,7 +21,7 @@ use crate::task::{Context, FromContext, FromSystem};
 /// };
 /// use serde::{Serialize, Deserialize};
 ///
-/// #[derive(Serialize,Deserialize)]
+/// #[derive(Serialize, Deserialize)]
 /// struct MySystem {/* ... */};
 ///
 /// fn with_target(Target(tgt): Target<i32>) {
@@ -39,20 +39,21 @@ use crate::task::{Context, FromContext, FromSystem};
 ///
 /// ```rust,no_run
 /// use mahler::{
-///     State,
+///     state::{State, List},
 ///     extract::Target,
 ///     task::{Handler, update},
 ///     worker::Worker
 /// };
-/// use serde::{Serialize, Deserialize};
 ///
-/// #[derive(State, Serialize,Deserialize)]
+/// #[derive(State)]
 /// struct Service {
 ///     name: String,
 /// };
 ///
-/// #[derive(Serialize,Deserialize)]
-/// struct App {/* ... */}
+/// #[derive(State)]
+/// struct App {
+///     services: List<Service>,
+/// }
 ///
 /// // Service needs to implement State to use the target extractor
 /// fn with_target(Target(tgt): Target<Service>) {
@@ -61,7 +62,7 @@ use crate::task::{Context, FromContext, FromSystem};
 ///
 /// let worker = Worker::new()
 ///     .job("/{foo}/{bar}", update(with_target))
-///     .initial_state(App {/* ... */})
+///     .initial_state(App {services: List::new()})
 ///     .unwrap();
 /// ```
 ///
@@ -73,13 +74,13 @@ use crate::task::{Context, FromContext, FromSystem};
 ///
 /// ```rust,no_run
 /// use mahler::{
+///     state::State,
 ///     extract::Target,
 ///     task::{Handler, delete},
 ///     worker::{Worker, Ready}
 /// };
-/// use serde::{Serialize, Deserialize};
 ///
-/// #[derive(Serialize,Deserialize)]
+/// #[derive(State)]
 /// struct SystemState {/* ... */};
 ///
 /// // this task is applicable to `delete` operations which do not

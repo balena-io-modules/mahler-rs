@@ -28,13 +28,11 @@
 //! the worker with a target state.
 //!
 //! ```rust,no_run
-//! use serde::{Deserialize, Serialize};
-//!
-//! use mahler::State;
+//! use mahler::state::State;
 //! use mahler::worker::Worker;
 //! use mahler::task::prelude::*;
 //!
-//! #[derive(State, Serialize, Deserialize)]
+//! #[derive(State)]
 //! struct MySystem;
 //!
 //! let mut worker = Worker::new()
@@ -89,17 +87,15 @@
 //! lost when passing data to the jobs.
 //!
 //! ```rust
-//! use serde::{Deserialize, Serialize};
+//! use mahler::state::State;
 //!
-//! use mahler::State;
-//!
-//! #[derive(State, Serialize, Deserialize)]
+//! #[derive(State)]
 //! struct MySystem {
 //!     // can be accessed from jobs
 //!     some_value: String,
-//!   
+//!
 //!     // this will never be passed to jobs
-//!     #[serde(skip_serializing)]
+//!     #[mahler(internal)]
 //!     other_value: String,
 //! }
 //! ```
@@ -114,12 +110,10 @@
 //! restriction is that these structures must be `Send` and `Sync`.
 //!
 //! ```rust,no_run
-//! use serde::{Deserialize, Serialize};
-//!
-//! use mahler::State;
+//! use mahler::state::State;
 //! use mahler::worker::Worker;
 //!
-//! #[derive(State, Serialize, Deserialize)]
+//! #[derive(State)]
 //! struct MySystem;
 //!
 //! // MyConnection represents a shared resource
@@ -420,9 +414,31 @@
 //! - [run_task](`worker::Worker::run_task`) allows to run a task in the context of a worker. This
 //!   may be helpful to diagnose any extraction/expansion errors with the task definition or for
 //!   debugging of a specific task.
-pub use mahler_core::state::State;
-pub use mahler_core::*;
+pub use mahler_core::errors;
+pub use mahler_core::extract;
+pub use mahler_core::task;
+pub use mahler_core::worker;
 
-#[cfg(feature = "derive")]
-#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
-pub use mahler_derive::*;
+pub mod workflow {
+    pub use mahler_core::workflow::Interrupt;
+
+    #[cfg(debug_assertions)]
+    pub use mahler_core::workflow::{Dag, Workflow};
+
+    #[cfg(debug_assertions)]
+    pub use mahler_core::{dag, par, seq};
+}
+
+pub mod state {
+    //! State trait and standardized serialization along with State procedural macro
+    //!
+    //! This module provides the State trait which defines how types are serialized
+    //! and deserialized in a standardized way, including the halted state.
+
+    pub use mahler_core::state::*;
+    pub use mahler_core::{list, map, set};
+
+    #[cfg(feature = "derive")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
+    pub use mahler_derive::*;
+}
