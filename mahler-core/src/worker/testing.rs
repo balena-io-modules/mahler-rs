@@ -84,7 +84,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
         let domain: &Domain = self.inner.as_ref();
         let planner = Planner::new(domain.clone());
 
-        match planner.find_workflow::<O::Target>(&ini, &tgt) {
+        match planner.find_workflow::<O>(&ini, &tgt) {
             Ok(workflow) => Ok(workflow),
             Err(PlannerError::NotFound) => Err(NotFound),
             Err(e) => panic!("unexpected planning error: {e}"),

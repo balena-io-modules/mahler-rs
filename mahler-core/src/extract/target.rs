@@ -15,13 +15,13 @@ use crate::task::{Context, FromContext, FromSystem};
 ///
 /// ```rust,no_run
 /// use mahler::{
+///     state::State,
 ///     extract::Target,
 ///     task::{Handler, update},
 ///     worker::{Worker, Ready}
 /// };
-/// use serde::{Serialize, Deserialize};
 ///
-/// #[derive(Serialize, Deserialize)]
+/// #[derive(State)]
 /// struct MySystem {/* ... */};
 ///
 /// fn with_target(Target(tgt): Target<i32>) {
@@ -138,22 +138,27 @@ impl<T: State> Deref for Target<T> {
 /// Allows the Job to see the desired state for the path assigned to the task.
 ///
 /// Note that unlike [`mahler::extract::Target`], this extractor doesn't require the inner type
-/// to implement `State`
+/// to implement `State`, only `Deserialize`
 ///
 /// # Example
 ///
 /// ```rust,no_run
 /// use mahler::{
+///     state::State,
 ///     extract::RawTarget,
 ///     task::{Handler, update},
 ///     worker::{Worker, Ready}
 /// };
-/// use serde::{Serialize, Deserialize};
+/// use serde::Deserialize;
 ///
-/// #[derive(Serialize,Deserialize)]
+/// #[derive(State)]
 /// struct SystemState {/* ... */};
 ///
-/// fn with_target(RawTarget(tgt): RawTarget<i32>) {
+/// #[derive(Deserialize)]
+/// struct Num(i32);
+///
+/// // MyApp does not need to implement `State`
+/// fn with_target(RawTarget(tgt): RawTarget<Num>) {
 ///     // ...
 /// }
 ///

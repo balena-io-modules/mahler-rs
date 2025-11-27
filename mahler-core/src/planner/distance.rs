@@ -5,6 +5,7 @@ use std::collections::btree_set::Iter;
 use std::fmt::{self, Display};
 use std::{cmp::Ordering, collections::BTreeSet};
 
+use crate::path::Path;
 use crate::task::Operation as JobOperation;
 
 #[derive(Debug)]
@@ -70,8 +71,11 @@ impl Distance {
     /// path.
     ///
     /// The distance encodes all the possible operations that can be used to move
-    /// between two states
-    pub fn new(src: &Value, tgt: &Value) -> Distance {
+    /// between two states.
+    ///
+    /// When creating a new distance, an ignore list can be added. Changes for path prefixed by any of the
+    /// paths in the ignore list are not added to the operations list.
+    pub fn new(src: &Value, tgt: &Value, ignore: &[Path]) -> Distance {
         let mut operations = BTreeSet::new();
 
         // calculate differences between the system root and
@@ -80,6 +84,10 @@ impl Distance {
         for op in &changes.0 {
             // For every operation on the list of changes
             let path = op.path();
+
+            if ignore.iter().any(|p| p.is_prefix_of(&Path::new(path))) {
+                continue;
+            }
 
             let mut parent = path;
 
@@ -129,7 +137,7 @@ impl Distance {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.operations.is_empty()
     }
 
     pub fn operations(&self) -> Iter<'_, Operation> {
@@ -193,7 +201,7 @@ mod tests {
     use serde_json::json;
 
     fn distance_eq(src: Value, tgt: Value, result: Vec<Value>) {
-        let distance = Distance::new(&src, &tgt);
+        let distance = Distance::new(&src, &tgt, &[]);
 
         // Serialize results to make comparison easier
         let ops: Vec<Value> = distance

@@ -2,7 +2,7 @@
 
 use anyhow::anyhow;
 use json_patch::Patch;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -506,7 +506,7 @@ impl<O> Worker<O, Uninitialized> {
     /// provided state cannot be converted to the internal state representation.
     pub fn initial_state(self, state: O) -> Result<Worker<O, Ready>, SerializationError>
     where
-        O: Serialize,
+        O: State,
     {
         let Uninitialized {
             domain, resources, ..
@@ -755,7 +755,7 @@ impl<O: State> Worker<O, Ready> {
             Planning(PlannerError),
         }
 
-        async fn find_and_run_workflow<I: Serialize + DeserializeOwned>(
+        async fn find_and_run_workflow<T: State>(
             planner: &Planner,
             sys_reader: &Arc<RwLock<System>>,
             tgt: &Value,
@@ -773,13 +773,13 @@ impl<O: State> Worker<O, Ready> {
                 // properties that are not part of the target state model.
                 // We throw a planning error immediately if this process fails as
                 // it will fail in planning anyway
-                let system = system
-                    .state::<I>()
-                    .and_then(System::try_from)
+                let cur = system
+                    .state::<T::Target>()
+                    .and_then(serde_json::to_value)
                     .map_err(SerializationError::from)
                     .map_err(PlannerError::from)
                     .map_err(InnerSeekError::Planning)?;
-                let changes = json_patch::diff(system.root(), tgt);
+                let changes = json_patch::diff(&cur, tgt);
                 if !changes.0.is_empty() {
                     debug!("pending changes:");
                     for change in &changes.0 {
@@ -790,7 +790,7 @@ impl<O: State> Worker<O, Ready> {
 
             let workflow = {
                 let system = sys_reader.read().await;
-                let res = planner.find_workflow::<I>(&system, tgt);
+                let res = planner.find_workflow::<T>(&system, tgt);
 
                 if let Err(PlannerError::NotFound) = res {
                     warn!(time = ?now.elapsed(), "workflow not found");
@@ -850,7 +850,7 @@ impl<O: State> Worker<O, Ready> {
                             return Err(InternalError::from(anyhow!("state patch failed, worker state possibly tainted")))?;
                         }
 
-                        res = find_and_run_workflow::<O::Target>(&planner, &sys_reader, &tgt, &patch_tx, &interrupt) => {
+                        res = find_and_run_workflow::<O>(&planner, &sys_reader, &tgt, &patch_tx, &interrupt) => {
                             match res {
                                 Ok(InnerSeekResult::TargetReached) => {
                                     info!("target state applied");
@@ -946,7 +946,7 @@ mod tests {
     use super::*;
     use crate::extract::{Target, View};
     use crate::task::*;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use tokio::time::{sleep, timeout};
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};

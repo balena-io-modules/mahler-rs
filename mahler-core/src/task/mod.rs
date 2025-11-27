@@ -392,6 +392,7 @@ impl Display for Task {
 mod tests {
     use super::*;
     use crate::extract::{System as Sys, Target, View};
+    use crate::state::State;
     use crate::system::System;
     use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
@@ -606,8 +607,12 @@ mod tests {
 
     // State needs to be clone in order for Target to implement IntoSystem
     #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-    struct State {
+    struct MySystem {
         counters: HashMap<String, i32>,
+    }
+
+    impl State for MySystem {
+        type Target = Self;
     }
 
     fn update_counter(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
@@ -621,7 +626,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_modifies_system_sub_elements() {
-        let state = State {
+        let state = MySystem {
             counters: [("a".to_string(), 0), ("b".to_string(), 0)].into(),
         };
 

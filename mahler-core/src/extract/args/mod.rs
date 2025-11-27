@@ -19,13 +19,13 @@ mod error;
 ///
 /// ```rust,no_run
 /// use mahler::{
+///     state::State,
 ///     extract::Args,
 ///     task::{Handler, update},
 ///     worker::{Worker, Ready}
 /// };
-/// use serde::{Serialize, Deserialize};
 ///
-/// #[derive(Serialize,Deserialize)]
+/// #[derive(State)]
 /// struct SystemState {/* ... */};
 ///
 /// fn install_service_for_release(Args((release_id, service_name)): Args<(String, String)>) {
@@ -79,14 +79,19 @@ impl<S> Deref for Args<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::State;
     use crate::task::*;
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
 
     // The state model
     #[derive(Serialize, Deserialize, Debug, Clone)]
-    struct State {
+    struct MyState {
         numbers: HashMap<String, i32>,
+    }
+
+    impl State for MyState {
+        type Target = Self;
     }
 
     #[test]
@@ -95,7 +100,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 
@@ -111,7 +116,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 
@@ -133,7 +138,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 

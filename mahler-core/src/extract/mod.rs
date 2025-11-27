@@ -10,9 +10,9 @@
 //! use mahler::extract::{View, Target};
 //! use mahler::task::{Handler, update};
 //! use mahler::worker::{Worker, Ready};
-//! use serde::{Deserialize, Serialize};
+//! use mahler::state::State;
 //!
-//! #[derive(Serialize, Deserialize)]
+//! #[derive(State)]
 //! struct Counters {/* .. */}
 //!
 //! fn plus_one(mut counter: View<u32>, Target(tgt): Target<u32>) {

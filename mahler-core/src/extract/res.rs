@@ -17,11 +17,11 @@ use crate::task::{Context, FromSystem};
 ///
 /// ```rust,no_run
 /// use mahler::{
+///     state::State,
 ///     extract::Res,
 ///     task::{Handler, update},
 ///     worker::{Worker, Ready}
 /// };
-/// use serde::{Serialize, Deserialize};
 ///
 /// // A shared resource type
 /// struct MyConnection {/* ... */};
@@ -29,7 +29,7 @@ use crate::task::{Context, FromSystem};
 /// // Another resource
 /// struct MyConfig {/* ... */};
 ///
-/// #[derive(Serialize,Deserialize)]
+/// #[derive(State)]
 /// struct SystemState {/* ... */};
 ///
 /// fn multiple_resources(conn: Res<MyConnection>, config: Res<MyConfig>) {
@@ -52,11 +52,11 @@ use crate::task::{Context, FromSystem};
 /// use tokio::sync::RwLock;
 /// use std::ops::Deref;
 /// use mahler::{
+///     state::State,
 ///     extract::{View, Res},
 ///     task::{Handler, update, with_io, IO},
 ///     worker::{Worker, Ready}
 /// };
-/// use serde::{Serialize, Deserialize};
 ///
 /// // An editable resource
 /// struct MyConfig(RwLock<String>);
@@ -74,7 +74,7 @@ use crate::task::{Context, FromSystem};
 ///     }
 /// }
 ///
-/// #[derive(Serialize, Deserialize)]
+/// #[derive(State)]
 /// struct SystemState {/* ... */};
 ///
 /// fn edit_resources(view: View<i32>, config: Res<MyConfig>) -> IO<i32> {

@@ -5,8 +5,6 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::{Patch, PatchOperation};
 use jsonptr::PointerBuf;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 use tracing::field::display;
@@ -14,6 +12,7 @@ use tracing::{error, field, instrument, trace, trace_span, warn, Span};
 
 use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
+use crate::state::{AsInternal, State};
 use crate::system::System;
 use crate::task::{self, Context, Operation, Task};
 use crate::workflow::{Dag, WorkUnit, Workflow};
@@ -319,7 +318,7 @@ impl Planner {
     #[instrument(level = "trace", skip_all, err(level = "trace"))]
     pub(crate) fn find_workflow<T>(&self, system: &System, tgt: &Value) -> Result<Workflow, Error>
     where
-        T: Serialize + DeserializeOwned,
+        T: State,
     {
         trace!(initial=%system, target=%tgt, "searching for workflow");
         // The search stack stores (current_state, current_plan, depth)
@@ -330,6 +329,13 @@ impl Planner {
 
         let find_workflow_span = Span::current();
 
+        // We serialize the state using AsInternal to get state metadata
+        let initial_state_with_meta = system
+            .state::<T>()
+            .and_then(|t| serde_json::to_value(AsInternal(&t)))
+            .map_err(SerializationError::from)?;
+        let mut halted_state_paths: Vec<Path> = Vec::new();
+
         while let Some((cur_state, cur_plan, depth)) = stack.pop() {
             // Prevent infinite recursion (e.g., from buggy tasks or recursive methods)
             if depth >= 256 {
@@ -337,19 +343,19 @@ impl Planner {
                 return Err(Error::NotFound)?;
             }
 
-            // Normalize state: deserialize into T and re-serialize to remove internal fields
+            // Normalize state: deserialize into the target type and re-serialize to remove internal fields
             let cur = cur_state
-                .state::<T>()
-                .and_then(System::try_from)
+                .state::<T::Target>()
+                .and_then(serde_json::to_value)
                 .map_err(SerializationError::from)?;
 
             // add the current state to the visited list
             visited_states.insert(hash_state(&cur_state));
 
             // Compute the difference between current and target state
-            let distance = Distance::new(&cur, tgt);
+            let distance = Distance::new(&cur, tgt, &halted_state_paths);
 
-            // If no difference, we’ve reached the goal
+            // If there are no more operations, we’ve reached the goal
             if distance.is_empty() {
                 // we need to reverse the plan before returning
                 return Ok(Workflow(cur_plan.reverse()));
@@ -368,12 +374,33 @@ impl Planner {
             // Iterate over distance operations and jobs to find possible candidates
             for op in distance.operations() {
                 let path = Path::new(op.path());
+                let pointer = path.as_ref();
+
+                // skip the path if any parent path has been halted
+                if halted_state_paths.iter().any(|p| p.is_prefix_of(&path)) {
+                    continue;
+                }
+
+                // resolve the operation pointer to a value on the initial state
+                let state = pointer
+                    .resolve(&initial_state_with_meta)
+                    .unwrap_or(&Value::Null);
+
+                // if the state pointed by the operation has been halted, we add it to the list of
+                // operations and skip it
+                if let Some(true) = state
+                    .get("__mahler(halted)")
+                    .and_then(|value| value.as_bool())
+                {
+                    halted_state_paths.push(path.clone());
+                    continue;
+                }
+
+                // resolve the operation pointer on the target state
+                let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
 
                 // Retrieve matching jobs at this path
                 if let Some((args, jobs)) = self.0.find_matching_jobs(path.as_str()) {
-                    let pointer = path.as_ref();
-                    let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
-
                     let context = Context {
                         path: path.clone(),
                         args,
@@ -577,7 +604,7 @@ mod tests {
 
     use super::*;
     use crate::extract::{Args, System, Target, View};
-    use crate::state::{Map, State};
+    use crate::state::{AsInternal, Map, State};
     use crate::{dag, par, seq, task::*, workflow::Dag};
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
@@ -636,17 +663,16 @@ mod tests {
         counter
     }
 
-    pub fn find_plan<I, O>(planner: Planner, cur: O, tgt: I) -> Result<Workflow, super::Error>
+    pub fn find_plan<T>(planner: Planner, cur: T, tgt: T::Target) -> Result<Workflow, super::Error>
     where
-        O: Serialize,
-        I: Serialize + DeserializeOwned,
+        T: State,
     {
         let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
         let system =
             crate::system::System::try_from(cur).expect("failed to serialize current state");
 
-        let res = planner.find_workflow::<I>(&system, &tgt)?;
+        let res = planner.find_workflow::<T>(&system, &tgt)?;
         Ok(res)
     }
 
@@ -715,6 +741,10 @@ mod tests {
             counters: HashMap<String, i32>,
         }
 
+        impl State for MyState {
+            type Target = Self;
+        }
+
         let initial = MyState {
             counters: HashMap::from([("one".to_string(), 0), ("two".to_string(), 0)]),
         };
@@ -747,6 +777,10 @@ mod tests {
         #[derive(Serialize, Deserialize)]
         struct MyState {
             counters: HashMap<String, i32>,
+        }
+
+        impl State for MyState {
+            type Target = Self;
         }
 
         let initial = MyState {
@@ -786,6 +820,10 @@ mod tests {
             counters: HashMap<String, i32>,
         }
 
+        impl State for MyState {
+            type Target = Self;
+        }
+
         let initial = MyState {
             counters: HashMap::from([("one".to_string(), 0), ("two".to_string(), 0)]),
         };
@@ -815,8 +853,8 @@ mod tests {
     #[test]
     fn it_avoids_conflicts_from_methods() {
         init();
-        let initial = HashMap::from([("one".to_string(), 0), ("two".to_string(), 0)]);
-        let target = HashMap::from([("one".to_string(), 1), ("two".to_string(), 1)]);
+        let initial = Map::from([("one".to_string(), 0), ("two".to_string(), 0)]);
+        let target = Map::from([("one".to_string(), 1), ("two".to_string(), 1)]);
 
         fn plus_other(Target(tgt): Target<i32>) -> Vec<Task> {
             vec![
@@ -839,6 +877,131 @@ mod tests {
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
+    }
+
+    #[test]
+    fn it_ignores_halted_sub_states_when_planning() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct AppTarget {
+            running: bool,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct App {
+            running: bool,
+
+            #[serde(default)]
+            install_failed: bool,
+        }
+
+        impl State for App {
+            type Target = AppTarget;
+
+            fn is_halted(&self) -> bool {
+                self.install_failed
+            }
+
+            // we cannot derive State in these tests, normally users
+            // won't have to define this function
+            fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                use serde::ser::SerializeStruct;
+                let mut state = serializer.serialize_struct("App", 3)?;
+                state.serialize_field("__mahler(halted)", &self.is_halted())?;
+                state.serialize_field("running", &self.running)?;
+                state.serialize_field("install_failed", &self.install_failed)?;
+                state.end()
+            }
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Device {
+            apps: Map<String, App>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct DeviceTarget {
+            apps: Map<String, AppTarget>,
+        }
+
+        impl State for Device {
+            type Target = DeviceTarget;
+
+            // we cannot derive State in these tests, normally users
+            // won't have to define this function
+            fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                use serde::ser::SerializeStruct;
+                let mut state = serializer.serialize_struct("Device", 2)?;
+                state.serialize_field("apps", &AsInternal(&self.apps))?;
+                state.end()
+            }
+        }
+
+        fn prepare_app(mut app: View<Option<App>>) -> View<Option<App>> {
+            app.replace(App {
+                running: false,
+                install_failed: false,
+            });
+            app
+        }
+
+        fn install_app(mut app: View<App>) -> View<App> {
+            app.running = true;
+            app
+        }
+
+        let domain = Domain::new().jobs(
+            "/apps/{app_name}",
+            [
+                create(prepare_app).with_description(|Args(app_name): Args<String>| {
+                    format!("prepare app {app_name}")
+                }),
+                update(install_app).with_description(|Args(app_name): Args<String>| {
+                    format!("install app {app_name}")
+                }),
+            ],
+        );
+
+        let initial = serde_json::from_value::<Device>(json!({
+            "apps": {
+                "one": {
+                    "running": false,
+                },
+                "two": {
+                    "running": false,
+                    "install_failed": true,
+                }
+            }
+        }))
+        .unwrap();
+        let target = serde_json::from_value::<DeviceTarget>(json!({
+            "apps": {
+                "one": {
+                    "running": true,
+                },
+                "two": {
+                    "running": true,
+                },
+                "three": {
+                    "running": true,
+                }
+            }
+        }))
+        .unwrap();
+
+        let planner = Planner::new(domain);
+        let workflow = find_plan(planner, initial, target).unwrap();
+        // app `two` has halted, but a plan is generated to install the other two apps
+        let expected: Dag<&str> =
+            par!("install app one", "prepare app three") + seq!("install app three");
+        assert_eq!(expected.to_string(), workflow.to_string());
     }
 
     // This test will fail to find a plan due to a bug in the task definitions,
@@ -992,13 +1155,17 @@ mod tests {
 
         #[derive(Serialize, Deserialize)]
         struct MySys {
-            services: HashMap<String, Service>,
-            images: HashMap<String, Image>,
+            services: Map<String, Service>,
+            images: Map<String, Image>,
+        }
+
+        impl State for MySys {
+            type Target = MySysTarget;
         }
 
         #[derive(Serialize, Deserialize)]
-        struct TargetState {
-            services: HashMap<String, Service>,
+        struct MySysTarget {
+            services: Map<String, Service>,
         }
 
         fn create_image(mut view: View<Option<Image>>) -> View<Option<Image>> {
@@ -1046,7 +1213,7 @@ mod tests {
 
         let initial =
             serde_json::from_value::<MySys>(json!({ "images": {}, "services": {} })).unwrap();
-        let target = serde_json::from_value::<TargetState>(
+        let target = serde_json::from_value::<MySysTarget>(
             json!({ "services": {"one":{"image": "ubuntu"}, "two": {"image": "ubuntu"}} }),
         )
         .unwrap();
@@ -1071,6 +1238,10 @@ mod tests {
         struct MyState {
             config: Config,
             counters: Map<String, i32>,
+        }
+
+        impl State for MyState {
+            type Target = Self;
         }
 
         fn new_counter(
