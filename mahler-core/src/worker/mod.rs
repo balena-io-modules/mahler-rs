@@ -419,10 +419,10 @@ impl<O, S: WorkerState + WithResources> Worker<O, S> {
     /// are configured, only the last one will be used.
     ///
     /// ```rust
-    /// use serde::{Deserialize, Serialize};
+    /// use mahler::state::State;
     /// use mahler::worker::{Worker, Uninitialized};
     ///
-    /// #[derive(Serialize, Deserialize)]
+    /// #[derive(State)]
     /// struct StateModel;
     ///
     /// // MyConnection represents a shared resource
@@ -474,11 +474,11 @@ impl<O> Worker<O, Uninitialized> {
     /// for the same domain
     ///
     /// ```rust
-    /// use serde::{Deserialize, Serialize};
+    /// use mahler::state::State;
     /// use mahler::worker::{Worker, Uninitialized};
     /// use mahler::task::prelude::*;
     ///
-    /// #[derive(Serialize, Deserialize)]
+    /// #[derive(State)]
     /// struct StateModel;
     ///
     /// fn foo() {}

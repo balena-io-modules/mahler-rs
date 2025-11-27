@@ -5,7 +5,7 @@
 //! # State Derive Macro
 //!
 //! The `#[derive(State)]` macro automatically implements the
-//! [State](`mahler::state::State`) trait, generates a Target type, and provides
+//! [State](`State`) trait, generates a Target type, and provides
 //! `serde::Serialize` and `serde::Deserialize` implementations for both types.
 //!
 //! ```rust

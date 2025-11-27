@@ -137,7 +137,7 @@ impl<T: State> Deref for Target<T> {
 ///
 /// Allows the Job to see the desired state for the path assigned to the task.
 ///
-/// Note that unlike [`mahler::extract::Target`], this extractor doesn't require the inner type
+/// Note that unlike [`crate::extract::Target`], this extractor doesn't require the inner type
 /// to implement `State`, only `Deserialize`
 ///
 /// # Example

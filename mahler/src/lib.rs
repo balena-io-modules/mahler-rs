@@ -146,9 +146,12 @@
 //! the planning/execution context is passed to the handler.
 //!
 //! ```rust
+//! use mahler::state::State;
 //! use mahler::extract::{View, Args, Target, System, Res};
 //!
 //! struct MyConnection;
+//!
+//! #[derive(State)]
 //! struct MySystem;
 //!
 //!  // `View` gives you a view into the relevant part of the
@@ -409,11 +412,21 @@
 //!
 //! When `debug_assertions` is enabled, mahler exposes two testing methods for [Worker](`worker::Worker`).
 //! - [find_workflow](`worker::Worker::find_workflow`) allows to generate a Workflow for a given
-//!   initial and target state. The workflow can be compared with a manually created [`Dag`] to
+//!   initial and target state. The workflow can be compared with a manually created [DAG](`workflow::Dag`) to
 //!   test against an expected plan.
 //! - [run_task](`worker::Worker::run_task`) allows to run a task in the context of a worker. This
 //!   may be helpful to diagnose any extraction/expansion errors with the task definition or for
 //!   debugging of a specific task.
+//!
+//! It also exposes the following workflow types and macros
+//! - [Dag](`workflow::Dag`) an DAG implementation used internally by mahler.
+//! - [dag](`workflow::dag`) a declarative macro to combine DAGs into branches
+//! - [seq](`workflow::seq`) a declarative macro to create a linear DAG from a list of values
+//! - [par](`workflow::par`) a declarative macro to create a branching DAG with single value
+//!   branches
+//!   
+//! These utils can be used for testing and comparing generated workflows with specific DAGs. See
+//! [find_workflow](`worker::Worker::find_workflow`) for more info.
 pub use mahler_core::errors;
 pub use mahler_core::extract;
 pub use mahler_core::task;

@@ -91,7 +91,7 @@ fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
 ```
 
 To use the jobs, we need to create a system model where the jobs will be applied. We'll use
-a HashMap.
+a Map.
 
 ```rust
 use mahler::state::{Map, State};

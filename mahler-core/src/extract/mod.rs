@@ -30,10 +30,18 @@
 //! Some commonly used extractors are
 //!
 //! ```rust
-//! use mahler::extract::{View, Args, Target, System, Res};
+//! use mahler::state::State;
+//! use mahler::extract::{View, Args, Target, System, RawTarget, Res};
+//!
+//! use serde::Deserialize;
 //!
 //! struct MyConnection;
+//!
+//! #[derive(State)]
 //! struct MySystemState;
+//!
+//! #[derive(Deserialize)]
+//! struct Number(u32);
 //!
 //! // `View` gives you a view into the relevant part of the
 //! // state for the handler.
@@ -46,9 +54,14 @@
 //! // `Args` gives you the path arguments and deserializes them
 //! fn args(Args(counter_name): Args<String>) {}
 //!
-//! // `Target` gives you the target value for the Job operation
+//! // `Target` gives you the target value for the Job operation for types
+//! // that implement `State`
 //! // note that `delete` operations do not have a target.
 //! fn target(Target(tgt): Target<u32>) {}
+//!
+//! // `RawTarget` gives you the target value for the Job operation for any
+//! // type that implements `Deserialize` (useful for conversions).
+//! fn raw_target(RawTarget(tgt): RawTarget<Number>) {}
 //!
 //! // `System` provides a view into the top level system state.
 //! // A Job using the System extractor cannot run concurrently to other jobs
