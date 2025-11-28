@@ -358,7 +358,7 @@ impl Planner {
             // If there are no more operations, we’ve reached the goal
             if distance.is_empty() {
                 // we need to reverse the plan before returning
-                return Ok(Workflow(cur_plan.reverse()));
+                return Ok(Workflow::new(cur_plan.reverse()).with_ignored(halted_state_paths));
             }
 
             let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);

@@ -781,6 +781,8 @@ impl<O: State> Worker<O, Ready> {
                     .map_err(InnerSeekError::Planning)?;
                 let changes = json_patch::diff(&cur, tgt);
                 if !changes.0.is_empty() {
+                    // FIXME: this dumps internal state on the logs, we
+                    // might need to mask sensitive data like passwords somehow
                     debug!("pending changes:");
                     for change in &changes.0 {
                         debug!("- {}", change);
@@ -803,10 +805,17 @@ impl<O: State> Worker<O, Ready> {
                 return Ok(InnerSeekResult::TargetReached);
             }
             info!(time = ?now.elapsed(), "workflow found");
+
+            if tracing::enabled!(tracing::Level::WARN) {
+                warn!("the following paths were ignored during planning");
+                for path in workflow.ignored() {
+                    warn!("{path}");
+                }
+            }
             if tracing::enabled!(tracing::Level::DEBUG) {
                 debug!("will execute the following tasks:");
                 for line in workflow.to_string().lines() {
-                    debug!("{}", line);
+                    debug!("{line}");
                 }
             }
 
