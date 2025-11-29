@@ -1,4 +1,85 @@
 - commits:
+    - subject: Return information about ignored paths with the Workflow
+      hash: 930e26b62834a49a761d2fa172e958c59b64c1c8
+      body: |
+        The planner adds the information about ignored paths to the returned
+        workflow for logging and for comparison during testing.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Use halting information at planning
+      hash: 52abdb50d23e1d44390b9b157ac24bc3397288b5
+      body: |
+        Ignores changes to halted states when generating a plan, allowing for
+        partial plans to be produced by the planner.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Formalize serialization of types implementing State
+      hash: 1efe5b43143c4c67723a986d6a5e3fbc52203bd9
+      body: |
+        Adds List, Map and Set types to the `mahler::state` module and removes
+        `State` implementations from other non mahler collection types. This is
+        meant to control how state models are serialized in order to avoid
+        pitfalls from custom serialization from the planner.
+
+        This also modifies the derive implementation to implement serialize and
+        deserialize for structs and disallow deriving the trait for non
+        newtype unnamed types and enums with parameters.
+
+        The improved state trait now provides a new halting semantics.
+
+        A halted state means the state sub-tree does not admit any additional
+        changes and any targets for that state should be ignored when planning
+        until some manual intervention has been done.
+
+        This also adds a new mechanism to serialize state with metadata
+        (including halted state). This will be used by the planner on a
+        follow-up commit.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Refactor Worker to require `State` trait
+      hash: 3e5a1409fecad8e21deb7e4c0add4d938fb89b0f
+      body: |
+        This results in better type inference and usage of the trait provides
+        advantages for structural compatibility between current and target state
+        types.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Use `State` trait for `Target` extractor
+      hash: 716cb7b9e8a2155f30a0fa21bf17e0d8658f827a
+      body: |
+        This now requires that the type used in the `Target` extractor
+        implements `State`, and uses the `::Target` type as the internal value
+        of the extractor. This results in more ergonomic code, particulary when
+        working with the `derive` macro, as it is no longer necessary to use the
+        target type, i.e `Target<ServiceTarget>` but instead `Target<Service>`
+        is used.
+
+        To extract targets for types that do not implement `State`, a new
+        `RawTarget` type is introduced, useful for passing targets to tasks from
+        a method.
+
+        This is a breaking change.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+  version: 0.22.0
+  title: ""
+  date: 2025-11-29T14:01:58.519Z
+- commits:
     - subject: Revert "Only create derived type if different than source type"
       hash: bb82ba468f36efca6cd55dd3956788fc849a55fd
       body: >
