@@ -15,13 +15,13 @@ use crate::task::{Context, FromSystem};
 ///
 /// ```rust,no_run
 /// use mahler::{
+///     state::State,
 ///     extract::System,
 ///     task::{Handler, update},
 ///     worker::{Worker, Ready}
 /// };
-/// use serde::{Serialize, Deserialize};
 ///
-/// #[derive(Serialize,Deserialize)]
+/// #[derive(State)]
 /// struct SystemState {/* ... */};
 ///
 /// fn accessing_global_state(System(state): System<SystemState>) {

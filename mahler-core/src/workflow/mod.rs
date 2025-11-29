@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, instrument};
 
+use crate::path::Path;
 use crate::system::System;
 use crate::task::{Action, Error as TaskError};
 
@@ -137,7 +138,13 @@ impl Task for WorkUnit {
 /// Workflow implements [`Display`], using the [string representation defined for
 /// Dag](`Dag#string-representation-of-a-dag`), where each task is rendered from its provided
 /// [description](`crate::task::Job::with_description`).
-pub struct Workflow(pub(crate) Dag<WorkUnit>);
+pub struct Workflow {
+    /// The internal DAG that the workflow implements
+    dag: Dag<WorkUnit>,
+
+    /// List of ignored paths during planning due to a halted state
+    ignored: Vec<Path>,
+}
 
 /// Runtime status of a workflow execution
 pub(crate) enum WorkflowStatus {
@@ -158,9 +165,25 @@ impl From<ExecutionStatus> for WorkflowStatus {
 }
 
 impl Workflow {
+    pub(crate) fn new(dag: Dag<WorkUnit>) -> Self {
+        Workflow {
+            dag,
+            ignored: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_ignored(self, ignored: Vec<Path>) -> Self {
+        let Workflow { dag, .. } = self;
+        Workflow { dag, ignored }
+    }
+
+    pub fn ignored(&self) -> Vec<&str> {
+        self.ignored.iter().map(|p| p.as_str()).collect()
+    }
+
     /// Return `true` if the Workflow's internal graph has no elements
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.dag.is_empty()
     }
 
     pub(crate) async fn execute(
@@ -169,7 +192,7 @@ impl Workflow {
         patch_tx: Sender<Patch>,
         interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
-        self.0
+        self.dag
             .execute(sys_reader, patch_tx, interrupt)
             .await
             .map(|s| s.into())
@@ -178,6 +201,6 @@ impl Workflow {
 
 impl Display for Workflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        self.dag.fmt(f)
     }
 }

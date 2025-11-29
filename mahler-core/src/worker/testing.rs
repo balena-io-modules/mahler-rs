@@ -3,9 +3,10 @@ use thiserror::Error;
 
 use super::{Ready, Uninitialized, Worker, WorkerState};
 use crate::planner::{Domain, Error as PlannerError, Planner};
+use crate::state::State;
 use crate::system::{Resources, System};
-use crate::task::{self, Context};
-use crate::{task::Task, workflow::Workflow};
+use crate::task::{self, Context, Task};
+use crate::workflow::Workflow;
 
 #[derive(Debug, Error)]
 #[error("workflow not found")]
@@ -38,7 +39,7 @@ impl AsRef<Domain> for Ready {
     }
 }
 
-impl<O, S: WorkerState + AsRef<Resources> + AsRef<Domain>, I> Worker<O, S, I> {
+impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     #[cfg_attr(docsrs, doc(cfg(debug_assertions)))]
     /// Find a workflow for testing purposes within the context of the worker
     ///
@@ -47,7 +48,7 @@ impl<O, S: WorkerState + AsRef<Resources> + AsRef<Domain>, I> Worker<O, S, I> {
     /// use mahler::task::{self, prelude::*};
     /// use mahler::extract::{View, Target};
     /// use mahler::worker::Worker;
-    /// use mahler::{Dag, seq};
+    /// use mahler::workflow::{Dag, seq};
     ///
     /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
     ///    if *counter < tgt {
@@ -74,11 +75,7 @@ impl<O, S: WorkerState + AsRef<Resources> + AsRef<Domain>, I> Worker<O, S, I> {
     /// # Panics
     ///
     /// This function will panic if any error happens during planning
-    pub fn find_workflow(&self, cur: O, tgt: I) -> Result<Workflow, NotFound>
-    where
-        I: Serialize + DeserializeOwned,
-        O: Serialize,
-    {
+    pub fn find_workflow(&self, cur: O, tgt: O::Target) -> Result<Workflow, NotFound> {
         let mut ini = System::try_from(cur).expect("failed to serialize initial state");
         let resources: &Resources = self.inner.as_ref();
         ini.set_resources(resources.clone());
@@ -87,7 +84,7 @@ impl<O, S: WorkerState + AsRef<Resources> + AsRef<Domain>, I> Worker<O, S, I> {
         let domain: &Domain = self.inner.as_ref();
         let planner = Planner::new(domain.clone());
 
-        match planner.find_workflow::<I>(&ini, &tgt) {
+        match planner.find_workflow::<O>(&ini, &tgt) {
             Ok(workflow) => Ok(workflow),
             Err(PlannerError::NotFound) => Err(NotFound),
             Err(e) => panic!("unexpected planning error: {e}"),
@@ -205,7 +202,7 @@ mod tests {
 
     use super::*;
     use crate::extract::{Target, View};
-    use crate::{par, seq, task::*, Dag};
+    use crate::{par, seq, task::*, workflow::Dag};
 
     fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
@@ -230,6 +227,10 @@ mod tests {
     async fn it_allows_testing_atomic_tasks() {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
         struct Counters(HashMap<String, i32>);
+
+        impl State for Counters {
+            type Target = Self;
+        }
 
         let worker: Worker<Counters, _> = Worker::new()
             .job("/{counter}", update(plus_one))
@@ -260,6 +261,10 @@ mod tests {
     async fn it_allows_testing_compound_tasks() {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
         struct Counters(HashMap<String, i32>);
+
+        impl State for Counters {
+            type Target = Self;
+        }
 
         let worker: Worker<Counters, _> = Worker::new()
             .job("/{counter}", update(plus_one))
@@ -296,6 +301,10 @@ mod tests {
     async fn it_allows_searching_for_workflow() {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
         struct Counters(HashMap<String, i32>);
+
+        impl State for Counters {
+            type Target = Self;
+        }
 
         let worker: Worker<Counters, _> = Worker::new()
             .job("/{counter}", update(plus_one))

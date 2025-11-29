@@ -91,17 +91,16 @@ fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
 ```
 
 To use the jobs, we need to create a system model where the jobs will be applied. We'll use
-a HashMap.
+a Map.
 
 ```rust
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
+use mahler::state::{Map, State};
 
 // The state model needs to be Serializable and Deserializable
 // since the library uses JSON internally to access parts
 // of the state
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Counters(HashMap<String, i32>);
+#[derive(State, Debug, PartialEq, Eq)]
+struct Counters(Map<String, i32>);
 ```
 
 Finally in order to create and run workflows we need a `Worker`:
@@ -113,13 +112,13 @@ use mahler::task::prelude::*;
 let mut worker = Worker::new()
     .job("/{counter}", update(plus_one))
     .job("/{counter}", update(plus_two))
-    .initial_state(Counters(HashMap::from([
+    .initial_state(Counters(Map::from([
         ("a".to_string(), 0),
         ("b".to_string(), 0),
     ])))
     .unwrap();
 
-worker.seek_target(Counters(HashMap::from([
+worker.seek_target(CountersTarget(Map::from([
     ("a".to_string(), 1),
     ("b".to_string(), 2),
 ])))
@@ -134,10 +133,12 @@ Here's the full runnable example with logging and error handling:
 
 ```rust
 use anyhow::{Context, Result};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+use mahler::state::{Map, State};
 use mahler::worker::Worker;
 use mahler::task::prelude::*;
 use mahler::extract::Args;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -164,7 +165,7 @@ async fn main() -> Result<()> {
         .job("/{counter}", update(plus_two))
         // We initialize the worker with two counters
         // `a` and `b` with value 0
-        .initial_state(Counters(HashMap::from([
+        .initial_state(Counters(Map::from([
             ("a".to_string(), 0),
             ("b".to_string(), 0),
         ])))
@@ -173,7 +174,7 @@ async fn main() -> Result<()> {
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
     worker
-        .seek_target(Counters(HashMap::from([
+        .seek_target(CountersTarget(Map::from([
             ("a".to_string(), 1),
             ("b".to_string(), 2),
         ])))
@@ -190,7 +191,7 @@ async fn main() -> Result<()> {
 
     assert_eq!(
         state,
-        Counters(HashMap::from([("a".to_string(), 1), ("b".to_string(), 2),]))
+        Counters(Map::from([("a".to_string(), 1), ("b".to_string(), 2),]))
     );
 
     println!("The system state is now {:?}", state);

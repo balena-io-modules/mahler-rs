@@ -28,13 +28,12 @@
 //! the worker with a target state.
 //!
 //! ```rust,no_run
-//! use serde::{Deserialize, Serialize};
-//!
+//! use mahler::state::State;
 //! use mahler::worker::Worker;
 //! use mahler::task::prelude::*;
 //!
-//! #[derive(Serialize, Deserialize)]
-//! struct StateModel;
+//! #[derive(State)]
+//! struct MySystem;
 //!
 //! let mut worker = Worker::new()
 //!         // assign possible jobs to worker
@@ -42,7 +41,7 @@
 //!         .job("/{foo}", update(foo))
 //!         .job("/{foo}/{bar}", create(foo_bar))
 //!         // initialize the worker state
-//!         .initial_state(StateModel {/* .. */})
+//!         .initial_state(MySystem {/* .. */})
 //!         .unwrap();
 //!
 //! fn global() {}
@@ -51,7 +50,7 @@
 //!
 //! # tokio_test::block_on(async {
 //! // Control the system by providing a new target state
-//! worker.seek_target(StateModel { /* .. */ }).await.unwrap();
+//! worker.seek_target(MySystemTarget { /* .. */ }).await.unwrap();
 //! # })
 //! ```
 //!
@@ -88,15 +87,15 @@
 //! lost when passing data to the jobs.
 //!
 //! ```rust
-//! use serde::{Deserialize, Serialize};
+//! use mahler::state::State;
 //!
-//! #[derive(Serialize, Deserialize)]
-//! struct MySystemState {
+//! #[derive(State)]
+//! struct MySystem {
 //!     // can be accessed from jobs
 //!     some_value: String,
-//!   
+//!
 //!     // this will never be passed to jobs
-//!     #[serde(skip_serializing)]
+//!     #[mahler(internal)]
 //!     other_value: String,
 //! }
 //! ```
@@ -111,19 +110,19 @@
 //! restriction is that these structures must be `Send` and `Sync`.
 //!
 //! ```rust,no_run
-//! use serde::{Deserialize, Serialize};
-//! use mahler::worker::{Worker, Ready};
+//! use mahler::state::State;
+//! use mahler::worker::Worker;
 //!
-//! #[derive(Serialize, Deserialize)]
-//! struct MySystemState;
+//! #[derive(State)]
+//! struct MySystem;
 //!
 //! // MyConnection represents a shared resource
 //! struct MyConnection;
 //! let conn = MyConnection {/* .. */};
 //!
-//! let worker: Worker<MySystemState, Ready> = Worker::new()
+//! let worker = Worker::new()
 //!         .resource::<MyConnection>(conn)
-//!         .initial_state(MySystemState {/* .. */})
+//!         .initial_state(MySystem {/* .. */})
 //!         .unwrap();
 //! ```
 //!
@@ -147,10 +146,13 @@
 //! the planning/execution context is passed to the handler.
 //!
 //! ```rust
+//! use mahler::state::State;
 //! use mahler::extract::{View, Args, Target, System, Res};
 //!
 //! struct MyConnection;
-//! struct MySystemState;
+//!
+//! #[derive(State)]
+//! struct MySystem;
 //!
 //!  // `View` gives you a view into the relevant part of the
 //! // state for the handler.
@@ -169,7 +171,7 @@
 //!
 //! // `System` provides a view into the top level system state.
 //! // A Job using the System extractor cannot run concurrently to other jobs
-//! fn system(System(state): System<MySystemState>) {}
+//! fn system(System(state): System<MySystem>) {}
 //!
 //! // `Res` allows to access a shared resource
 //! fn res(res: Res<MyConnection>) {}
@@ -410,14 +412,46 @@
 //!
 //! When `debug_assertions` is enabled, mahler exposes two testing methods for [Worker](`worker::Worker`).
 //! - [find_workflow](`worker::Worker::find_workflow`) allows to generate a Workflow for a given
-//!   initial and target state. The workflow can be compared with a manually created [`Dag`] to
+//!   initial and target state. The workflow can be compared with a manually created [DAG](`workflow::Dag`) to
 //!   test against an expected plan.
 //! - [run_task](`worker::Worker::run_task`) allows to run a task in the context of a worker. This
 //!   may be helpful to diagnose any extraction/expansion errors with the task definition or for
 //!   debugging of a specific task.
-pub use mahler_core::state::State;
-pub use mahler_core::*;
+//!
+//! It also exposes the following workflow types and macros
+//! - [Dag](`workflow::Dag`) an DAG implementation used internally by mahler.
+//! - [dag](`workflow::dag`) a declarative macro to combine DAGs into branches
+//! - [seq](`workflow::seq`) a declarative macro to create a linear DAG from a list of values
+//! - [par](`workflow::par`) a declarative macro to create a branching DAG with single value
+//!   branches
+//!   
+//! These utils can be used for testing and comparing generated workflows with specific DAGs. See
+//! [find_workflow](`worker::Worker::find_workflow`) for more info.
+pub use mahler_core::errors;
+pub use mahler_core::extract;
+pub use mahler_core::task;
+pub use mahler_core::worker;
 
-#[cfg(feature = "derive")]
-#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
-pub use mahler_derive::*;
+pub mod workflow {
+    pub use mahler_core::workflow::Interrupt;
+
+    #[cfg(debug_assertions)]
+    pub use mahler_core::workflow::{Dag, Workflow};
+
+    #[cfg(debug_assertions)]
+    pub use mahler_core::{dag, par, seq};
+}
+
+pub mod state {
+    //! State trait and standardized serialization along with State procedural macro
+    //!
+    //! This module provides the State trait which defines how types are serialized
+    //! and deserialized in a standardized way, including the halted state.
+
+    pub use mahler_core::state::*;
+    pub use mahler_core::{list, map, set};
+
+    #[cfg(feature = "derive")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
+    pub use mahler_derive::*;
+}

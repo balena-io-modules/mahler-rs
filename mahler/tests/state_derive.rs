@@ -1,13 +1,10 @@
-use mahler::State;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use mahler::state::{list, List, Map, State};
 
 // Test the derive macro works for named fields
-#[derive(State, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(State, Debug, PartialEq)]
 struct Service {
     pub name: String,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
     pub port: u16,
@@ -17,12 +14,12 @@ struct Service {
     pub container_id: Option<String>,
 }
 
-// Test the derive macro works for tuple
-#[derive(State, Serialize, Deserialize, Debug, PartialEq)]
-struct Point(pub f64, pub f64);
+// Test the derive macro works for newtypes - single field tuple structs
+#[derive(State, Debug, PartialEq)]
+struct NewtypeId(pub u64);
 
 // Test the derive macro works for unit structs
-#[derive(State, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(State, Debug, PartialEq)]
 struct UnitState;
 
 fn to_target<T: State>(t: &T) -> Result<T::Target, serde_json::Error> {
@@ -48,13 +45,12 @@ fn test_named_fields() {
 }
 
 #[test]
-fn test_tuple_struct() {
-    let point = Point(1.0, 2.0);
+fn test_newtype_struct() {
+    let id = NewtypeId(42);
 
     // Test into_target conversion
-    let target = to_target(&point).unwrap();
-    assert_eq!(target.0, 1.0);
-    assert_eq!(target.1, 2.0);
+    let target = to_target(&id).unwrap();
+    assert_eq!(target.0, 42);
 }
 
 #[test]
@@ -90,7 +86,7 @@ fn test_serialization_compatibility() {
 }
 
 // Test nested State types
-#[derive(State, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(State, Debug, Clone, PartialEq)]
 struct DatabaseConfig {
     host: String,
     port: u16,
@@ -98,11 +94,11 @@ struct DatabaseConfig {
     connection_pool_size: Option<u32>,
 }
 
-#[derive(State, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(State, Debug, PartialEq)]
 struct ApplicationConfig {
     name: String,
     database: DatabaseConfig,
-    services: Vec<Service>,
+    services: List<Service>,
     backup_database: Option<DatabaseConfig>,
 }
 
@@ -115,7 +111,7 @@ fn test_nested_model_types() {
             port: 5432,
             connection_pool_size: Some(10),
         },
-        services: vec![
+        services: list![
             Service {
                 name: "web".to_string(),
                 image: Some("nginx".to_string()),
@@ -175,26 +171,17 @@ fn test_primitive_types_remain_unchanged() {
     assert_eq!(target.image, service.image); // Option<String> -> Option<String>
 }
 
-// Test enum support
-#[derive(State, Serialize, Deserialize, Debug, PartialEq, Clone)]
-enum Status {
-    Pending,
-    Running { pid: u32 },
-    Completed { exit_code: i32 },
-    Failed { error: String },
-}
-
-#[derive(State, Serialize, Deserialize, Debug, PartialEq, Clone)]
+// Test enum support - only unit variants allowed
+#[derive(State, Debug, PartialEq, Clone)]
 enum Priority {
     Low,
     Medium,
     High,
 }
 
-#[derive(State, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(State, Debug, PartialEq)]
 struct TaskConfig {
     name: String,
-    status: Status,
     priority: Priority,
     #[mahler(internal)]
     internal_id: Option<u64>,
@@ -202,25 +189,7 @@ struct TaskConfig {
 
 #[test]
 fn test_enum_model_support() {
-    let status1 = Status::Pending;
-    let status2 = Status::Running { pid: 1234 };
-    let status3 = Status::Completed { exit_code: 0 };
-    let status4 = Status::Failed {
-        error: "timeout".to_string(),
-    };
-
-    // Test that enum Target = Self (no transformation)
-    let target1 = to_target(&status1).unwrap();
-    let target2 = to_target(&status2).unwrap();
-    let target3 = to_target(&status3).unwrap();
-    let target4 = to_target(&status4).unwrap();
-
-    assert_eq!(target1, status1);
-    assert_eq!(target2, status2);
-    assert_eq!(target3, status3);
-    assert_eq!(target4, status4);
-
-    // Test simple enum
+    // Test simple enum with unit variants
     let priority = Priority::High;
     let target_priority = to_target(&priority).unwrap();
     assert_eq!(target_priority, priority);
@@ -230,7 +199,6 @@ fn test_enum_model_support() {
 fn test_struct_with_enum_fields() {
     let task = TaskConfig {
         name: "test-task".to_string(),
-        status: Status::Running { pid: 5678 },
         priority: Priority::High,
         internal_id: Some(999),
     };
@@ -241,7 +209,6 @@ fn test_struct_with_enum_fields() {
     assert_eq!(target.name, "test-task");
 
     // Enum fields should be unchanged (Target = Self for enums)
-    assert_eq!(target.status, Status::Running { pid: 5678 });
     assert_eq!(target.priority, Priority::High);
 
     // Internal field excluded
@@ -250,21 +217,19 @@ fn test_struct_with_enum_fields() {
 
 #[test]
 fn test_enum_serialization_compatibility() {
-    let status = Status::Failed {
-        error: "network error".to_string(),
-    };
-    let target = to_target(&status).unwrap();
+    let priority = Priority::Medium;
+    let target = to_target(&priority).unwrap();
 
     // Both should serialize identically since Target = Self for enums
-    let status_json = serde_json::to_value(&status).unwrap();
+    let priority_json = serde_json::to_value(&priority).unwrap();
     let target_json = serde_json::to_value(&target).unwrap();
 
-    assert_eq!(status_json, target_json);
+    assert_eq!(priority_json, target_json);
 }
 
 #[test]
-fn test_hashmap_model_support() {
-    let mut map: HashMap<String, i32> = HashMap::new();
+fn test_map_model_support() {
+    let mut map: Map<String, i32> = Map::new();
     map.insert("key1".to_string(), 100);
     map.insert("key2".to_string(), 200);
 
@@ -276,70 +241,9 @@ fn test_hashmap_model_support() {
 }
 
 #[test]
-fn test_btreemap_model_support() {
-    let mut map: BTreeMap<String, i32> = BTreeMap::new();
-    map.insert("alpha".to_string(), 1);
-    map.insert("beta".to_string(), 2);
-
-    let target = to_target(&map).unwrap();
-
-    assert_eq!(target.get("alpha"), Some(&1));
-    assert_eq!(target.get("beta"), Some(&2));
-    assert_eq!(target.len(), 2);
-}
-
-#[test]
-fn test_tuple_model_support() {
-    // Test unit tuple
-    let unit: () = ();
-    to_target(&unit).unwrap();
-
-    // Test single element tuple
-    let single: (i32,) = (42,);
-    let target_single = to_target(&single).unwrap();
-    assert_eq!(target_single, (42,));
-
-    // Test pair
-    let pair: (String, i32) = ("hello".to_string(), 42);
-    let target_pair = to_target(&pair).unwrap();
-    assert_eq!(target_pair, ("hello".to_string(), 42));
-
-    // Test triple
-    let triple: (String, i32, bool) = ("world".to_string(), 123, true);
-    let target_triple = to_target(&triple).unwrap();
-    assert_eq!(target_triple, ("world".to_string(), 123, true));
-
-    // Test large tuple (8 elements)
-    let large: (i32, String, bool, f64, u16, char, i8, u32) = (
-        1,
-        "test".to_string(),
-        false,
-        std::f64::consts::PI,
-        500,
-        'x',
-        -5,
-        999,
-    );
-    let target_large = to_target(&large).unwrap();
-    assert_eq!(
-        target_large,
-        (
-            1,
-            "test".to_string(),
-            false,
-            std::f64::consts::PI,
-            500,
-            'x',
-            -5,
-            999
-        )
-    );
-}
-
-#[test]
 fn test_nested_collections_model_support() {
     // Test HashMap with State values
-    let mut services: HashMap<String, Service> = HashMap::new();
+    let mut services: Map<String, Service> = Map::new();
     services.insert(
         "web".to_string(),
         Service {
@@ -372,71 +276,42 @@ fn test_nested_collections_model_support() {
 }
 
 #[test]
-fn test_tuple_with_model_types() {
-    let config = (
-        "app-config".to_string(),
-        Service {
-            name: "main-service".to_string(),
-            image: Some("alpine".to_string()),
-            port: 8080,
-            container_id: Some("main789".to_string()),
-        },
-        42u16,
-    );
-
-    let target = to_target(&config).unwrap();
-
-    assert_eq!(target.0, "app-config");
-    assert_eq!(target.1.name, "main-service");
-    assert_eq!(target.1.port, 8080);
-    assert_eq!(target.2, 42);
-}
-
-#[test]
-fn test_serde_attribute_propagation() {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(State, Serialize, Deserialize, Debug, Clone)]
-    #[serde(rename_all = "camelCase")]
-    struct ConfigWithSerde {
+fn test_basic_serialization() {
+    #[derive(State, Debug, Clone)]
+    struct Config {
         database_host: String,
         api_endpoint: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         optional_field: Option<String>,
         #[mahler(internal)]
         internal_connection: String,
     }
 
-    let original = ConfigWithSerde {
+    let original = Config {
         database_host: "localhost".to_string(),
         api_endpoint: "https://api.example.com".to_string(),
         optional_field: None,
         internal_connection: "connection_pool".to_string(),
     };
 
-    let target = ConfigWithSerdeTarget {
+    let target = ConfigTarget {
         database_host: "localhost".to_string(),
         api_endpoint: "https://api.example.com".to_string(),
         optional_field: None,
     };
 
-    // Test serialization with camelCase attribute
+    // Test serialization
     let original_json = serde_json::to_string(&original).unwrap();
     let target_json = serde_json::to_string(&target).unwrap();
 
-    // Both should serialize with camelCase due to the serde attribute
-    assert!(original_json.contains("databaseHost"));
-    assert!(original_json.contains("apiEndpoint"));
-    assert!(target_json.contains("databaseHost"));
-    assert!(target_json.contains("apiEndpoint"));
-
-    // Test that field-level serde attributes work
-    assert!(!target_json.contains("optionalField")); // Should be skipped when None
+    assert!(original_json.contains("database_host"));
+    assert!(original_json.contains("api_endpoint"));
+    assert!(target_json.contains("database_host"));
+    assert!(target_json.contains("api_endpoint"));
 }
 
 #[test]
 fn test_mahler_derive_attribute() {
-    #[derive(State, Serialize, Deserialize)]
+    #[derive(State)]
     #[mahler(derive(PartialEq, Eq))]
     struct Database {
         host: String,
@@ -471,4 +346,121 @@ fn test_mahler_derive_attribute() {
         port: 5432,
     };
     assert_eq!(target, target2);
+}
+
+#[test]
+fn test_option_default_deserialization() {
+    #[derive(State, Debug, PartialEq)]
+    struct Config {
+        name: String,
+        port: Option<u16>,
+        host: Option<String>,
+        enabled: Option<bool>,
+    }
+
+    // Test deserialization with missing Option fields
+    let json_str = r#"{"name": "test", "port": 8080}"#;
+    let config: Config = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(config.name, "test");
+    assert_eq!(config.port, Some(8080));
+    assert_eq!(config.host, None); // Should default to None
+    assert_eq!(config.enabled, None); // Should default to None
+
+    // Test with all fields present
+    let json_str2 = r#"{"name": "prod", "port": 3000, "host": "localhost", "enabled": true}"#;
+    let config2: Config = serde_json::from_str(json_str2).unwrap();
+
+    assert_eq!(config2.name, "prod");
+    assert_eq!(config2.port, Some(3000));
+    assert_eq!(config2.host, Some("localhost".to_string()));
+    assert_eq!(config2.enabled, Some(true));
+}
+
+#[test]
+fn test_option_skip_none_serialization() {
+    #[derive(State, Debug)]
+    struct Settings {
+        title: String,
+        description: Option<String>,
+        count: Option<i32>,
+    }
+
+    // Test that None values are skipped in serialization
+    let settings = Settings {
+        title: "Test".to_string(),
+        description: Some("A test".to_string()),
+        count: None,
+    };
+
+    let json = serde_json::to_value(&settings).unwrap();
+
+    assert_eq!(json.get("title"), Some(&serde_json::json!("Test")));
+    assert_eq!(json.get("description"), Some(&serde_json::json!("A test")));
+    assert_eq!(json.get("count"), None); // Should be skipped, not null
+
+    // Test with all None
+    let settings2 = Settings {
+        title: "Empty".to_string(),
+        description: None,
+        count: None,
+    };
+
+    let json2 = serde_json::to_value(&settings2).unwrap();
+
+    assert_eq!(json2.get("title"), Some(&serde_json::json!("Empty")));
+    assert_eq!(json2.get("description"), None); // Skipped
+    assert_eq!(json2.get("count"), None); // Skipped
+}
+
+#[test]
+fn test_option_skip_none_as_internal() {
+    use mahler::state::AsInternal;
+
+    #[derive(State, Debug)]
+    struct Config {
+        name: String,
+        host: Option<String>,
+        port: Option<u16>,
+        timeout: Option<i32>,
+    }
+
+    // Test that None values are skipped in as_internal serialization
+    let config = Config {
+        name: "app".to_string(),
+        host: Some("localhost".to_string()),
+        port: None,
+        timeout: None,
+    };
+
+    let json = serde_json::to_value(AsInternal(&config)).unwrap();
+
+    // as_internal adds "__mahler(halted)" field
+    assert_eq!(
+        json.get("__mahler(halted)"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(json.get("name"), Some(&serde_json::json!("app")));
+    assert_eq!(json.get("host"), Some(&serde_json::json!("localhost")));
+    assert_eq!(json.get("port"), None); // Should be skipped
+    assert_eq!(json.get("timeout"), None); // Should be skipped
+
+    // Test with all None
+    let config2 = Config {
+        name: "test".to_string(),
+        host: None,
+        port: None,
+        timeout: None,
+    };
+
+    let json2 = serde_json::to_value(AsInternal(&config2)).unwrap();
+
+    assert_eq!(
+        json2.get("__mahler(halted)"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(json2.get("name"), Some(&serde_json::json!("test")));
+    assert_eq!(json2.get("host"), None); // Skipped
+    assert_eq!(json2.get("port"), None); // Skipped
+    assert_eq!(json2.get("timeout"), None); // Skipped
 }

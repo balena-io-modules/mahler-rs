@@ -10,13 +10,13 @@ use crate::task::{Context, FromContext, FromSystem};
 ///
 /// ```rust,no_run
 /// use mahler::{
+///     state::State,
 ///     extract::Path,
 ///     task::{Handler, update},
 ///     worker::{Worker, Ready}
 /// };
-/// use serde::{Serialize, Deserialize};
 ///
-/// #[derive(Serialize,Deserialize)]
+/// #[derive(State)]
 /// struct SystemState {/* ... */};
 ///
 /// fn foo_bar(Path(path): Path) {

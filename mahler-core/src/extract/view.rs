@@ -28,12 +28,13 @@ use crate::task::{Context, Error, FromSystem, IntoResult};
 ///
 /// ```rust,no_run
 /// use mahler::{
+///     state::State,
 ///     extract::View,
 ///     task::{Handler, create, update, with_io, IO},
 ///     worker::{Worker, Ready}
 /// };
-/// use serde::{Serialize, Deserialize};
-/// #[derive(Serialize,Deserialize)]
+///
+/// #[derive(State)]
 /// struct SystemState {/* ... */};
 ///
 /// fn foo_bar(mut view: View<i32>) -> IO<i32> {
@@ -239,6 +240,7 @@ impl<T: Serialize> IntoResult<Patch> for View<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::State;
     use crate::system::System;
     use json_patch::Patch;
     use pretty_assertions::assert_eq;
@@ -247,13 +249,21 @@ mod tests {
     use std::collections::HashMap;
 
     #[derive(Serialize, Deserialize, Debug)]
-    struct State {
+    struct MyState {
         numbers: HashMap<String, i32>,
+    }
+
+    impl State for MyState {
+        type Target = Self;
     }
 
     #[derive(Serialize, Deserialize)]
     struct StateVec {
         numbers: Vec<String>,
+    }
+
+    impl State for StateVec {
+        type Target = Self;
     }
 
     #[test]
@@ -262,7 +272,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 
@@ -292,7 +302,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 
@@ -313,7 +323,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 
@@ -341,7 +351,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 
@@ -366,7 +376,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 
@@ -384,7 +394,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 
@@ -413,7 +423,7 @@ mod tests {
         numbers.insert("one".to_string(), 1);
         numbers.insert("two".to_string(), 2);
 
-        let state = State { numbers };
+        let state = MyState { numbers };
 
         let system = System::try_from(state).unwrap();
 

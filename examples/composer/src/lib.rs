@@ -3,18 +3,17 @@ use bollard::container::{CreateContainerOptions, StartContainerOptions};
 use bollard::secret::{ContainerInspectResponse, ContainerState, ContainerStateStatusEnum};
 use futures_util::stream::StreamExt;
 use mahler::worker::{Uninitialized, Worker};
-use mahler::State;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use thiserror::Error;
 
 use bollard::image::CreateImageOptions;
 use bollard::Docker;
 
 use mahler::extract::{Args, Res, System, Target, View};
+use mahler::state::{List, Map, State};
 use mahler::task::prelude::*;
 
-#[derive(State, Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Default)]
+#[derive(State, Debug, PartialEq, Eq, Clone, Default)]
 pub enum ServiceStatus {
     #[default]
     Created,
@@ -22,33 +21,27 @@ pub enum ServiceStatus {
     Stopped,
 }
 
-fn default_status() -> Option<ServiceStatus> {
-    Some(ServiceStatus::default())
-}
-
 impl From<ServiceTarget> for bollard::container::Config<String> {
     fn from(tgt: ServiceTarget) -> bollard::container::Config<String> {
         bollard::container::Config {
-            image: tgt.image,
-            cmd: tgt.cmd,
+            image: Some(tgt.image),
+            cmd: tgt.cmd.map(|list| list.into()),
             ..Default::default()
         }
     }
 }
 
-#[derive(State, Serialize, Deserialize, Debug, Clone)]
+#[derive(State, Debug, Clone)]
 pub struct Service {
     /// Container id for the service
     #[mahler(internal)]
     pub id: Option<String>,
 
     //// Image URL
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
+    pub image: String,
 
     /// Service status
-    #[serde(skip_serializing_if = "Option::is_none", default = "default_status")]
-    pub status: Option<ServiceStatus>,
+    pub status: ServiceStatus,
 
     /// Container creation date, not used as part
     /// of the target state
@@ -65,20 +58,19 @@ pub struct Service {
     pub finished_at: Option<String>,
 
     /// Container command configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cmd: Option<Vec<String>>,
+    pub cmd: Option<List<String>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct ServiceConfig {
     pub image: Option<String>,
-    pub cmd: Option<Vec<String>>,
+    pub cmd: Option<List<String>>,
 }
 
 impl From<ServiceTarget> for ServiceConfig {
     fn from(tgt: ServiceTarget) -> Self {
         Self {
-            image: tgt.image,
+            image: Some(tgt.image),
             cmd: tgt.cmd,
         }
     }
@@ -87,7 +79,7 @@ impl From<ServiceTarget> for ServiceConfig {
 impl From<Service> for ServiceConfig {
     fn from(svc: Service) -> Self {
         Self {
-            image: svc.image,
+            image: Some(svc.image),
             cmd: svc.cmd,
         }
     }
@@ -139,12 +131,12 @@ impl From<ContainerInspectResponse> for Service {
 
         Self {
             id,
-            image,
-            status,
+            image: image.expect("should not be nil"),
+            status: status.expect("should not be nil"),
             created_at,
             started_at,
             finished_at,
-            cmd,
+            cmd: cmd.map(|vec| vec.into()),
         }
     }
 }
@@ -174,25 +166,25 @@ pub struct Image {
     pub id: Option<String>,
 }
 
-#[derive(State, Serialize, Deserialize, Debug, Clone)]
+#[derive(State, Debug, Clone)]
 pub struct Project {
     /// Project name
     pub name: String,
 
     /// List of project services
-    pub services: HashMap<String, Service>,
+    pub services: Map<String, Service>,
 
     /// List of managed images
     #[mahler(internal)]
-    pub images: HashMap<String, Image>,
+    pub images: Map<String, Image>,
 }
 
 impl Project {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            services: HashMap::new(),
-            images: HashMap::new(),
+            services: Map::new(),
+            images: Map::new(),
         }
     }
 }
@@ -287,11 +279,7 @@ fn remove_image(
     docker: Res<Docker>,
 ) -> IO<Option<Image>, RemoveImageError> {
     // only remove the image if it not being used by any service
-    if project
-        .services
-        .values()
-        .any(|s| s.image.as_ref() == Some(&image_name))
-    {
+    if project.services.values().any(|s| s.image == image_name) {
         return img_ptr.into();
     }
 
@@ -315,19 +303,13 @@ fn remove_image(
 /// Pull an image from the registry, this task is applicable to
 /// the creation of a service, as pulling an image is only needed
 /// in that case.
-fn fetch_service_image(Target(tgt): Target<ServiceTarget>) -> Option<Task> {
-    tgt.image.map(|img| fetch_image.with_arg("image_name", img))
+fn fetch_service_image(Target(tgt): Target<Service>) -> Task {
+    fetch_image.with_arg("image_name", tgt.image)
 }
 
-async fn image_matches_with_target(
-    docker: &Docker,
-    tgt_img: &Option<String>,
-    img_id: &Option<String>,
-) -> bool {
-    if let Some(img) = tgt_img {
-        if let Ok(info) = docker.inspect_image(img).await {
-            return &info.id == img_id;
-        }
+async fn image_matches_with_target(docker: &Docker, tgt_img: &str, img_id: &str) -> bool {
+    if let Ok(info) = docker.inspect_image(tgt_img).await {
+        return info.id == Some(img_id.to_string());
     }
 
     false
@@ -346,18 +328,18 @@ fn install_service(
     mut svc_ptr: View<Option<Service>>,
     Args(service_name): Args<String>,
     System(project): System<Project>,
-    Target(tgt): Target<ServiceTarget>,
+    Target(tgt): Target<Service>,
     docker: Res<Docker>,
 ) -> IO<Option<Service>, InstallServiceError> {
     let tgt_img = tgt.image.clone();
-    let local_img = tgt_img.as_ref().and_then(|img| project.images.get(img));
+    let local_img = project.images.get(&tgt_img);
 
     // If the image has already been downloaded then
     // simulate the service install
     if local_img.is_some() {
         svc_ptr.replace(Service {
             // The status should be 'Created' after install
-            status: Some(ServiceStatus::Created),
+            status: ServiceStatus::Created,
             // The rest of the fields should be the same
             ..tgt.clone().into()
         });
@@ -441,7 +423,7 @@ pub struct StartServiceError(#[from] anyhow::Error);
 fn start_service(
     mut svc_view: View<Service>,
     Args(service_name): Args<String>,
-    Target(tgt): Target<ServiceTarget>,
+    Target(tgt): Target<Service>,
     docker: Res<Docker>,
 ) -> IO<Service, StartServiceError> {
     let svc_config = ServiceConfig::from(svc_view.clone());
@@ -449,8 +431,8 @@ fn start_service(
     let tgt_config = ServiceConfig::from(tgt);
 
     // If configurations match, then update the service status
-    if tgt_config == svc_config && !matches!(svc_view.status, Some(ServiceStatus::Running)) {
-        svc_view.status = Some(ServiceStatus::Running);
+    if tgt_config == svc_config && !matches!(svc_view.status, ServiceStatus::Running) {
+        svc_view.status = ServiceStatus::Running;
     }
 
     with_io(svc_view, |mut svc_view| async move {
@@ -496,13 +478,13 @@ pub struct StopServiceError(#[from] anyhow::Error);
 fn stop_service(
     mut svc_view: View<Service>,
     Args(service_name): Args<String>,
-    Target(tgt): Target<ServiceTarget>,
+    Target(tgt): Target<Service>,
     docker: Res<Docker>,
 ) -> IO<Service, StartServiceError> {
     let tgt_img = tgt.image.clone();
 
-    if matches!(svc_view.status, Some(ServiceStatus::Running)) {
-        svc_view.status = Some(ServiceStatus::Stopped);
+    if matches!(svc_view.status, ServiceStatus::Running) {
+        svc_view.status = ServiceStatus::Stopped;
     }
 
     with_io(svc_view, |mut svc_view| async move {
@@ -553,7 +535,7 @@ fn uninstall_service(
 ) -> IO<Option<Service>, StartServiceError> {
     if svc_ptr
         .as_ref()
-        .is_none_or(|svc| matches!(svc.status, Some(ServiceStatus::Running)))
+        .is_none_or(|svc| matches!(svc.status, ServiceStatus::Running))
     {
         // do nothing if the service is still running
         return svc_ptr.into();
@@ -588,17 +570,15 @@ fn uninstall_service(
 }
 
 /// Recreate the service on configuration change
-fn update_service(svc_view: View<Service>, Target(tgt): Target<ServiceTarget>) -> Vec<Task> {
+fn update_service(svc_view: View<Service>, Target(tgt): Target<Service>) -> Vec<Task> {
     let mut tasks = Vec::new();
     if svc_view.image != tgt.image {
         tasks.push(fetch_service_image.with_target(tgt.clone()));
         tasks.push(stop_and_uninstall_service.into_task());
         tasks.push(install_service.with_target(tgt));
 
-        if let Some(img_name) = svc_view.image.as_ref() {
-            // Remove the existing image
-            tasks.push(remove_image.with_arg("image_name", img_name));
-        }
+        // Remove the existing image
+        tasks.push(remove_image.with_arg("image_name", &svc_view.image));
     }
     tasks
 }
@@ -610,7 +590,7 @@ fn update_service(svc_view: View<Service>, Target(tgt): Target<ServiceTarget>) -
 /// Action: remove the container
 fn stop_and_uninstall_service(svc_view: View<Service>) -> Vec<Task> {
     let mut actions = vec![];
-    if matches!(svc_view.status, Some(ServiceStatus::Running)) {
+    if matches!(svc_view.status, ServiceStatus::Running) {
         actions.push(stop_service.with_target(ServiceTarget::from(svc_view.to_owned())));
     }
 
@@ -621,17 +601,15 @@ fn stop_and_uninstall_service(svc_view: View<Service>) -> Vec<Task> {
 
 /// Remove the service and its image
 fn purge_service(svc_view: View<Service>) -> Vec<Task> {
-    let mut actions = vec![];
-    actions.push(stop_and_uninstall_service.into_task());
-
-    if let Some(ref image) = svc_view.image {
-        actions.push(remove_image.with_arg("image_name", image));
-    }
+    let actions = vec![
+        stop_and_uninstall_service.into_task(),
+        remove_image.with_arg("image_name", &svc_view.image),
+    ];
 
     actions
 }
 
-pub fn create_worker() -> Worker<Project, Uninitialized, ProjectTarget> {
+pub fn create_worker() -> Worker<Project, Uninitialized> {
     // Initialize the connection
     let docker = Docker::connect_with_defaults().unwrap();
 
@@ -676,9 +654,11 @@ pub fn create_worker() -> Worker<Project, Uninitialized, ProjectTarget> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use bollard::container::{ListContainersOptions, RemoveContainerOptions};
     use mahler::worker::SeekStatus;
-    use mahler::{dag, seq, Dag};
+    use mahler::workflow::{dag, seq, Dag};
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use tracing_subscriber::fmt::{self, format::FmtSpan};
@@ -1015,7 +995,8 @@ mod tests {
             "services": {
                 "my-service": {
                     "image": "docker.io/library/alpine:3.18",
-                    "cmd": ["sleep", "infinity"]
+                    "cmd": ["sleep", "infinity"],
+                    "status": "Created",
                 }
             }
         }))
