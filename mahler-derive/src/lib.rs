@@ -216,6 +216,17 @@ fn is_option_type(ty: &syn::Type) -> bool {
     false
 }
 
+/// Check if a type is a collection type (List, Set, or Map)
+fn is_collection_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            let ident = &segment.ident;
+            return ident == "List" || ident == "Set" || ident == "Map";
+        }
+    }
+    false
+}
+
 // ============================================================================
 // Code generation functions
 // ============================================================================
@@ -307,14 +318,14 @@ fn generate_deserialize_impl(
     let field_strs: Vec<_> = field_names.iter().map(|n| n.to_string()).collect();
     let struct_name_str = struct_name.to_string();
 
-    // Generate field assignments based on whether they're Option types
+    // Generate field assignments based on whether they're Option or collection types
     let field_assignments: Vec<_> = relevant_fields
         .iter()
         .filter_map(|field| {
             let field_name = field.ident.as_ref()?;
             let field_str = field_name.to_string();
 
-            if is_option_type(&field.ty) {
+            if is_option_type(&field.ty) || is_collection_type(&field.ty) {
                 Some(quote! {
                     #field_name: #field_name.unwrap_or_default()
                 })
