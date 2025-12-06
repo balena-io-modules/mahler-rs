@@ -29,7 +29,7 @@ use super::{AsInternal, State, StateDeserializer};
 ///     items: list!["a".to_string(), "b".to_string()],
 /// };
 /// ```
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct List<T>(Vec<T>);
 
 impl<T> List<T> {
@@ -41,6 +41,12 @@ impl<T> List<T> {
     /// Unwraps the List into the inner Vec.
     pub fn into_inner(self) -> Vec<T> {
         self.0
+    }
+}
+
+impl<T> Default for List<T> {
+    fn default() -> Self {
+        List(Vec::new())
     }
 }
 
@@ -201,8 +207,14 @@ impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for ListVisitor<T>
 ///     tags: set!["tag1".to_string(), "tag2".to_string()],
 /// };
 /// ```
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Set<T: Ord>(BTreeSet<T>);
+
+impl<T: Ord> Default for Set<T> {
+    fn default() -> Self {
+        Set(BTreeSet::new())
+    }
+}
 
 impl<T: Ord> Set<T> {
     /// Creates a new empty Set.
@@ -355,8 +367,14 @@ impl<'de, T: serde::Deserialize<'de> + Ord> serde::de::Visitor<'de> for SetVisit
 ///     ],
 /// };
 /// ```
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Map<K: Ord, V>(BTreeMap<K, V>);
+
+impl<K: Ord, V> Default for Map<K, V> {
+    fn default() -> Self {
+        Map(BTreeMap::new())
+    }
+}
 
 impl<K: Ord + fmt::Debug, V: fmt::Debug> fmt::Debug for Map<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

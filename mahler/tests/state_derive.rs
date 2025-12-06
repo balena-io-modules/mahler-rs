@@ -464,3 +464,46 @@ fn test_option_skip_none_as_internal() {
     assert_eq!(json2.get("port"), None); // Skipped
     assert_eq!(json2.get("timeout"), None); // Skipped
 }
+
+#[test]
+fn test_collection_default_deserialization() {
+    use mahler::state::{List, Map, Set};
+
+    #[derive(State, Debug, PartialEq)]
+    struct AppConfig {
+        name: String,
+        services: List<String>,
+        tags: Set<String>,
+        env: Map<String, String>,
+    }
+
+    // Test deserialization with missing collection fields
+    let json_str = r#"{"name": "my-app"}"#;
+    let config: AppConfig = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(config.name, "my-app");
+    assert_eq!(config.services, List::new()); // Should default to empty
+    assert_eq!(config.tags, Set::new()); // Should default to empty
+    assert_eq!(config.env, Map::new()); // Should default to empty
+    assert!(config.services.is_empty());
+    assert!(config.tags.is_empty());
+    assert!(config.env.is_empty());
+
+    // Test with all fields present
+    let json_str2 = r#"{
+        "name": "prod-app",
+        "services": ["web", "api"],
+        "tags": ["production", "v1"],
+        "env": {"PORT": "8080", "HOST": "localhost"}
+    }"#;
+    let config2: AppConfig = serde_json::from_str(json_str2).unwrap();
+
+    assert_eq!(config2.name, "prod-app");
+    assert_eq!(config2.services.len(), 2);
+    assert!(config2.services.contains(&"web".to_string()));
+    assert!(config2.services.contains(&"api".to_string()));
+    assert_eq!(config2.tags.len(), 2);
+    assert!(config2.tags.contains(&"production".to_string()));
+    assert_eq!(config2.env.len(), 2);
+    assert_eq!(config2.env.get("PORT"), Some(&"8080".to_string()));
+}
