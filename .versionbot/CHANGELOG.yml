@@ -1,4 +1,24 @@
 - commits:
+    - subject: Deserialize defaults for state collections
+      hash: 6782525689cd40408dff16272ae7121b3f8f8cac
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Fix Default implementation for collections
+      hash: 57084948c358d6f3c72602cebd3996d3be992bc0
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.22.1
+  title: ""
+  date: 2025-12-06T06:43:14.922Z
+- commits:
     - subject: Return information about ignored paths with the Workflow
       hash: 930e26b62834a49a761d2fa172e958c59b64c1c8
       body: |
