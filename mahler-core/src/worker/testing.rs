@@ -3,9 +3,9 @@ use thiserror::Error;
 
 use super::{Ready, Uninitialized, Worker, WorkerState};
 use crate::planner::{Domain, Error as PlannerError, Planner};
+use crate::runtime::{Context, Error as TaskError, Resources, System};
 use crate::state::State;
-use crate::system::{Resources, System};
-use crate::task::{self, Context, Task};
+use crate::task::Task;
 use crate::workflow::Workflow;
 
 #[derive(Debug, Error)]
@@ -95,7 +95,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
         &self,
         mut task: Task,
         system: &mut System,
-    ) -> Result<(), task::Error> {
+    ) -> Result<(), TaskError> {
         let task_id = task.id().to_string();
         let Context { args, .. } = task.context_mut();
 
@@ -167,7 +167,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     ///
     /// # Panics
     /// This function will panic if a sewrialization or internal error happens during execution
-    pub async fn run_task(&self, initial_state: O, mut task: Task) -> Result<O, task::Error>
+    pub async fn run_task(&self, initial_state: O, mut task: Task) -> Result<O, TaskError>
     where
         O: Serialize + DeserializeOwned,
     {

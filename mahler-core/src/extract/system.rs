@@ -2,8 +2,7 @@ use anyhow::Context as AnyhowCtx;
 use serde::de::DeserializeOwned;
 
 use crate::errors::ExtractionError;
-use crate::system::System as SystemState;
-use crate::task::{Context, FromSystem};
+use crate::runtime::{Context, FromSystem, System as SystemState};
 
 /// Extracts the global system state managed by the [Worker](`crate::worker::Worker`)
 ///

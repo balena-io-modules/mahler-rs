@@ -1,8 +1,10 @@
-use super::context::Context;
+use std::cmp::Ordering;
+
+use crate::runtime::Context;
+
 use super::description::Description;
 use super::handler::Handler;
 use super::Task;
-use std::cmp::Ordering;
 
 #[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Clone)]
 /// The operation a Job is applicable to

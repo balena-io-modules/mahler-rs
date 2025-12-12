@@ -12,8 +12,8 @@ use std::ops::{Deref, DerefMut};
 
 use crate::errors::ExtractionError;
 use crate::path::Path;
-use crate::system::System;
-use crate::task::{Context, Error, FromSystem, IntoResult};
+use crate::runtime::{Context, Error, FromSystem, System};
+use crate::task::IntoResult;
 
 /// Extracts a view to a sub-element of the global state indicated
 /// by the path.
@@ -240,8 +240,9 @@ impl<T: Serialize> IntoResult<Patch> for View<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::System;
     use crate::state::State;
-    use crate::system::System;
+
     use json_patch::Patch;
     use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};

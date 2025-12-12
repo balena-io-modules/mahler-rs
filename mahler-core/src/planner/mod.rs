@@ -12,9 +12,9 @@ use tracing::{error, field, instrument, trace, trace_span, warn, Span};
 
 use crate::errors::{InternalError, MethodError, SerializationError};
 use crate::path::Path;
+use crate::runtime::{Context, Error as TaskError, System};
 use crate::state::{AsInternal, State};
-use crate::system::System;
-use crate::task::{self, Context, Operation, Task};
+use crate::task::{Operation, Task};
 use crate::workflow::{Dag, WorkUnit, Workflow};
 
 mod distance;
@@ -32,7 +32,7 @@ enum SearchFailed {
     BadMethod(#[from] PathSearchError),
 
     #[error("task error: {0:?}")]
-    BadTask(#[from] task::Error),
+    BadTask(#[from] TaskError),
 
     #[error("task not applicable")]
     EmptyTask,
@@ -172,7 +172,7 @@ pub(crate) enum Error {
     Serialization(#[from] SerializationError),
 
     #[error(transparent)]
-    Task(#[from] task::Error),
+    Task(#[from] TaskError),
 
     #[error("workflow not found")]
     NotFound,
@@ -430,7 +430,7 @@ impl Planner {
 
                                 // Non-critical errors are ignored (loop, empty, condition failure)
                                 Err(SearchFailed::EmptyTask)
-                                | Err(SearchFailed::BadTask(task::Error::ConditionFailed)) => {}
+                                | Err(SearchFailed::BadTask(TaskError::ConditionFailed)) => {}
 
                                 // Critical internal errors terminate the search
                                 Err(SearchFailed::Internal(err)) => {
@@ -441,7 +441,7 @@ impl Planner {
                                 Err(SearchFailed::BadMethod(err)) => {
                                     let err = MethodError::new(err);
                                     if cfg!(debug_assertions) {
-                                        return Err(task::Error::from(err))?;
+                                        return Err(TaskError::from(err))?;
                                     }
                                     warn!(
                                         parent: &find_workflow_span,
@@ -596,18 +596,21 @@ impl Planner {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     use pretty_assertions::assert_eq;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::collections::HashMap;
     use std::fmt::Display;
 
-    use super::*;
-    use crate::extract::{Args, System, Target, View};
-    use crate::state::{AsInternal, Map, State};
-    use crate::{dag, par, seq, task::*, workflow::Dag};
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
+
+    use crate::extract::{Args, System, Target, View};
+    use crate::state::{AsInternal, Map, State};
+    use crate::task;
+    use crate::{dag, par, seq, task::*, workflow::Dag};
 
     fn init() {
         tracing_subscriber::registry()
@@ -670,7 +673,7 @@ mod tests {
         let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
         let system =
-            crate::system::System::try_from(cur).expect("failed to serialize current state");
+            crate::runtime::System::try_from(cur).expect("failed to serialize current state");
 
         let res = planner.find_workflow::<T>(&system, &tgt)?;
         Ok(res)
