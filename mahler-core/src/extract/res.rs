@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use crate::errors::ExtractionError;
-use crate::system::System;
-use crate::task::{Context, FromSystem};
+use crate::runtime::{Context, FromSystem, System};
 
 /// Extracts a shared system resource
 ///

@@ -4,11 +4,11 @@ use json_patch::Patch;
 use serde::Serialize;
 
 use super::effect::Effect;
-use super::errors::Error;
 use super::into_result::IntoResult;
 
 use crate::errors::IOError;
 use crate::extract::View;
+use crate::runtime::Error;
 
 /// A type representing a lazy I/O operation producing a value of type `T` or an error of type `E`.
 ///

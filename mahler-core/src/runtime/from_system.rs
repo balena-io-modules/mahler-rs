@@ -1,7 +1,6 @@
-use crate::task::Error;
-
-use super::System;
-use crate::task::Context;
+use super::context::Context;
+use super::error::Error;
+use super::system::System;
 
 /// Trait for types that can be initialized from a system state and a given context
 ///

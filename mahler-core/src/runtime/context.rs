@@ -1,7 +1,6 @@
 use jsonptr::{PointerBuf, Token};
 use serde_json::Value;
 
-use super::errors::Error;
 use crate::path::{Path, PathArgs};
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
@@ -55,16 +54,4 @@ impl Context {
                 .collect::<Vec<(&str, String)>>(),
         )
     }
-}
-
-/// Trait for types that can be initialized from a context
-///
-/// See [`crate::extract`] for more info.
-///
-/// Types created from the context do not need to know the runtime state of the system and only use
-/// the task configuration for initialization. They can be used on this crate to create a task [description](`super::Description`).
-pub trait FromContext: Sized {
-    type Error: Into<Error> + 'static;
-
-    fn from_context(context: &Context) -> Result<Self, Self::Error>;
 }

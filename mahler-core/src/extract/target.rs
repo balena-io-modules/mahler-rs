@@ -3,9 +3,8 @@ use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
 use crate::errors::ExtractionError;
+use crate::runtime::{Context, FromContext, FromSystem, System};
 use crate::state::State;
-use crate::system::System;
-use crate::task::{Context, FromContext, FromSystem};
 
 /// Extracts the target state for tasks created from the job handler
 ///

@@ -1,8 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use crate::errors::ExtractionError;
-use crate::system::System;
-use crate::task::{Context, FromContext, FromSystem};
+use crate::runtime::{Context, FromContext, FromSystem, System};
 
 /// Extracts the full path that the Task is being applied to
 ///

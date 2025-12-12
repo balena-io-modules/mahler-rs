@@ -24,9 +24,9 @@ pub use testing::*;
 
 use crate::errors::{IOError, InternalError, SerializationError};
 use crate::planner::{Domain, Error as PlannerError, Planner};
+use crate::runtime::{Error as TaskError, Resources, System};
 use crate::state::State;
-use crate::system::{Resources, System};
-use crate::task::{Error as TaskError, Job};
+use crate::task::Job;
 use crate::workflow::{channel, AggregateError, AutoInterrupt, Interrupt, Sender, WorkflowStatus};
 
 /// A panic happened in the Worker runtime
