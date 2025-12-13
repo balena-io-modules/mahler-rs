@@ -1,4 +1,4 @@
-use thiserror::Error;
+use std::fmt;
 use tokio::sync::{mpsc, oneshot};
 
 /// A message wrapped with an acknowledgment channel
@@ -60,9 +60,16 @@ impl<T> Sender<T> {
 }
 
 /// Possible errors when sending
-#[derive(Debug, Error)]
-#[error("send failed")]
+#[derive(Debug)]
 pub struct SendError;
+
+impl fmt::Display for SendError {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(fmt, "send error")
+    }
+}
+
+impl std::error::Error for SendError {}
 
 /// Create a new acknowledged channel
 pub fn channel<T>(capacity: usize) -> (Sender<T>, mpsc::Receiver<WithAck<T>>) {

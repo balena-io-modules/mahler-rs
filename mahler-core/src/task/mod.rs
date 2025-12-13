@@ -14,9 +14,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::errors::SerializationError;
 use crate::path::Path;
-use crate::runtime::{Context, Error, System};
+use crate::result::Result;
+use crate::runtime::{Context, System};
 
 pub(crate) use into_result::*;
 
@@ -33,11 +33,11 @@ pub mod prelude {
     pub use super::Task;
 }
 
-type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
-type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch, Error> + Send + Sync>;
+type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
+type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
 type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
-type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>, Error> + Send + Sync>;
-type Describe = Arc<dyn Fn(&Context) -> Result<String, Error> + Send + Sync>;
+type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>> + Send + Sync>;
+type Describe = Arc<dyn Fn(&Context) -> Result<String> + Send + Sync>;
 
 #[derive(Clone)]
 /// An atomic task
@@ -121,13 +121,13 @@ impl Action {
     }
 
     /// Run the task on the system and return a list of changes
-    pub(crate) async fn run(&self, system: &System) -> Result<Patch, Error> {
+    pub(crate) async fn run(&self, system: &System) -> Result<Patch> {
         let Action { context, run, .. } = self;
         (run)(system, context).await
     }
 
     /// Simulate the effect of the task on the system
-    pub(crate) fn dry_run(&self, system: &System) -> Result<Patch, Error> {
+    pub(crate) fn dry_run(&self, system: &System) -> Result<Patch> {
         let Action {
             context, dry_run, ..
         } = self;
@@ -192,7 +192,7 @@ impl Method {
     }
 
     /// Expand the method into its component tasks
-    pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>, Error> {
+    pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>> {
         let Method {
             context, expand, ..
         } = self;
@@ -274,7 +274,7 @@ impl Task {
     /// Set a target for the task
     ///
     /// This returns a result with an error if the serialization of the target fails
-    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self, SerializationError> {
+    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
         let target = serde_json::to_value(target)?;
         Ok(match self {
             Self::Action(mut action) => {
@@ -392,6 +392,7 @@ mod tests {
     use thiserror::Error;
     use tokio::time::{sleep, Duration};
 
+    use crate::error::ErrorKind;
     use crate::extract::{System as Sys, Target, View};
     use crate::runtime::System;
     use crate::state::State;
@@ -645,51 +646,6 @@ mod tests {
         }
     }
 
-    fn plus_two_with_error(
-        counter: View<i32>,
-        Target(tgt): Target<i32>,
-    ) -> Result<Vec<Task>, SerializationError> {
-        if tgt - *counter > 1 {
-            return Ok(vec![
-                plus_one.into_task().try_target(tgt)?,
-                plus_one.into_task().try_target(tgt)?,
-            ]);
-        }
-
-        Ok(vec![])
-    }
-
-    #[test]
-    fn it_allows_expanding_methods_with_result() {
-        let task = plus_two_with_error.with_target(3);
-        let system = System::try_from(0).unwrap();
-
-        if let Task::Method(method) = task {
-            let tasks = method.expand(&system).unwrap();
-            assert_eq!(
-                tasks.iter().map(|t| t.id()).collect::<Vec<&str>>(),
-                vec![plus_one.id(), plus_one.id()]
-            );
-        } else {
-            panic!("Expected a method task");
-        }
-    }
-
-    #[test]
-    fn it_catches_input_errors_in_method_expansions() {
-        let task = plus_two_with_error.with_target("a");
-        let system = System::try_from(0).unwrap();
-
-        if let Task::Method(method) = task {
-            assert!(matches!(
-                method.expand(&system),
-                Err(Error::CannotExtractArgs(_))
-            ));
-        } else {
-            panic!("Expected a method task");
-        }
-    }
-
     fn plus_two_with_option(counter: View<i32>, Target(tgt): Target<i32>) -> Option<[Task; 2]> {
         if tgt - *counter > 1 {
             return Some([
@@ -707,10 +663,11 @@ mod tests {
         let system = System::try_from(0).unwrap();
 
         if let Task::Method(method) = task {
-            assert!(matches!(
-                method.expand(&system),
-                Err(Error::ConditionFailed)
-            ));
+            let res = method.expand(&system);
+            assert!(res.is_err());
+            let e = res.unwrap_err();
+
+            assert_eq!(e.kind(), ErrorKind::ConditionNotMet);
         } else {
             panic!("Expected a method task");
         }

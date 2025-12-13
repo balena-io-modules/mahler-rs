@@ -1,15 +1,11 @@
-use anyhow::anyhow;
 use matchit::Router;
 use std::collections::btree_set::Iter;
 use std::collections::{BTreeSet, HashMap};
-use thiserror::Error;
 
+use crate::error::{Error, ErrorKind};
 use crate::path::PathArgs;
+use crate::result::Result;
 use crate::task::Job;
-
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct PathSearchError(#[from] anyhow::Error);
 
 #[derive(Default, Debug, Clone)]
 pub struct Domain {
@@ -88,11 +84,7 @@ impl Domain {
     // of the context. It will also remove any unused args from the
     // PathArgs passed as argument. This is not a great interface, but
     // it allows to parse only once
-    pub(crate) fn find_path_for_job(
-        &self,
-        job_id: &str,
-        args: &mut PathArgs,
-    ) -> Result<String, PathSearchError> {
+    pub(crate) fn find_path_for_job(&self, job_id: &str, args: &mut PathArgs) -> Result<String> {
         if let Some(route) = self.index.get(job_id) {
             let mut route = route.clone();
             let mut replacements = Vec::new();
@@ -154,10 +146,13 @@ impl Domain {
             }
 
             if !missing_args.is_empty() {
-                return Err(anyhow!(
-                    "missing arguments for task {job_id}: {:?}",
-                    missing_args
-                ))?;
+                return Err(Error::new(
+                    ErrorKind::MissingArgs,
+                    format!(
+                        "missing required arguments for job '{job_id}': {}",
+                        missing_args.join(", ")
+                    ),
+                ));
             }
 
             // Restore escaped parameters
@@ -172,9 +167,10 @@ impl Domain {
 
             Ok(final_route)
         } else {
-            Err(anyhow!(
-                "could not find a job with id {job_id} in the search domain"
-            ))?
+            Err(Error::new(
+                ErrorKind::NotFound,
+                format!("{job_id} not in domain"),
+            ))
         }
     }
 

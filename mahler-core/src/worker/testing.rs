@@ -1,19 +1,13 @@
 use serde::{de::DeserializeOwned, Serialize};
-use thiserror::Error;
 
 use super::{Ready, Uninitialized, Worker, WorkerState};
-use crate::planner::{Domain, Error as PlannerError, Planner};
-use crate::runtime::{Context, Error as TaskError, Resources, System};
+
+use crate::error::Error;
+use crate::planner::{Domain, NotFound, Planner};
+use crate::runtime::{Context, Resources, System};
 use crate::state::State;
 use crate::task::Task;
 use crate::workflow::Workflow;
-
-#[derive(Debug, Error)]
-#[error("workflow not found")]
-/// A workflow could not be found
-///
-/// This is returned by [`Worker::find_workflow`] when used on testing.
-pub struct NotFound;
 
 impl AsRef<Resources> for Uninitialized {
     fn as_ref(&self) -> &Resources {
@@ -84,18 +78,10 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
         let domain: &Domain = self.inner.as_ref();
         let planner = Planner::new(domain.clone());
 
-        match planner.find_workflow::<O>(&ini, &tgt) {
-            Ok(workflow) => Ok(workflow),
-            Err(PlannerError::NotFound) => Err(NotFound),
-            Err(e) => panic!("unexpected planning error: {e}"),
-        }
+        planner.find_workflow::<O>(&ini, &tgt)
     }
 
-    async fn run_task_with_system(
-        &self,
-        mut task: Task,
-        system: &mut System,
-    ) -> Result<(), TaskError> {
+    async fn run_task_with_system(&self, mut task: Task, system: &mut System) -> Result<(), Error> {
         let task_id = task.id().to_string();
         let Context { args, .. } = task.context_mut();
 
@@ -167,7 +153,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     ///
     /// # Panics
     /// This function will panic if a sewrialization or internal error happens during execution
-    pub async fn run_task(&self, initial_state: O, mut task: Task) -> Result<O, TaskError>
+    pub async fn run_task(&self, initial_state: O, mut task: Task) -> Result<O, Error>
     where
         O: Serialize + DeserializeOwned,
     {

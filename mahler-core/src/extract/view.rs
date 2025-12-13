@@ -1,4 +1,3 @@
-use anyhow::Context as AnyhowCtx;
 use json_patch::{
     diff, AddOperation, CopyOperation, MoveOperation, Patch, PatchOperation, RemoveOperation,
     ReplaceOperation, TestOperation,
@@ -10,9 +9,10 @@ use serde::Serialize;
 use serde_json::Value;
 use std::ops::{Deref, DerefMut};
 
-use crate::errors::ExtractionError;
+use crate::error::{Error, ErrorKind};
 use crate::path::Path;
-use crate::runtime::{Context, Error, FromSystem, System};
+use crate::result::Result;
+use crate::runtime::{Context, FromSystem, System};
 use crate::task::IntoResult;
 
 /// Extracts a view to a sub-element of the global state indicated
@@ -93,58 +93,52 @@ impl<T> View<T> {
 }
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
-    type Error = ExtractionError;
-
-    fn from_system(system: &System, context: &Context) -> Result<Self, Self::Error> {
-        let json_ptr = context.path.as_ref();
+    fn from_system(system: &System, context: &Context) -> Result<Self> {
+        let pointer = context.path.as_ref();
         let root = system.root();
 
         // Use the parent of the pointer unless we are at the root
-        let parent = json_ptr.parent().unwrap_or(json_ptr);
+        let parent = pointer.parent().unwrap_or(pointer);
 
         // Try to resolve the parent or fail
-        // XXX: how can this happen?
-        parent
-            .resolve(root)
-            .with_context(|| format!("failed to resolve path {}", context.path))?;
+        parent.resolve(root).map_err(|e| match e {
+            ResolveError::NotFound { .. } | ResolveError::OutOfBounds { .. } => {
+                // we return an unexpected error here because the parent should exist at this point
+                Error::internal(e)
+            }
+            ResolveError::Unreachable { .. }
+            | jsonptr::resolve::Error::FailedToParseIndex { .. } => {
+                // these two mean there is probably an error with the defined route
+                Error::new(ErrorKind::InvalidRoute, e)
+            }
+        })?;
 
         // At this point we assume that if the pointer cannot be
         // resolved is because the value does not exist yet unless
         // the parent is a scalar
-        let (state, initial): (T, Value) = match json_ptr.resolve(root) {
+        let (state, initial): (T, Value) = match pointer.resolve(root) {
             Ok(value) => (
-                serde_json::from_value::<T>(value.clone()).with_context(|| {
-                    format!(
-                        "failed to deserialize {} from: {value}",
-                        std::any::type_name::<T>()
-                    )
-                })?,
+                serde_json::from_value::<T>(value.clone())
+                    .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?,
                 value.clone(),
             ),
             Err(e) => match e {
                 ResolveError::NotFound { .. } => (
                     // if the value does not exist, see if we can deserialize null into the type
-                    serde_json::from_value::<T>(Value::Null).with_context(|| {
-                        format!(
-                            "failed to deserialize {} from: null",
-                            std::any::type_name::<T>()
-                        )
-                    })?,
+                    serde_json::from_value::<T>(Value::Null)
+                        .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?,
                     Value::Null,
                 ),
                 ResolveError::OutOfBounds { .. } => (
-                    serde_json::from_value::<T>(Value::Null).with_context(|| {
-                        format!(
-                            "failed to deserialize {} from: null",
-                            std::any::type_name::<T>()
-                        )
-                    })?,
+                    // the value may be a new index in an array, try to deserialize null
+                    serde_json::from_value::<T>(Value::Null)
+                        .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?,
                     Value::Null,
                 ),
                 _ => {
-                    // XXX: how can this happen?
-                    return Err(e)
-                        .with_context(|| format!("failed to resolve path {}", context.path))?;
+                    // The remaining errors are Unreachable and FailedToParse index
+                    // both of which mean the user given route is invalid
+                    return Err(Error::internal(e));
                 }
             },
         };
@@ -213,13 +207,11 @@ fn prepend_path(pointer: PointerBuf, patch: Patch) -> Patch {
 }
 
 impl<T: Serialize> IntoResult<Patch> for View<T> {
-    fn into_result(self) -> Result<Patch, Error> {
+    fn into_result(self) -> Result<Patch> {
         let before = self.initial;
 
-        // This should not happen unless there is a bug (hopefully).
-        // if this happens during worker operation, it will be caught
-        // as a panic in the task
-        let after = serde_json::to_value(self.state).expect("failed to serialize view value");
+        // An error should not happen here unless there is a bug
+        let after = serde_json::to_value(self.state).map_err(Error::internal)?;
 
         let patch = match (before, after) {
             (Value::Null, Value::Null) => Patch(vec![]),

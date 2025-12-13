@@ -1,13 +1,13 @@
 use json_patch::Patch;
 
-use crate::errors::MethodError;
-use crate::runtime::Error;
+use crate::error::{Error, ErrorKind};
+use crate::result::Result;
 
 use super::effect::Effect;
 use super::Task;
 
 pub trait IntoResult<O> {
-    fn into_result(self) -> Result<O, Error>;
+    fn into_result(self) -> Result<O>;
 }
 
 /// Allow tasks to return an Option
@@ -15,9 +15,9 @@ impl<T, O> IntoResult<O> for Option<T>
 where
     T: IntoResult<O>,
 {
-    fn into_result(self) -> Result<O, Error> {
+    fn into_result(self) -> Result<O> {
         self.map(|value| value.into_result())
-            .ok_or_else(|| Error::ConditionFailed)?
+            .ok_or(ErrorKind::ConditionNotMet)?
     }
 }
 
@@ -69,17 +69,6 @@ where
 {
     fn from(opt: Option<T>) -> Effect<Vec<Task>, Error> {
         opt.map(|t| t.into())
-            .unwrap_or_else(|| Effect::from_error(Error::ConditionFailed))
-    }
-}
-
-impl<T, E> From<Result<T, E>> for Effect<Vec<Task>, Error>
-where
-    T: Into<Effect<Vec<Task>, Error>>,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn from(res: Result<T, E>) -> Effect<Vec<Task>, Error> {
-        res.map(|t| t.into())
-            .unwrap_or_else(|e| Effect::from_error(MethodError::new(e).into()))
+            .unwrap_or_else(|| Effect::from_error(ErrorKind::ConditionNotMet.into()))
     }
 }

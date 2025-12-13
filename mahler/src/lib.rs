@@ -427,8 +427,9 @@
 //!   
 //! These utils can be used for testing and comparing generated workflows with specific DAGs. See
 //! [find_workflow](`worker::Worker::find_workflow`) for more info.
-pub use mahler_core::errors;
+pub use mahler_core::error;
 pub use mahler_core::extract;
+pub use mahler_core::result;
 pub use mahler_core::task;
 pub use mahler_core::worker;
 

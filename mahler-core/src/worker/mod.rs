@@ -1,13 +1,11 @@
 //! Automated planning and execution of task workflows
 
-use anyhow::anyhow;
 use json_patch::Patch;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
-use thiserror::Error;
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use tokio::{select, sync::RwLock};
@@ -19,48 +17,13 @@ use tracing::{debug, error, field, info, info_span, span, trace, warn, Instrumen
 #[cfg(debug_assertions)]
 mod testing;
 
-#[cfg(debug_assertions)]
-pub use testing::*;
-
-use crate::errors::{IOError, InternalError, SerializationError};
-use crate::planner::{Domain, Error as PlannerError, Planner};
-use crate::runtime::{Error as TaskError, Resources, System};
+use crate::error::{Error, ErrorKind};
+use crate::planner::{Domain, NotFound, Planner};
+use crate::result::Result;
+use crate::runtime::{Resources, System};
 use crate::state::State;
 use crate::task::Job;
 use crate::workflow::{channel, AggregateError, AutoInterrupt, Interrupt, Sender, WorkflowStatus};
-
-/// A panic happened in the Worker runtime
-#[derive(Debug, Error)]
-#[error(transparent)]
-pub struct Panicked(#[from] tokio::task::JoinError);
-
-/// Unrecoverable error during the worker runtime
-#[derive(Debug, Error)]
-pub enum SeekError {
-    #[error(transparent)]
-    /// Failed to serialize or deserialize the Worker current/target state
-    Serialization(#[from] SerializationError),
-
-    #[error(transparent)]
-    /// A panic happened in the Worker runtime
-    ///
-    /// This most likely means that there is an uncaught panic in a task
-    Panic(#[from] Panicked),
-
-    #[error(transparent)]
-    /// An error happened with a task during planning
-    ///
-    /// This most likely means there is a bug in a task. This error will
-    /// only be returned if `debug_assertions` are set. Otherwise
-    /// task errors are ignored by the planner
-    Planning(#[from] TaskError),
-
-    #[error(transparent)]
-    /// An internal error occured during the worker operation
-    ///
-    /// This is probably a bug with mahler and it should be reported
-    Internal(#[from] InternalError),
-}
 
 #[derive(Debug)]
 /// Exit status from [`Worker::seek_target`]
@@ -72,7 +35,7 @@ pub enum SeekStatus {
     /// Worker interrupted by user request
     Interrupted,
     /// An error happened while executing the workflow.
-    Aborted(Vec<IOError>),
+    Aborted(Vec<Error>),
 }
 
 impl PartialEq for SeekStatus {
@@ -165,9 +128,9 @@ impl WithResources for Ready {
 ///
 ///
 /// ```rust,no_run
-/// use anyhow::{Context, Result};
 /// use serde::{Deserialize, Serialize};
 ///
+/// use mahler::result::Result;
 /// use mahler::state::{State, Map};
 /// use mahler::worker::{Worker, SeekStatus};
 /// use mahler::task::prelude::*;
@@ -192,9 +155,7 @@ impl WithResources for Ready {
 ///         .initial_state(Counters(Map::from([
 ///             ("a".to_string(), 0),
 ///             ("b".to_string(), 0),
-///         ])))
-///         // fail if something bad happens
-///         .with_context(|| "failed to initialize worker")?;
+///         ])))?;
 ///
 ///     // start searching for a target
 ///     let status = worker.seek_target(CountersTarget(Map::from([
@@ -202,9 +163,7 @@ impl WithResources for Ready {
 ///         ("b".to_string(), 2),
 ///     ])))
 ///     // wait for a result
-///     .await
-///     // fail if something bad happens
-///     .with_context(|| "failed to reach target state")?;
+///     .await?;
 ///
 ///     if matches!(status, SeekStatus::Success) {
 ///         println!("SUCCESS!");
@@ -504,7 +463,7 @@ impl<O> Worker<O, Uninitialized> {
     /// # Errors
     /// The method will throw a [SerializationError](`crate::errors::SerializationError`) if the
     /// provided state cannot be converted to the internal state representation.
-    pub fn initial_state(self, state: O) -> Result<Worker<O, Ready>, SerializationError>
+    pub fn initial_state(self, state: O) -> Result<Worker<O, Ready>>
     where
         O: State,
     {
@@ -644,7 +603,7 @@ impl<O: State> Worker<O, Ready> {
     ///
     /// The method will throw a [SerializationError](`crate::errors::SerializationError`) if the
     /// internal state cannot be deserialized into the output type `<O>`
-    pub async fn state(&self) -> Result<O, SerializationError>
+    pub async fn state(&self) -> Result<O>
     where
         O: DeserializeOwned,
     {
@@ -723,8 +682,8 @@ impl<O: State> Worker<O, Ready> {
         &mut self,
         tgt: O::Target,
         interrupt: Interrupt,
-    ) -> Result<SeekStatus, SeekError> {
-        let tgt = serde_json::to_value(tgt).map_err(SerializationError::from)?;
+    ) -> Result<SeekStatus> {
+        let tgt = serde_json::to_value(tgt)?;
 
         let Ready {
             resources,
@@ -751,8 +710,8 @@ impl<O: State> Worker<O, Ready> {
         }
 
         enum InnerSeekError {
-            Runtime(AggregateError<TaskError>),
-            Planning(PlannerError),
+            Runtime(AggregateError<Error>),
+            Planning(NotFound),
         }
 
         async fn find_and_run_workflow<T: State>(
@@ -761,7 +720,7 @@ impl<O: State> Worker<O, Ready> {
             tgt: &Value,
             patch_tx: &Sender<Patch>,
             sigint: &Interrupt,
-        ) -> Result<InnerSeekResult, InnerSeekError> {
+        ) -> core::result::Result<InnerSeekResult, InnerSeekError> {
             info!("searching workflow");
             let now = Instant::now();
             // Show pending changes at debug level
@@ -773,11 +732,13 @@ impl<O: State> Worker<O, Ready> {
                 // properties that are not part of the target state model.
                 // We throw a planning error immediately if this process fails as
                 // it will fail in planning anyway
+                // FIXME: the planning process should return the list of changes
+                // we should not be creating a planning result here
                 let cur = system
                     .state::<T::Target>()
                     .and_then(serde_json::to_value)
-                    .map_err(SerializationError::from)
-                    .map_err(PlannerError::from)
+                    .map_err(Error::from)
+                    .map_err(|e| NotFound::new().with_reason(e))
                     .map_err(InnerSeekError::Planning)?;
                 let changes = json_patch::diff(&cur, tgt);
                 if !changes.0.is_empty() {
@@ -794,7 +755,7 @@ impl<O: State> Worker<O, Ready> {
                 let system = sys_reader.read().await;
                 let res = planner.find_workflow::<T>(&system, tgt);
 
-                if let Err(PlannerError::NotFound) = res {
+                if let Err(NotFound { .. }) = res {
                     warn!(time = ?now.elapsed(), "workflow not found");
                 }
                 res.map_err(InnerSeekError::Planning)?
@@ -839,7 +800,7 @@ impl<O: State> Worker<O, Ready> {
         let drop_interrupt = AutoInterrupt::from(interrupt);
 
         // Main seek_with_interrupt planning and execution loop
-        let handle: JoinHandle<Result<SeekStatus, SeekError>> = {
+        let handle: JoinHandle<Result<SeekStatus>> = {
             let err_rx = notify_writer_closed;
             let interrupt = drop_interrupt.clone();
             // No writing allowed on this copy of the system lock
@@ -856,7 +817,7 @@ impl<O: State> Worker<O, Ready> {
                         biased;
 
                         _ = err_rx.notified() => {
-                            return Err(InternalError::from(anyhow!("state patch failed, worker state possibly tainted")))?;
+                            return Err(Error::internal("state patch failed, worker state possibly tainted"))?;
                         }
 
                         res = find_and_run_workflow::<O>(&planner, &sys_reader, &tgt, &patch_tx, &interrupt) => {
@@ -872,30 +833,33 @@ impl<O: State> Worker<O, Ready> {
                                     seek_span.record("result", display("interrupted"));
                                     return Ok(SeekStatus::Interrupted);
                                 }
-                                Err(InnerSeekError::Planning(PlannerError::NotFound)) =>  {
-                                    seek_span.record("result", display("workflow_not_found"));
-                                    return Ok(SeekStatus::NotFound);
+                                Err(InnerSeekError::Planning(not_found)) =>  {
+                                    if let Some(err) = not_found.into_error() {
+                                        return Err(err);
+                                    }
+                                    else {
+                                        seek_span.record("result", display("workflow_not_found"));
+                                        return Ok(SeekStatus::NotFound);
+                                    }
                                 }
-                                Err(InnerSeekError::Planning(PlannerError::Serialization(e))) =>  return Err(e)?,
-                                Err(InnerSeekError::Planning(PlannerError::Internal(e))) =>  return Err(e)?,
-                                Err(InnerSeekError::Planning(PlannerError::Task(e))) => return Err(e)?,
                                 Err(InnerSeekError::Runtime(err)) => {
                                     let mut io = Vec::new();
                                     let mut other = Vec::new();
                                     let AggregateError (all) = err;
                                     for e in all.into_iter() {
-                                        match e {
-                                            TaskError::IO(re) => io.push(re),
-                                            TaskError::ConditionFailed => {},
+                                        match e.kind() {
+                                            ErrorKind::Runtime => io.push(e),
+                                            ErrorKind::ConditionNotMet => {}
                                             _ => other.push(e)
                                         }
 
                                     }
 
                                     // If there are non-IO errors, there is
-                                    // probably a bug somewhere
+                                    // probably a bug somewhere so we package it as an internal
+                                    // error
                                     if !other.is_empty() {
-                                        return Err(InternalError::from(anyhow!(AggregateError::from(other))))?;
+                                        return Err(Error::internal(AggregateError::from(other)))?;
                                     }
 
                                     // Abort if there are any runtime errors as those
@@ -921,7 +885,7 @@ impl<O: State> Worker<O, Ready> {
         let status = match handle.await {
             Ok(Ok(res)) => Ok(res),
             Ok(Err(e)) => Err(e),
-            Err(e) => Err(Panicked(e))?,
+            Err(e) => Err(Error::runtime(e))?,
         }?;
 
         Ok(status)
@@ -942,7 +906,7 @@ impl<O: State> Worker<O, Ready> {
     /// The method will result in a [`SeekError`] if a serialization issue occurs while converting
     /// between state types, if the worker runtime panics or there is an unexpected error during
     /// planning.
-    pub async fn seek_target(&mut self, tgt: O::Target) -> Result<SeekStatus, SeekError> {
+    pub async fn seek_target(&mut self, tgt: O::Target) -> Result<SeekStatus> {
         self.seek_with_interrupt(tgt, Interrupt::new()).await
     }
 }

@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use crate::errors::ExtractionError;
+use crate::result::Result;
 use crate::runtime::{Context, FromContext, FromSystem, System};
 
 /// Extracts the full path that the Task is being applied to
@@ -30,9 +30,7 @@ use crate::runtime::{Context, FromContext, FromSystem, System};
 pub struct Path(pub String);
 
 impl FromContext for Path {
-    type Error = ExtractionError;
-
-    fn from_context(context: &Context) -> Result<Self, Self::Error> {
+    fn from_context(context: &Context) -> Result<Self> {
         Ok(Path(context.path.to_string()))
     }
 }
@@ -44,9 +42,7 @@ impl Display for Path {
 }
 
 impl FromSystem for Path {
-    type Error = ExtractionError;
-
-    fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
+    fn from_system(_: &System, context: &Context) -> Result<Self> {
         Self::from_context(context)
     }
 }

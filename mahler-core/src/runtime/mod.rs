@@ -1,12 +1,10 @@
 mod context;
-mod error;
 mod from_context;
 mod from_system;
 mod resources;
 mod system;
 
 pub use context::*;
-pub use error::*;
 pub use from_context::*;
 pub use from_system::*;
 pub use resources::*;

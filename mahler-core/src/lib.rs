@@ -3,8 +3,9 @@
 mod path;
 mod planner;
 
-pub mod errors;
+pub mod error;
 pub mod extract;
+pub mod result;
 pub mod runtime;
 pub mod state;
 pub mod task;

@@ -1,8 +1,8 @@
-use anyhow::Context as AnyhowCxt;
 use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
-use crate::errors::ExtractionError;
+use crate::error::{Error, ErrorKind};
+use crate::result::Result;
 use crate::runtime::{Context, FromContext, FromSystem, System};
 use crate::state::State;
 
@@ -99,27 +99,19 @@ use crate::state::State;
 pub struct Target<T: State>(pub T::Target);
 
 impl<T: State> FromContext for Target<T> {
-    type Error = ExtractionError;
-
-    fn from_context(context: &Context) -> Result<Self, Self::Error> {
+    fn from_context(context: &Context) -> Result<Self> {
         let value = &context.target;
 
         // This will fail if the value cannot be deserialized into the target type
-        let target = serde_json::from_value::<T::Target>(value.clone()).with_context(|| {
-            format!(
-                "Failed to deserialize {value} into {}",
-                std::any::type_name::<T::Target>()
-            )
-        })?;
+        let target = serde_json::from_value::<T::Target>(value.clone())
+            .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
 
         Ok(Target(target))
     }
 }
 
 impl<T: State> FromSystem for Target<T> {
-    type Error = ExtractionError;
-
-    fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
+    fn from_system(_: &System, context: &Context) -> Result<Self> {
         Self::from_context(context)
     }
 }
@@ -170,27 +162,19 @@ impl<T: State> Deref for Target<T> {
 pub struct RawTarget<T>(pub T);
 
 impl<T: DeserializeOwned> FromContext for RawTarget<T> {
-    type Error = ExtractionError;
-
-    fn from_context(context: &Context) -> Result<Self, Self::Error> {
+    fn from_context(context: &Context) -> Result<Self> {
         let value = &context.target;
 
         // This will fail if the value cannot be deserialized into the target type
-        let target = serde_json::from_value::<T>(value.clone()).with_context(|| {
-            format!(
-                "Failed to deserialize {value} into {}",
-                std::any::type_name::<T>()
-            )
-        })?;
+        let target = serde_json::from_value::<T>(value.clone())
+            .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
 
         Ok(RawTarget(target))
     }
 }
 
 impl<T: DeserializeOwned> FromSystem for RawTarget<T> {
-    type Error = ExtractionError;
-
-    fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
+    fn from_system(_: &System, context: &Context) -> Result<Self> {
         Self::from_context(context)
     }
 }

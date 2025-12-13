@@ -2,13 +2,20 @@ use std::{
     fmt::{self, Display},
     ops::{Deref, DerefMut},
 };
-use thiserror::Error;
 
 /// A workflow error aggregating multiple errors
 /// in the execution of concurrent branches of the
 /// graph
-#[derive(Error, Debug)]
-pub struct AggregateError<E>(#[from] pub Vec<E>);
+#[derive(Debug)]
+pub struct AggregateError<E>(pub Vec<E>);
+
+impl<E: std::error::Error> std::error::Error for AggregateError<E> {}
+
+impl<E: std::error::Error> From<Vec<E>> for AggregateError<E> {
+    fn from(vec: Vec<E>) -> Self {
+        AggregateError(vec)
+    }
+}
 
 impl<E> Display for AggregateError<E>
 where

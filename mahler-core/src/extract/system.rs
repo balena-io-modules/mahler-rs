@@ -1,7 +1,7 @@
-use anyhow::Context as AnyhowCtx;
 use serde::de::DeserializeOwned;
 
-use crate::errors::ExtractionError;
+use crate::error::{Error, ErrorKind};
+use crate::result::Result;
 use crate::runtime::{Context, FromSystem, System as SystemState};
 
 /// Extracts the global system state managed by the [Worker](`crate::worker::Worker`)
@@ -41,16 +41,10 @@ use crate::runtime::{Context, FromSystem, System as SystemState};
 pub struct System<S>(pub S);
 
 impl<S: DeserializeOwned> FromSystem for System<S> {
-    type Error = ExtractionError;
-
-    fn from_system(system: &SystemState, _: &Context) -> Result<Self, Self::Error> {
+    fn from_system(system: &SystemState, _: &Context) -> Result<Self> {
         // This will fail if the value cannot be deserialized into the target type
-        let state = serde_json::from_value::<S>(system.root().clone()).with_context(|| {
-            format!(
-                "Failed to deserialize system state into {}",
-                std::any::type_name::<S>()
-            )
-        })?;
+        let state = serde_json::from_value::<S>(system.root().clone())
+            .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
 
         Ok(Self(state))
     }

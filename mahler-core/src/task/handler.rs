@@ -3,7 +3,9 @@ use serde::Serialize;
 
 use super::effect::Effect;
 use super::{Action, Method, Task};
-use crate::runtime::{Context, Error, FromSystem, System};
+
+use crate::error::Error;
+use crate::runtime::{Context, FromSystem, System};
 
 /// Trait for functions that can be used as worker jobs
 ///

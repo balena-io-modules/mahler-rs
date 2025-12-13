@@ -1,4 +1,5 @@
-use crate::runtime::{Context, Error, FromContext};
+use crate::error::Error;
+use crate::runtime::{Context, FromContext};
 
 /// Trait for functions that can be used to describe a Job/Task
 ///

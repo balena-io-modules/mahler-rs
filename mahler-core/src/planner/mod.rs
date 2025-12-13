@@ -1,18 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fmt::Debug;
+use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use anyhow::{anyhow, Context as AnyhowCtx};
 use json_patch::{Patch, PatchOperation};
 use jsonptr::PointerBuf;
 use serde_json::Value;
-use thiserror::Error;
 use tracing::field::display;
-use tracing::{error, field, instrument, trace, trace_span, warn, Span};
+use tracing::{field, instrument, trace, trace_span, warn, Span};
 
-use crate::errors::{InternalError, MethodError, SerializationError};
+use crate::error::{Error, ErrorKind};
 use crate::path::Path;
-use crate::runtime::{Context, Error as TaskError, System};
+use crate::runtime::{Context, System};
 use crate::state::{AsInternal, State};
 use crate::task::{Operation, Task};
 use crate::workflow::{Dag, WorkUnit, Workflow};
@@ -25,23 +23,6 @@ pub use domain::*;
 
 #[derive(Debug, Clone)]
 pub struct Planner(Domain);
-
-#[derive(Debug, Error)]
-enum SearchFailed {
-    #[error("method error: {0}")]
-    BadMethod(#[from] PathSearchError),
-
-    #[error("task error: {0:?}")]
-    BadTask(#[from] TaskError),
-
-    #[error("task not applicable")]
-    EmptyTask,
-
-    // this is probably a bug if this error
-    // happens
-    #[error("internal error: {0:?}")]
-    Internal(#[from] anyhow::Error),
-}
 
 /// Returns the longest subset of non-conflicting paths, preferring prefixes over specific paths.
 /// When conflicts occur, prioritizes prefixes over more specific paths.
@@ -166,19 +147,48 @@ impl Ord for Candidate {
     }
 }
 
-#[derive(Debug, Error)]
-pub(crate) enum Error {
-    #[error(transparent)]
-    Serialization(#[from] SerializationError),
+/// A workflow search error with a possible reason
+///
+/// A workflow may not be found either due to a bug in a job definition, or because there is no
+/// valid combination of tasks  to reach the desired target. In the first case, this error will
+/// include a reason, containing the [Error](`crate::error::Error`) that caused the search to
+/// terminate.
+#[derive(Debug)]
+pub struct NotFound {
+    reason: Option<Error>,
+}
 
-    #[error(transparent)]
-    Task(#[from] TaskError),
+impl NotFound {
+    pub(crate) fn new() -> Self {
+        NotFound { reason: None }
+    }
 
-    #[error("workflow not found")]
-    NotFound,
+    pub(crate) fn with_reason(mut self, error: Error) -> Self {
+        self.reason = Some(error);
+        self
+    }
 
-    #[error(transparent)]
-    Internal(#[from] InternalError),
+    pub fn into_error(self) -> Option<Error> {
+        self.reason
+    }
+}
+
+impl fmt::Display for NotFound {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(reason) = self.reason.as_ref() {
+            write!(fmt, "workflow not found: {reason}")
+        } else {
+            write!(fmt, "workflow not found")
+        }
+    }
+}
+
+impl std::error::Error for NotFound {}
+
+impl From<Error> for NotFound {
+    fn from(e: Error) -> Self {
+        NotFound { reason: Some(e) }
+    }
 }
 
 impl Planner {
@@ -192,16 +202,18 @@ impl Planner {
         cur_state: &System,
         domain: &mut BTreeSet<Path>,
         changes: &mut Vec<PatchOperation>,
-    ) -> Result<Dag<WorkUnit>, SearchFailed> {
+    ) -> Result<Dag<WorkUnit>, Error> {
         let span = Span::current();
         match task {
             Task::Action(action) => {
                 let work_id = WorkUnit::new_id(action, cur_state.root());
 
                 // Simulate the task and get the list of changes
-                let patch = action.dry_run(cur_state).map_err(SearchFailed::BadTask)?;
+                let patch = action.dry_run(cur_state)?;
                 if patch.is_empty() {
-                    return Err(SearchFailed::EmptyTask);
+                    // An empty result from the task is equivalent to
+                    // the task condition not being met
+                    return Err(ErrorKind::ConditionNotMet)?;
                 }
 
                 // The task has been selected
@@ -221,7 +233,7 @@ impl Planner {
             }
             Task::Method(method) => {
                 // Get the list of referenced tasks
-                let tasks = method.expand(cur_state).map_err(SearchFailed::BadTask)?;
+                let tasks = method.expand(cur_state)?;
 
                 // Extended tasks will store the correct references from the domain with the
                 // right path and description
@@ -254,8 +266,8 @@ impl Planner {
                     let job = self
                         .0
                         .find_job(&path, &task_id)
-                        // this should never happen
-                        .ok_or(anyhow!("failed to find job for path {path}"))?;
+                        // this should never happen since the path was returned by the domain
+                        .ok_or(Error::internal("should always find the path"))?;
 
                     // Get a copy of the task for the final list
                     let task = job.new_task(t.context().to_owned()).with_path(path.clone());
@@ -291,7 +303,7 @@ impl Planner {
                     // Apply the task changes
                     cur_state
                         .patch(Patch(task_changes.to_vec()))
-                        .with_context(|| format!("failed to apply patch {task_changes:?}"))?;
+                        .map_err(Error::internal)?;
 
                     // Add the new dag to the list of branches and update the cummulative domain
                     plan_branches.push(partial_plan);
@@ -316,7 +328,11 @@ impl Planner {
     }
 
     #[instrument(level = "trace", skip_all, err(level = "trace"))]
-    pub(crate) fn find_workflow<T>(&self, system: &System, tgt: &Value) -> Result<Workflow, Error>
+    pub(crate) fn find_workflow<T>(
+        &self,
+        system: &System,
+        tgt: &Value,
+    ) -> Result<Workflow, NotFound>
     where
         T: State,
     {
@@ -333,21 +349,21 @@ impl Planner {
         let initial_state_with_meta = system
             .state::<T>()
             .and_then(|t| serde_json::to_value(AsInternal(&t)))
-            .map_err(SerializationError::from)?;
+            .map_err(Error::from)?;
         let mut halted_state_paths: Vec<Path> = Vec::new();
 
         while let Some((cur_state, cur_plan, depth)) = stack.pop() {
             // Prevent infinite recursion (e.g., from buggy tasks or recursive methods)
             if depth >= 256 {
                 warn!(parent: &find_workflow_span, "reached max search depth (256)");
-                return Err(Error::NotFound)?;
+                return Err(NotFound::new())?;
             }
 
             // Normalize state: deserialize into the target type and re-serialize to remove internal fields
             let cur = cur_state
                 .state::<T::Target>()
                 .and_then(serde_json::to_value)
-                .map_err(SerializationError::from)?;
+                .map_err(Error::from)?;
 
             // add the current state to the visited list
             visited_states.insert(hash_state(&cur_state));
@@ -428,42 +444,27 @@ impl Planner {
                                     });
                                 }
 
-                                // Non-critical errors are ignored (loop, empty, condition failure)
-                                Err(SearchFailed::EmptyTask)
-                                | Err(SearchFailed::BadTask(TaskError::ConditionFailed)) => {}
-
-                                // Critical internal errors terminate the search
-                                Err(SearchFailed::Internal(err)) => {
-                                    return Err(InternalError::from(err))?;
-                                }
-
-                                // Method expansion failure
-                                Err(SearchFailed::BadMethod(err)) => {
-                                    let err = MethodError::new(err);
-                                    if cfg!(debug_assertions) {
-                                        return Err(TaskError::from(err))?;
+                                Err(e) => match e.kind() {
+                                    // Skip the task if condition is not met
+                                    ErrorKind::ConditionNotMet => {}
+                                    // Critical internal errors terminate the search
+                                    ErrorKind::Internal => return Err(e)?,
+                                    // Other job errors are ignored unless debugging
+                                    _ => {
+                                        if cfg!(debug_assertions) {
+                                            return Err(e)?;
+                                        }
+                                        warn!(
+                                            parent: &find_workflow_span,
+                                            "task {} failed: {} ... ignoring",
+                                            task.id(),
+                                            e
+                                        );
+                                        return Err(e)?;
                                     }
-                                    warn!(
-                                        parent: &find_workflow_span,
-                                        "task {} failed: {} ... ignoring",
-                                        task.id(),
-                                        err
-                                    );
-                                }
+                                },
 
-                                // Other task failure (non-debug: warn and skip)
-                                Err(SearchFailed::BadTask(err)) => {
-                                    if cfg!(debug_assertions) {
-                                        return Err(err)?;
-                                    }
-                                    warn!(
-                                        parent: &find_workflow_span,
-                                        "task {} failed: {} ... ignoring",
-                                        task.id(),
-                                        err
-                                    );
-                                }
-
+                                // ignore if changes is empty
                                 _ => {}
                             }
                         }
@@ -555,10 +556,7 @@ impl Planner {
             } in candidates.into_iter().rev()
             {
                 let mut new_state = cur_state.clone();
-                new_state
-                    .patch(Patch(changes))
-                    .with_context(|| "failed to apply patch")
-                    .map_err(InternalError::from)?;
+                new_state.patch(Patch(changes)).map_err(Error::internal)?;
 
                 // Ignore the candidate if it takes us to a state the planner has visited before,
                 // this avoids the planner just trying tasks in a different order or potentially
@@ -590,7 +588,7 @@ impl Planner {
         }
 
         // No candidate plan reached the goal state
-        Err(Error::NotFound)?
+        Err(NotFound::new())?
     }
 }
 
@@ -666,7 +664,7 @@ mod tests {
         counter
     }
 
-    pub fn find_plan<T>(planner: Planner, cur: T, tgt: T::Target) -> Result<Workflow, super::Error>
+    pub fn find_plan<T>(planner: Planner, cur: T, tgt: T::Target) -> Result<Workflow, NotFound>
     where
         T: State,
     {
@@ -704,7 +702,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, 0, 2);
 
-        assert!(matches!(workflow, Err(super::Error::NotFound)));
+        assert!(matches!(workflow, Err(NotFound { .. })));
     }
 
     #[test]
