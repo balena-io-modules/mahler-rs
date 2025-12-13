@@ -14,9 +14,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::errors::SerializationError;
 use crate::path::Path;
-use crate::runtime::{Context, Error, System};
+use crate::result::Result;
+use crate::runtime::{Context, System};
 
 pub(crate) use into_result::*;
 
@@ -33,11 +33,11 @@ pub mod prelude {
     pub use super::Task;
 }
 
-type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch, Error>> + Send>>;
-type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch, Error> + Send + Sync>;
+type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
+type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
 type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
-type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>, Error> + Send + Sync>;
-type Describe = Arc<dyn Fn(&Context) -> Result<String, Error> + Send + Sync>;
+type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>> + Send + Sync>;
+type Describe = Arc<dyn Fn(&Context) -> Result<String> + Send + Sync>;
 
 #[derive(Clone)]
 /// An atomic task
@@ -121,13 +121,13 @@ impl Action {
     }
 
     /// Run the task on the system and return a list of changes
-    pub(crate) async fn run(&self, system: &System) -> Result<Patch, Error> {
+    pub(crate) async fn run(&self, system: &System) -> Result<Patch> {
         let Action { context, run, .. } = self;
         (run)(system, context).await
     }
 
     /// Simulate the effect of the task on the system
-    pub(crate) fn dry_run(&self, system: &System) -> Result<Patch, Error> {
+    pub(crate) fn dry_run(&self, system: &System) -> Result<Patch> {
         let Action {
             context, dry_run, ..
         } = self;
@@ -192,7 +192,7 @@ impl Method {
     }
 
     /// Expand the method into its component tasks
-    pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>, Error> {
+    pub(crate) fn expand(&self, system: &System) -> Result<Vec<Task>> {
         let Method {
             context, expand, ..
         } = self;
@@ -274,7 +274,7 @@ impl Task {
     /// Set a target for the task
     ///
     /// This returns a result with an error if the serialization of the target fails
-    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self, SerializationError> {
+    pub fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
         let target = serde_json::to_value(target)?;
         Ok(match self {
             Self::Action(mut action) => {

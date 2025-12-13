@@ -23,7 +23,7 @@ mod testing;
 pub use testing::*;
 
 use crate::errors::{IOError, InternalError, SerializationError};
-use crate::planner::{Domain, Error as PlannerError, Planner};
+use crate::planner::{Domain, Planner, PlanningError as PlannerError};
 use crate::runtime::{Error as TaskError, Resources, System};
 use crate::state::State;
 use crate::task::Job;

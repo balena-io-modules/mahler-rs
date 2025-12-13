@@ -2,7 +2,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
 use super::{Ready, Uninitialized, Worker, WorkerState};
-use crate::planner::{Domain, Error as PlannerError, Planner};
+use crate::planner::{Domain, Planner, PlanningError as PlannerError};
 use crate::runtime::{Context, Error as TaskError, Resources, System};
 use crate::state::State;
 use crate::task::Task;

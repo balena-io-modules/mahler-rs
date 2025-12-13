@@ -1,8 +1,8 @@
-use anyhow::Context as AnyhowCtx;
 use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
-use crate::errors::ExtractionError;
+use crate::error::{Error, ErrorKind};
+use crate::result::Result;
 use crate::runtime::{Context, FromContext, FromSystem, System};
 
 mod de;
@@ -44,25 +44,17 @@ mod error;
 pub struct Args<T>(pub T);
 
 impl<T: DeserializeOwned + Send> FromContext for Args<T> {
-    type Error = ExtractionError;
-
-    fn from_context(context: &Context) -> Result<Self, Self::Error> {
+    fn from_context(context: &Context) -> Result<Self> {
         let args = context.decoded_args();
-        let value = T::deserialize(de::PathDeserializer::new(&args)).with_context(|| {
-            format!(
-                "Failed to deserialize {args} into {}",
-                std::any::type_name::<T>()
-            )
-        })?;
+        let value = T::deserialize(de::PathDeserializer::new(&args))
+            .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
 
         Ok(Args(value))
     }
 }
 
 impl<T: DeserializeOwned + Send> FromSystem for Args<T> {
-    type Error = ExtractionError;
-
-    fn from_system(_: &System, context: &Context) -> Result<Self, Self::Error> {
+    fn from_system(_: &System, context: &Context) -> Result<Self> {
         Self::from_context(context)
     }
 }

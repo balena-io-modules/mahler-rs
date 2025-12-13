@@ -3,8 +3,10 @@
 mod path;
 mod planner;
 
+pub mod error;
 pub mod errors;
 pub mod extract;
+pub mod result;
 pub mod runtime;
 pub mod state;
 pub mod task;

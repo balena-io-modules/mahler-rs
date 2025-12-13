@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::errors::ExtractionError;
+use crate::result::Result;
 use crate::runtime::{Context, FromSystem, System};
 
 /// Extracts a shared system resource
@@ -109,9 +109,7 @@ impl<R> Res<R> {
 }
 
 impl<R: Send + Sync + 'static> FromSystem for Res<R> {
-    type Error = ExtractionError;
-
-    fn from_system(system: &System, _: &Context) -> Result<Self, Self::Error> {
+    fn from_system(system: &System, _: &Context) -> Result<Self> {
         let arc = system.resource::<R>();
         Ok(Res(arc))
     }

@@ -10,8 +10,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, instrument};
 
+use crate::error::{Error, ErrorKind};
 use crate::path::Path;
-use crate::runtime::{Error as TaskError, System};
+use crate::runtime::System;
 use crate::task::Action;
 
 mod aggregate_error;
@@ -100,10 +101,10 @@ impl Display for WorkUnit {
 impl Task for WorkUnit {
     type Input = System;
     type Changes = Patch;
-    type Error = TaskError;
+    type Error = Error;
 
     #[instrument(name = "run_task", skip_all, fields(task=%self.action), err)]
-    async fn run(&self, system: &System) -> Result<Patch, TaskError> {
+    async fn run(&self, system: &System) -> Result<Patch, Self::Error> {
         info!("starting");
         // dry-run the task to test that conditions hold
         // before executing the action should not really fail at this point
@@ -111,7 +112,7 @@ impl Task for WorkUnit {
         if changes != self.output {
             // If the result is different then we assume it's because the
             // conditions changed since planning
-            return Err(TaskError::ConditionFailed);
+            return Err(ErrorKind::ConditionNotMet.into());
         }
 
         self.action.run(system).await
@@ -191,7 +192,7 @@ impl Workflow {
         sys_reader: &Arc<RwLock<System>>,
         patch_tx: Sender<Patch>,
         interrupt: Interrupt,
-    ) -> Result<WorkflowStatus, AggregateError<TaskError>> {
+    ) -> Result<WorkflowStatus, AggregateError<Error>> {
         self.dag
             .execute(sys_reader, patch_tx, interrupt)
             .await

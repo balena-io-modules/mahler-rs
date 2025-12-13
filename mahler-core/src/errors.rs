@@ -12,11 +12,6 @@ use thiserror::Error;
 pub struct ExtractionError(#[from] anyhow::Error);
 
 #[derive(Debug, Error)]
-#[error("serialization error: {0:?}")]
-/// An error happened while serializing or deserializing an input type
-pub struct SerializationError(#[from] serde_json::Error);
-
-#[derive(Debug, Error)]
 #[error("internal error, this may be a bug: {0:?}")]
 /// Some unexpected error happened during the worker operation
 ///

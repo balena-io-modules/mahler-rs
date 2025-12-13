@@ -6,9 +6,8 @@ use serde::Serialize;
 use super::effect::Effect;
 use super::into_result::IntoResult;
 
-use crate::errors::IOError;
+use crate::error::Error;
 use crate::extract::View;
-use crate::runtime::Error;
 
 /// A type representing a lazy I/O operation producing a value of type `T` or an error of type `E`.
 ///
@@ -157,7 +156,7 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     fn from(io: IO<T, E>) -> Self {
-        io.0.map_err(|e| IOError::new(e).into())
+        io.0.map_err(Error::runtime)
             .and_then(|view| view.into_result())
     }
 }
