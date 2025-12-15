@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::ops::{Deref, DerefMut};
 
 use crate::error::{Error, ErrorKind};
-use crate::path::Path;
+use crate::json::Path;
 use crate::result::Result;
 use crate::runtime::{Context, FromSystem, System};
 use crate::task::IntoResult;

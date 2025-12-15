@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::path::Path;
+use crate::json::Path;
 use crate::result::Result;
 use crate::runtime::{Context, System};
 

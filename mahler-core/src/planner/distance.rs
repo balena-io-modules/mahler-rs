@@ -5,7 +5,7 @@ use std::collections::btree_set::Iter;
 use std::fmt::{self, Display};
 use std::{cmp::Ordering, collections::BTreeSet};
 
-use crate::path::Path;
+use crate::json::Path;
 use crate::task::Operation as JobOperation;
 
 #[derive(Debug)]
@@ -96,11 +96,9 @@ impl Distance {
                 // get the target at the parent to use as value
                 // no matter the operation, the parent of the target should
                 // always exist. If it doesn't there is a bug (probbly in jsonptr)
-                let value = newparent.resolve(tgt).unwrap_or_else(|e| {
-                    panic!(
-                        "[BUG] Path `{newparent}` should be resolvable on the target, but got error: {e}"
-                    )
-                });
+                let value = newparent
+                    .resolve(tgt)
+                    .expect(&format!("path `{path}` should be resolvable on state"));
 
                 // Insert a replace operation for each one
                 operations.insert(Operation::from(PatchOperation::Replace(ReplaceOperation {
@@ -116,11 +114,9 @@ impl Distance {
             if let PatchOperation::Remove(_) = op {
                 // By definition of the remove operation the path should be
                 // resolvable on the left side of the diff
-                let value = path.resolve(src).unwrap_or_else(|e| {
-                    panic!(
-                        "[BUG] Path `{path}` should be resolvable on the state, but got error: {e}"
-                    )
-                });
+                let value = path
+                    .resolve(src)
+                    .expect(&format!("path `{path}` should be resolvable on state"));
 
                 // add remove operations for inner values
                 insert_remove_ops(&mut operations, path, value);

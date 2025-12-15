@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use tracing::{info, instrument};
 
 use crate::error::{Error, ErrorKind};
-use crate::path::Path;
+use crate::json::Path;
 use crate::runtime::System;
 use crate::task::Action;
 

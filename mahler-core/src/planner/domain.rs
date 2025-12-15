@@ -3,7 +3,7 @@ use std::collections::btree_set::Iter;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::error::{Error, ErrorKind};
-use crate::path::PathArgs;
+use crate::json::PathArgs;
 use crate::result::Result;
 use crate::task::Job;
 
@@ -198,7 +198,7 @@ mod tests {
     use super::*;
 
     use crate::extract::{Target, View};
-    use crate::path::PathArgs;
+    use crate::json::PathArgs;
     use crate::task::*;
 
     fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {

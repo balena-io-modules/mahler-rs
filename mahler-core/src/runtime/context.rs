@@ -1,7 +1,7 @@
 use jsonptr::{PointerBuf, Token};
 use serde_json::Value;
 
-use crate::path::{Path, PathArgs};
+use crate::json::{Path, PathArgs};
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 /// Describes the Task applicability context

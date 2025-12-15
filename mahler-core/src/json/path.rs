@@ -104,7 +104,7 @@ impl Deref for Path {
 // Structure to store path arguments when matching
 // against a lens
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
-pub(crate) struct PathArgs(Vec<(Arc<str>, String)>);
+pub struct PathArgs(Vec<(Arc<str>, String)>);
 
 impl PathArgs {
     pub fn iter(&self) -> impl Iterator<Item = &(Arc<str>, String)> {

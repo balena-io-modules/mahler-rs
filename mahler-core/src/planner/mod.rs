@@ -9,7 +9,7 @@ use tracing::field::display;
 use tracing::{field, instrument, trace, trace_span, warn, Span};
 
 use crate::error::{Error, ErrorKind};
-use crate::path::Path;
+use crate::json::Path;
 use crate::runtime::{Context, System};
 use crate::state::{AsInternal, State};
 use crate::task::{Operation, Task};
