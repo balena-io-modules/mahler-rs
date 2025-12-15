@@ -1,11 +1,10 @@
 use json_patch::{diff, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use jsonptr::Pointer;
-use serde_json::Value;
 use std::collections::btree_set::Iter;
 use std::fmt::{self, Display};
 use std::{cmp::Ordering, collections::BTreeSet};
 
-use crate::json::Path;
+use crate::json::{Path, Value};
 use crate::task::Operation as JobOperation;
 
 #[derive(Debug)]

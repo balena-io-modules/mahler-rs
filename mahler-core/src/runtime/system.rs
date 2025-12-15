@@ -1,9 +1,9 @@
 use json_patch::{patch, Patch};
 use serde::{de::DeserializeOwned, Serialize};
-use serde_json::Value;
 use std::{fmt::Display, ops::Deref, sync::Arc};
 
 use super::resources::Resources;
+use crate::json::Value;
 
 #[derive(Clone)]
 pub struct System {
@@ -39,7 +39,7 @@ impl System {
         &self.state
     }
 
-    pub(crate) fn patch(&mut self, changes: Patch) -> Result<(), json_patch::PatchError> {
+    pub fn patch(&mut self, changes: Patch) -> Result<(), json_patch::PatchError> {
         patch(&mut self.state, &changes)?;
         Ok(())
     }
@@ -49,11 +49,11 @@ impl System {
         Ok(s)
     }
 
-    pub(crate) fn set_resources(&mut self, resources: Resources) {
+    pub fn set_resources(&mut self, resources: Resources) {
         self.resources = resources;
     }
 
-    pub(crate) fn resource<R>(&self) -> Option<Arc<R>>
+    pub fn resource<R>(&self) -> Option<Arc<R>>
     where
         R: Send + Sync + 'static,
     {

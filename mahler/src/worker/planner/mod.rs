@@ -4,18 +4,18 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use json_patch::{Patch, PatchOperation};
 use jsonptr::PointerBuf;
-use serde_json::Value;
 use tracing::field::display;
 use tracing::{field, instrument, trace, trace_span, warn, Span};
 
+use crate::dag::Dag;
 use crate::error::{Error, ErrorKind};
-use crate::json::{self, Path};
+use crate::json::{self, Path, Value};
 use crate::runtime::{Context, System};
 use crate::state::{AsInternal, State};
 use crate::task::{Operation, Task};
-use crate::workflow::{Dag, WorkUnit, Workflow};
 
 use super::domain::Domain;
+use super::workflow::{WorkUnit, Workflow};
 
 mod distance;
 use distance::*;
@@ -146,22 +146,22 @@ impl Ord for Candidate {
     }
 }
 
-/// A workflow search error
+/// A planning error
 ///
-/// Search may be interrupted early because of a bug in a job definition. Searching for a workflow
+/// Planning may be interrupted early because of a bug in a job definition or it
 /// may fail because there is no valid combination of jobs in the domain to reach the desired
 /// target.
 #[derive(Debug)]
-pub enum SearchError {
+pub enum PlanningError {
     /// Search was interrupted early due to an error in one of the job definitions
-    Interrupted(Error),
+    Aborted(Error),
     /// No combination of jobs was found for the give set of changes
     NotFound(Vec<json::Operation>),
 }
 
-impl fmt::Display for SearchError {
+impl fmt::Display for PlanningError {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let SearchError::Interrupted(reason) = self {
+        if let PlanningError::Aborted(reason) = self {
             write!(fmt, "workflow not found: {reason}")
         } else {
             write!(fmt, "workflow not found")
@@ -169,11 +169,11 @@ impl fmt::Display for SearchError {
     }
 }
 
-impl std::error::Error for SearchError {}
+impl std::error::Error for PlanningError {}
 
-impl From<Error> for SearchError {
+impl From<Error> for PlanningError {
     fn from(e: Error) -> Self {
-        SearchError::Interrupted(e)
+        PlanningError::Aborted(e)
     }
 }
 
@@ -318,7 +318,7 @@ impl Planner {
         &self,
         system: &System,
         tgt: &Value,
-    ) -> Result<Workflow, SearchError>
+    ) -> Result<Workflow, PlanningError>
     where
         T: State,
     {
@@ -353,7 +353,7 @@ impl Planner {
             // Prevent infinite recursion (e.g., from buggy tasks or recursive methods)
             if depth >= 256 {
                 warn!(parent: &find_workflow_span, "reached max search depth (256)");
-                return Err(SearchError::NotFound(changes))?;
+                return Err(PlanningError::NotFound(changes))?;
             }
 
             // Normalize state: deserialize into the target type and re-serialize to remove internal fields
@@ -587,7 +587,7 @@ impl Planner {
         }
 
         // No candidate plan reached the goal state
-        Err(SearchError::NotFound(changes))?
+        Err(PlanningError::NotFound(changes))?
     }
 }
 
@@ -604,10 +604,10 @@ mod tests {
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
 
+    use crate::dag::{dag, par, seq, Dag};
     use crate::extract::{Args, System, Target, View};
     use crate::state::{AsInternal, Map, State};
-    use crate::task;
-    use crate::{dag, par, seq, task::*, workflow::Dag};
+    use crate::task::*;
 
     fn init() {
         tracing_subscriber::registry()
@@ -663,7 +663,7 @@ mod tests {
         counter
     }
 
-    pub fn find_plan<T>(planner: Planner, cur: T, tgt: T::Target) -> Result<Workflow, SearchError>
+    pub fn find_plan<T>(planner: Planner, cur: T, tgt: T::Target) -> Result<Workflow, PlanningError>
     where
         T: State,
     {
@@ -687,8 +687,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "mahler_core::worker::planner::tests::plus_one()",
-            "mahler_core::worker::planner::tests::plus_one()"
+            "mahler::worker::planner::tests::plus_one()",
+            "mahler::worker::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -701,7 +701,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, 0, 2);
 
-        assert!(matches!(workflow, Err(SearchError::NotFound(_))));
+        assert!(matches!(workflow, Err(PlanningError::NotFound(_))));
     }
 
     #[test]
@@ -727,8 +727,8 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "mahler_core::worker::planner::tests::plus_one()",
-            "mahler_core::worker::planner::tests::plus_one()"
+            "mahler::worker::planner::tests::plus_one()",
+            "mahler::worker::planner::tests::plus_one()"
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -762,11 +762,11 @@ mod tests {
 
         // We expect counters to be updated concurrently
         let expected: Dag<&str> = par!(
-            "mahler_core::worker::planner::tests::plus_one(/counters/one)",
-            "mahler_core::worker::planner::tests::plus_one(/counters/two)",
+            "mahler::worker::planner::tests::plus_one(/counters/one)",
+            "mahler::worker::planner::tests::plus_one(/counters/two)",
         ) + par!(
-            "mahler_core::worker::planner::tests::plus_one(/counters/one)",
-            "mahler_core::worker::planner::tests::plus_one(/counters/two)",
+            "mahler::worker::planner::tests::plus_one(/counters/one)",
+            "mahler::worker::planner::tests::plus_one(/counters/two)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -801,12 +801,12 @@ mod tests {
         // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(
             seq!(
-                "mahler_core::worker::planner::tests::plus_one(/counters/one)",
-                "mahler_core::worker::planner::tests::plus_one(/counters/one)",
+                "mahler::worker::planner::tests::plus_one(/counters/one)",
+                "mahler::worker::planner::tests::plus_one(/counters/one)",
             ),
             seq!(
-                "mahler_core::worker::planner::tests::plus_one(/counters/two)",
-                "mahler_core::worker::planner::tests::plus_one(/counters/two)",
+                "mahler::worker::planner::tests::plus_one(/counters/two)",
+                "mahler::worker::planner::tests::plus_one(/counters/two)",
             )
         );
 
@@ -842,9 +842,9 @@ mod tests {
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
-            "mahler_core::worker::planner::tests::plus_one(/counters/one)",
-            "mahler_core::worker::planner::tests::plus_one(/counters/one)",
-            "mahler_core::worker::planner::tests::plus_one(/counters/one)",
+            "mahler::worker::planner::tests::plus_one(/counters/one)",
+            "mahler::worker::planner::tests::plus_one(/counters/one)",
+            "mahler::worker::planner::tests::plus_one(/counters/one)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -872,8 +872,8 @@ mod tests {
 
         // We expect a parallel dag for this specific target
         let expected: Dag<&str> = par!(
-            "mahler_core::worker::planner::tests::plus_one(/one)",
-            "mahler_core::worker::planner::tests::plus_one(/two)",
+            "mahler::worker::planner::tests::plus_one(/one)",
+            "mahler::worker::planner::tests::plus_one(/two)",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
@@ -1102,7 +1102,7 @@ mod tests {
             )
             .job(
                 "/config",
-                task::update(store_config).with_description(|| "store configuration"),
+                update(store_config).with_description(|| "store configuration"),
             )
             .jobs(
                 "",
@@ -1472,10 +1472,10 @@ mod tests {
         let workflow = find_plan(planner, initial, target).unwrap();
 
         // Should run concurrently because different array elements and map keys don't conflict
-        let expected: Dag<&str> = par!("mahler_core::worker::planner::tests::test_array_element_conflicts::update_config(/configs/database)",
-                "mahler_core::worker::planner::tests::test_array_element_conflicts::update_config(/configs/server)",
-                "mahler_core::worker::planner::tests::test_array_element_conflicts::update_item(/items/0)",
-                "mahler_core::worker::planner::tests::test_array_element_conflicts::update_item(/items/1)",
+        let expected: Dag<&str> = par!("mahler::worker::planner::tests::test_array_element_conflicts::update_config(/configs/database)",
+                "mahler::worker::planner::tests::test_array_element_conflicts::update_config(/configs/server)",
+                "mahler::worker::planner::tests::test_array_element_conflicts::update_item(/items/0)",
+                "mahler::worker::planner::tests::test_array_element_conflicts::update_item(/items/1)",
             );
 
         assert_eq!(workflow.to_string(), expected.to_string());

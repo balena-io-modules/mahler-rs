@@ -3,8 +3,8 @@ use std::fmt;
 use std::ops::Add;
 use std::sync::{Arc, RwLock};
 
-use super::channel::Sender;
-use super::{AggregateError, Interrupt};
+use crate::error::AggregateError;
+use crate::sync::{Interrupt, Sender};
 
 type Link<T> = Option<Arc<RwLock<Node<T>>>>;
 
@@ -112,7 +112,7 @@ impl<T> Iterator for Iter<T> {
 /// use mahler::task::{self, prelude::*};
 /// use mahler::extract::{View, Target};
 /// use mahler::worker::Worker;
-/// use mahler::workflow::{Dag, seq};
+/// use mahler::dag::{Dag, seq};
 ///
 /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
 ///     if *counter < tgt {
@@ -143,7 +143,7 @@ impl<T> Iterator for Iter<T> {
 /// create an empty DAG.
 ///
 /// ```rust
-/// use mahler::workflow::{Dag, dag, seq, par};
+/// use mahler::dag::{Dag, dag, seq, par};
 ///
 /// // Some linear DAGs
 /// let ll0: Dag<i32> = seq!(1, 2, 3);
@@ -192,7 +192,7 @@ impl<T> Iterator for Iter<T> {
 /// Use of [pretty_assertions](https://docs.rs/pretty_assertions/latest/pretty_assertions/index.html) is a good way to visually compare results.
 ///
 /// ```rust
-/// use mahler::workflow::{Dag, seq};
+/// use mahler::dag::{Dag, seq};
 /// use dedent::{dedent};
 /// use pretty_assertions::assert_str_eq;
 ///
@@ -232,7 +232,7 @@ impl<T> Iterator for Iter<T> {
 /// In code
 ///
 /// ```rust
-/// use mahler::workflow::{Dag, dag, seq};
+/// use mahler::dag::{Dag, dag, seq};
 /// use dedent::{dedent};
 /// use pretty_assertions::assert_str_eq;
 ///
@@ -273,7 +273,7 @@ impl<T> Iterator for Iter<T> {
 /// In code
 ///
 /// ```rust
-/// use mahler::workflow::{Dag, dag, seq};
+/// use mahler::dag::{Dag, dag, seq};
 /// use dedent::{dedent};
 /// use pretty_assertions::assert_str_eq;
 ///
@@ -446,7 +446,7 @@ impl<T> Dag<T> {
     ///
     /// # Example
     /// ```rust
-    /// use mahler::workflow::Dag;
+    /// use mahler::dag::Dag;
     ///
     /// let br1: Dag<i32> = Dag::seq([1, 2, 3]);
     /// let br2: Dag<i32> = Dag::seq([4, 5, 6]);
@@ -508,7 +508,7 @@ impl<T> Dag<T> {
     ///
     /// # Example
     /// ```rust
-    /// use mahler::workflow::Dag;
+    /// use mahler::dag::Dag;
     ///
     /// let dag: Dag<i32> = Dag::seq(vec![1, 2, 3]);
     /// assert_eq!(dag.to_string(), "- 1\n- 2\n- 3");
@@ -540,7 +540,7 @@ impl<T> Dag<T> {
     ///
     /// # Example
     /// ```rust
-    /// use mahler::workflow::Dag;
+    /// use mahler::dag::Dag;
     ///
     /// let dag: Dag<i32> = Dag::default();
     /// assert!(dag.is_empty());
@@ -632,7 +632,7 @@ impl<T> Dag<T> {
     /// # Example
     ///
     /// ```rust
-    /// use mahler::workflow::{Dag, seq};
+    /// use mahler::dag::{Dag, seq};
     ///
     /// let original: Dag<i32> = seq!(1, 2, 3);
     /// let new_dag = original.shallow_clone().concat(3);
@@ -777,7 +777,7 @@ where
 ///
 /// # Example
 /// ```rust
-/// use mahler::workflow::{Dag, dag, seq};
+/// use mahler::dag::{Dag, dag, seq};
 ///
 /// let dag: Dag<char> = dag!(seq!('A', 'B'), seq!('C', 'D')) + seq!('E');
 /// assert_eq!(
@@ -875,7 +875,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
 /// Construct a linear DAG
 ///
 /// ```rust
-/// use mahler::workflow::{Dag, seq};
+/// use mahler::dag::{Dag, seq};
 ///
 /// // Construct a DAG of i32
 /// let lli: Dag<i32> = seq!(1, 2, 3);
@@ -893,7 +893,7 @@ macro_rules! seq {
 /// Construct a branching DAG
 ///
 /// ```rust
-/// use mahler::workflow::{Dag, seq, dag};
+/// use mahler::dag::{Dag, seq, dag};
 ///
 /// // Construct a DAG of i32 with two branches
 /// let dag: Dag<i32> = dag!(
@@ -911,7 +911,7 @@ macro_rules! dag {
 /// Construct a branching DAG with single item branches
 ///
 /// ```rust
-/// use mahler::workflow::{Dag, par};
+/// use mahler::dag::{Dag, par};
 ///
 /// // Construct a DAG of i32 with three branches of one element each
 /// let dag: Dag<i32> = par!(1, 2, 3);
@@ -926,8 +926,12 @@ macro_rules! par {
     }
 }
 
-pub(crate) enum ExecutionStatus {
+/// DAG execution status
+pub enum ExecutionStatus {
+    /// All tasks in the DAG were executed
     Completed,
+
+    /// The execution was interrupted
     Interrupted,
 }
 
@@ -957,9 +961,9 @@ where
     /// This is only available for DAG items that implement Task
     ///
     /// NOTE: this is not public to avoid exposing external crate types
-    pub(crate) async fn execute(
+    pub async fn execute(
         self,
-        input: &Arc<tokio::sync::RwLock<T::Input>>,
+        input: &Arc<crate::sync::RwLock<T::Input>>,
         channel: Sender<T::Changes>,
         interrupt: Interrupt,
     ) -> Result<ExecutionStatus, AggregateError<T::Error>> {
@@ -997,7 +1001,7 @@ where
 
         async fn exec_node<T>(
             node: Link<T>,
-            input: &Arc<tokio::sync::RwLock<T::Input>>,
+            input: &Arc<crate::sync::RwLock<T::Input>>,
             channel: &Sender<T::Changes>,
             interrupt: &Interrupt,
         ) -> Result<Link<T>, InnerError<T::Error>>
@@ -1126,10 +1130,9 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
         time::Instant,
     };
-    use tracing::debug;
 
     use super::*;
-    use crate::workflow::channel;
+    use crate::sync::channel;
 
     fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
         if let Node::Item { .. } = &*node.read().unwrap() {
@@ -1662,7 +1665,6 @@ mod tests {
 
         let exec_result = dag.execute(&input, tx, sigint).await;
         let elapsed = start.elapsed();
-        debug!("Execution time: {:?}", elapsed);
         assert!(matches!(exec_result, Ok(ExecutionStatus::Completed)));
 
         let results = results.read().await;

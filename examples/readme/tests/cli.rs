@@ -1,11 +1,10 @@
-use anyhow::Result;
 use assert_cmd::cargo;
 use assert_cmd::prelude::*; // Add methods on commands
 use predicates::prelude::*;
 use std::process::{Command, Output}; // Run programs
 
 #[test]
-fn run_example() -> Result<()> {
+fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::new(cargo::cargo_bin!(env!("CARGO_PKG_NAME")));
     let assert = cmd.env("RUST_LOG", "debug").assert();
 

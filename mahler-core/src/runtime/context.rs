@@ -1,14 +1,13 @@
 use jsonptr::{PointerBuf, Token};
-use serde_json::Value;
 
-use crate::json::{Path, PathArgs};
+use crate::json::{Path, PathArgs, Value};
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 /// Describes the Task applicability context
 pub struct Context {
-    pub(crate) target: Value,
-    pub(crate) path: Path,
-    pub(crate) args: PathArgs,
+    pub target: Value,
+    pub path: Path,
+    pub args: PathArgs,
 }
 
 impl Context {
@@ -40,7 +39,7 @@ impl Context {
         Self { args, ..self }
     }
 
-    pub(crate) fn decoded_args(&self) -> PathArgs {
+    pub fn decoded_args(&self) -> PathArgs {
         PathArgs::from(
             self.args
                 .iter()

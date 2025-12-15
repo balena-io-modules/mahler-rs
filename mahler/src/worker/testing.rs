@@ -1,14 +1,14 @@
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::domain::Domain;
-use super::planner::{Planner, SearchError};
+use super::planner::{Planner, PlanningError};
+use super::workflow::Workflow;
 use super::{Ready, Uninitialized, Worker, WorkerState};
 
 use crate::error::Error;
 use crate::runtime::{Context, Resources, System};
 use crate::state::State;
 use crate::task::Task;
-use crate::workflow::Workflow;
 
 impl AsRef<Resources> for Uninitialized {
     fn as_ref(&self) -> &Resources {
@@ -43,7 +43,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     /// use mahler::task::{self, prelude::*};
     /// use mahler::extract::{View, Target};
     /// use mahler::worker::Worker;
-    /// use mahler::workflow::{Dag, seq};
+    /// use mahler::dag::{Dag, seq};
     ///
     /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
     ///    if *counter < tgt {
@@ -70,7 +70,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     /// # Panics
     ///
     /// This function will panic if any error happens during planning
-    pub fn find_workflow(&self, cur: O, tgt: O::Target) -> Result<Workflow, SearchError> {
+    pub fn find_workflow(&self, cur: O, tgt: O::Target) -> Result<Workflow, PlanningError> {
         let mut ini = System::try_from(cur).expect("failed to serialize initial state");
         let resources: &Resources = self.inner.as_ref();
         ini.set_resources(resources.clone());
@@ -188,8 +188,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::dag::{par, seq, Dag};
     use crate::extract::{Target, View};
-    use crate::{par, seq, task::*, workflow::Dag};
+    use crate::task::*;
 
     fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {
@@ -306,9 +307,9 @@ mod tests {
 
         // We expect a linear DAG with three tasks
         let expected: Dag<&str> = par!(
-            "mahler_core::worker::testing::tests::plus_one(/one)",
-            "mahler_core::worker::testing::tests::plus_one(/two)"
-        ) + seq!("mahler_core::worker::testing::tests::plus_one(/one)",);
+            "mahler::worker::testing::tests::plus_one(/one)",
+            "mahler::worker::testing::tests::plus_one(/two)"
+        ) + seq!("mahler::worker::testing::tests::plus_one(/one)",);
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
     }

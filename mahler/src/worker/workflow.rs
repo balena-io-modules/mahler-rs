@@ -2,30 +2,18 @@
 
 use async_trait::async_trait;
 use json_patch::{Patch, PatchOperation};
-use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{info, instrument};
 
-use crate::error::{Error, ErrorKind};
-use crate::json::{Operation, Path};
+use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
+use crate::error::{AggregateError, Error, ErrorKind};
+use crate::json::{Operation, Path, Value};
 use crate::runtime::System;
+use crate::sync::{Interrupt, RwLock, Sender};
 use crate::task::Action;
-
-mod aggregate_error;
-mod channel;
-mod dag;
-mod interrupt;
-
-pub use dag::*;
-pub use interrupt::Interrupt;
-
-pub(crate) use aggregate_error::*;
-pub(crate) use channel::*;
-pub(crate) use interrupt::*;
 
 #[derive(Hash)]
 /// Unique representation of a task acting on a specific path and system state.
@@ -159,11 +147,11 @@ pub(crate) enum WorkflowStatus {
     Interrupted,
 }
 
-impl From<ExecutionStatus> for WorkflowStatus {
-    fn from(status: ExecutionStatus) -> WorkflowStatus {
+impl From<DagExecutionStatus> for WorkflowStatus {
+    fn from(status: DagExecutionStatus) -> WorkflowStatus {
         match status {
-            ExecutionStatus::Completed => WorkflowStatus::Completed,
-            ExecutionStatus::Interrupted => WorkflowStatus::Interrupted,
+            DagExecutionStatus::Completed => WorkflowStatus::Completed,
+            DagExecutionStatus::Interrupted => WorkflowStatus::Interrupted,
         }
     }
 }

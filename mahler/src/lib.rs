@@ -428,18 +428,26 @@
 //! These utils can be used for testing and comparing generated workflows with specific DAGs. See
 //! [find_workflow](`worker::Worker::find_workflow`) for more info.
 pub use mahler_core::error;
-pub use mahler_core::extract;
+pub use mahler_core::json;
 pub use mahler_core::result;
-pub use mahler_core::task;
-pub use mahler_core::worker;
 
-pub mod workflow {
-    pub use mahler_core::workflow::Interrupt;
+use mahler_core::runtime;
 
-    #[cfg(debug_assertions)]
-    pub use mahler_core::workflow::{Dag, Workflow};
+pub mod extract;
+pub mod task;
+pub mod worker;
 
-    #[cfg(debug_assertions)]
+pub mod sync {
+    // Onl/ expose Interrupt publicly
+    pub use mahler_core::sync::Interrupt;
+
+    pub(crate) use mahler_core::sync::{channel, RwLock, Sender};
+}
+
+#[cfg(debug_assertions)]
+pub mod dag {
+    // FIXME: maybe move these exports to a mahler_testing crate
+    pub use mahler_core::dag::*;
     pub use mahler_core::{dag, par, seq};
 }
 
@@ -450,6 +458,8 @@ pub mod state {
     //! and deserialized in a standardized way, including the halted state.
 
     pub use mahler_core::state::*;
+
+    // Expose collection macros under the state module
     pub use mahler_core::{list, map, set};
 
     #[cfg(feature = "derive")]

@@ -26,7 +26,7 @@ impl Ord for Path {
     }
 }
 impl Path {
-    pub(crate) fn new(pointer: &Pointer) -> Self {
+    pub fn new(pointer: &Pointer) -> Self {
         Self(pointer.to_buf())
     }
 

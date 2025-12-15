@@ -2,7 +2,6 @@
 
 use json_patch::Patch;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,17 +16,23 @@ use tracing::{debug, error, field, info, info_span, span, trace, warn, Instrumen
 #[cfg(debug_assertions)]
 mod testing;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::{AggregateError, Error, ErrorKind};
+use crate::json::Value;
 use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::state::State;
+use crate::sync::{channel, Interrupt, Sender};
 use crate::task::Job;
-use crate::workflow::{channel, AggregateError, AutoInterrupt, Interrupt, Sender, WorkflowStatus};
 
+mod auto_interrupt;
 mod domain;
 mod planner;
+mod workflow;
+use auto_interrupt::AutoInterrupt;
 use domain::Domain;
-use planner::{Planner, SearchError};
+use planner::{Planner, PlanningError};
+
+pub use workflow::*;
 
 #[derive(Debug)]
 /// Exit status from [`Worker::seek_target`]
@@ -715,7 +720,7 @@ impl<O: State> Worker<O, Ready> {
 
         enum InnerSeekError {
             Runtime(AggregateError<Error>),
-            Planning(SearchError),
+            Planning(PlanningError),
         }
 
         async fn find_and_run_workflow<T: State>(
@@ -736,7 +741,7 @@ impl<O: State> Worker<O, Ready> {
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     let changes = match res {
                         Ok(ref workflow) => workflow.changes(),
-                        Err(SearchError::NotFound(ref changes)) => changes.iter().collect(),
+                        Err(PlanningError::NotFound(ref changes)) => changes.iter().collect(),
                         Err(e) => return Err(InnerSeekError::Planning(e)),
                     };
 
@@ -829,7 +834,7 @@ impl<O: State> Worker<O, Ready> {
                                     return Ok(SeekStatus::Interrupted);
                                 }
                                 Err(InnerSeekError::Planning(e)) =>  {
-                                    if let SearchError::Interrupted(err) = e {
+                                    if let PlanningError::Aborted(err) = e {
                                         return Err(err)
                                     }
                                     else {

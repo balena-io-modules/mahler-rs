@@ -657,8 +657,8 @@ mod tests {
     use std::collections::HashMap;
 
     use bollard::container::{ListContainersOptions, RemoveContainerOptions};
+    use mahler::dag::{dag, seq, Dag};
     use mahler::worker::SeekStatus;
-    use mahler::workflow::{dag, seq, Dag};
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use tracing_subscriber::fmt::{self, format::FmtSpan};

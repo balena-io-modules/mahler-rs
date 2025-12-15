@@ -1,10 +1,8 @@
 use json_patch::{AddOperation, PatchOperation, RemoveOperation, ReplaceOperation};
 use std::fmt;
 
-// Re-export Value from `serde_json` to make operation accessible
-pub use serde_json::Value;
-
 use super::path::Path;
+use super::value::Value;
 
 /// An operation on the system state
 #[derive(Debug, PartialEq, Eq, Clone)]
