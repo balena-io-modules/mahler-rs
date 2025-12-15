@@ -1,9 +1,10 @@
 use serde::{de::DeserializeOwned, Serialize};
 
+use super::domain::Domain;
+use super::planner::{Planner, SearchError};
 use super::{Ready, Uninitialized, Worker, WorkerState};
 
 use crate::error::Error;
-use crate::planner::{Domain, Planner, SearchError};
 use crate::runtime::{Context, Resources, System};
 use crate::state::State;
 use crate::task::Task;

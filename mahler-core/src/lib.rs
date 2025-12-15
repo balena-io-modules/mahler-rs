@@ -1,7 +1,5 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod planner;
-
 pub mod error;
 pub mod extract;
 pub mod json;

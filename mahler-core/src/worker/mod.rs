@@ -18,12 +18,16 @@ use tracing::{debug, error, field, info, info_span, span, trace, warn, Instrumen
 mod testing;
 
 use crate::error::{Error, ErrorKind};
-use crate::planner::{Domain, Planner, SearchError};
 use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::state::State;
 use crate::task::Job;
 use crate::workflow::{channel, AggregateError, AutoInterrupt, Interrupt, Sender, WorkflowStatus};
+
+mod domain;
+mod planner;
+use domain::Domain;
+use planner::{Planner, SearchError};
 
 #[derive(Debug)]
 /// Exit status from [`Worker::seek_target`]
