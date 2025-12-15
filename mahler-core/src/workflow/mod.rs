@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use tracing::{info, instrument};
 
 use crate::error::{Error, ErrorKind};
-use crate::json::Path;
+use crate::json::{Operation, Path};
 use crate::runtime::System;
 use crate::task::Action;
 
@@ -145,6 +145,9 @@ pub struct Workflow {
 
     /// List of ignored paths during planning due to a halted state
     ignored: Vec<Path>,
+
+    /// The list of operations that this workflow will perform
+    changes: Vec<Operation>,
 }
 
 /// Runtime status of a workflow execution
@@ -170,16 +173,26 @@ impl Workflow {
         Workflow {
             dag,
             ignored: Vec::new(),
+            changes: Vec::new(),
         }
     }
 
-    pub(crate) fn with_ignored(self, ignored: Vec<Path>) -> Self {
-        let Workflow { dag, .. } = self;
-        Workflow { dag, ignored }
+    pub(crate) fn with_ignored(mut self, ignored: Vec<Path>) -> Self {
+        self.ignored = ignored;
+        self
     }
 
-    pub fn ignored(&self) -> Vec<&str> {
-        self.ignored.iter().map(|p| p.as_str()).collect()
+    pub(crate) fn with_changes(mut self, changes: Vec<Operation>) -> Self {
+        self.changes = changes;
+        self
+    }
+
+    pub fn ignored(&self) -> Vec<&Path> {
+        self.ignored.iter().collect()
+    }
+
+    pub fn changes(&self) -> Vec<&Operation> {
+        self.changes.iter().collect()
     }
 
     /// Return `true` if the Workflow's internal graph has no elements

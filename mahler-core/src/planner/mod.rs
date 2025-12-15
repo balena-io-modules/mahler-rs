@@ -9,7 +9,7 @@ use tracing::field::display;
 use tracing::{field, instrument, trace, trace_span, warn, Span};
 
 use crate::error::{Error, ErrorKind};
-use crate::json::Path;
+use crate::json::{self, Path};
 use crate::runtime::{Context, System};
 use crate::state::{AsInternal, State};
 use crate::task::{Operation, Task};
@@ -147,35 +147,22 @@ impl Ord for Candidate {
     }
 }
 
-/// A workflow search error with a possible reason
+/// A workflow search error
 ///
-/// A workflow may not be found either due to a bug in a job definition, or because there is no
-/// valid combination of tasks  to reach the desired target. In the first case, this error will
-/// include a reason, containing the [Error](`crate::error::Error`) that caused the search to
-/// terminate.
+/// Search may be interrupted early because of a bug in a job definition. Searching for a workflow
+/// may fail because there is no valid combination of jobs in the domain to reach the desired
+/// target.
 #[derive(Debug)]
-pub struct NotFound {
-    reason: Option<Error>,
+pub enum SearchError {
+    /// Search was interrupted early due to an error in one of the job definitions
+    Interrupted(Error),
+    /// No combination of jobs was found for the give set of changes
+    NotFound(Vec<json::Operation>),
 }
 
-impl NotFound {
-    pub(crate) fn new() -> Self {
-        NotFound { reason: None }
-    }
-
-    pub(crate) fn with_reason(mut self, error: Error) -> Self {
-        self.reason = Some(error);
-        self
-    }
-
-    pub fn into_error(self) -> Option<Error> {
-        self.reason
-    }
-}
-
-impl fmt::Display for NotFound {
+impl fmt::Display for SearchError {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(reason) = self.reason.as_ref() {
+        if let SearchError::Interrupted(reason) = self {
             write!(fmt, "workflow not found: {reason}")
         } else {
             write!(fmt, "workflow not found")
@@ -183,11 +170,11 @@ impl fmt::Display for NotFound {
     }
 }
 
-impl std::error::Error for NotFound {}
+impl std::error::Error for SearchError {}
 
-impl From<Error> for NotFound {
+impl From<Error> for SearchError {
     fn from(e: Error) -> Self {
-        NotFound { reason: Some(e) }
+        SearchError::Interrupted(e)
     }
 }
 
@@ -332,31 +319,42 @@ impl Planner {
         &self,
         system: &System,
         tgt: &Value,
-    ) -> Result<Workflow, NotFound>
+    ) -> Result<Workflow, SearchError>
     where
         T: State,
     {
         trace!(initial=%system, target=%tgt, "searching for workflow");
+
+        // calculate the distance to the target at the beginning of the search
+        let ini = system
+            .state::<T::Target>()
+            .and_then(serde_json::to_value)
+            .map_err(Error::from)?;
+        let Patch(changes) = json_patch::diff(&ini, tgt);
+        let changes: Vec<json::Operation> =
+            changes.into_iter().map(json::Operation::from).collect();
+
         // The search stack stores (current_state, current_plan, depth)
         let mut stack = vec![(system.clone(), Dag::default(), 0)];
-
-        // Keep track of visited states
-        let mut visited_states = HashSet::new();
 
         let find_workflow_span = Span::current();
 
         // We serialize the state using AsInternal to get state metadata
+        // FIXME: remove this, we will replace it with some different mechanism
         let initial_state_with_meta = system
             .state::<T>()
             .and_then(|t| serde_json::to_value(AsInternal(&t)))
             .map_err(Error::from)?;
         let mut halted_state_paths: Vec<Path> = Vec::new();
 
+        // Keep track of visited states
+        let mut visited_states = HashSet::new();
+
         while let Some((cur_state, cur_plan, depth)) = stack.pop() {
             // Prevent infinite recursion (e.g., from buggy tasks or recursive methods)
             if depth >= 256 {
                 warn!(parent: &find_workflow_span, "reached max search depth (256)");
-                return Err(NotFound::new())?;
+                return Err(SearchError::NotFound(changes))?;
             }
 
             // Normalize state: deserialize into the target type and re-serialize to remove internal fields
@@ -374,7 +372,9 @@ impl Planner {
             // If there are no more operations, we’ve reached the goal
             if distance.is_empty() {
                 // we need to reverse the plan before returning
-                return Ok(Workflow::new(cur_plan.reverse()).with_ignored(halted_state_paths));
+                return Ok(Workflow::new(cur_plan.reverse())
+                    .with_ignored(halted_state_paths)
+                    .with_changes(changes));
             }
 
             let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
@@ -588,7 +588,7 @@ impl Planner {
         }
 
         // No candidate plan reached the goal state
-        Err(NotFound::new())?
+        Err(SearchError::NotFound(changes))?
     }
 }
 
@@ -664,7 +664,7 @@ mod tests {
         counter
     }
 
-    pub fn find_plan<T>(planner: Planner, cur: T, tgt: T::Target) -> Result<Workflow, NotFound>
+    pub fn find_plan<T>(planner: Planner, cur: T, tgt: T::Target) -> Result<Workflow, SearchError>
     where
         T: State,
     {
@@ -702,7 +702,7 @@ mod tests {
         let planner = Planner::new(domain);
         let workflow = find_plan(planner, 0, 2);
 
-        assert!(matches!(workflow, Err(NotFound { .. })));
+        assert!(matches!(workflow, Err(SearchError::NotFound(_))));
     }
 
     #[test]

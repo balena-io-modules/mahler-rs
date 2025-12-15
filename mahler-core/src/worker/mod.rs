@@ -18,7 +18,7 @@ use tracing::{debug, error, field, info, info_span, span, trace, warn, Instrumen
 mod testing;
 
 use crate::error::{Error, ErrorKind};
-use crate::planner::{Domain, NotFound, Planner};
+use crate::planner::{Domain, Planner, SearchError};
 use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::state::State;
@@ -711,7 +711,7 @@ impl<O: State> Worker<O, Ready> {
 
         enum InnerSeekError {
             Runtime(AggregateError<Error>),
-            Planning(NotFound),
+            Planning(SearchError),
         }
 
         async fn find_and_run_workflow<T: State>(
@@ -723,39 +723,30 @@ impl<O: State> Worker<O, Ready> {
         ) -> core::result::Result<InnerSeekResult, InnerSeekError> {
             info!("searching workflow");
             let now = Instant::now();
-            // Show pending changes at debug level
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                let system = sys_reader.read().await;
-                // We need to compare the state by first serializing the
-                // current state to I, removing any internal variables.
-                // This is also done by the planner to avoid comparing
-                // properties that are not part of the target state model.
-                // We throw a planning error immediately if this process fails as
-                // it will fail in planning anyway
-                // FIXME: the planning process should return the list of changes
-                // we should not be creating a planning result here
-                let cur = system
-                    .state::<T::Target>()
-                    .and_then(serde_json::to_value)
-                    .map_err(Error::from)
-                    .map_err(|e| NotFound::new().with_reason(e))
-                    .map_err(InnerSeekError::Planning)?;
-                let changes = json_patch::diff(&cur, tgt);
-                if !changes.0.is_empty() {
-                    // FIXME: this dumps internal state on the logs, we
-                    // might need to mask sensitive data like passwords somehow
-                    debug!("pending changes:");
-                    for change in &changes.0 {
-                        debug!("- {}", change);
-                    }
-                }
-            }
 
             let workflow = {
                 let system = sys_reader.read().await;
                 let res = planner.find_workflow::<T>(&system, tgt);
 
-                if let Err(NotFound { .. }) = res {
+                // Show pending changes at debug level
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let changes = match res {
+                        Ok(ref workflow) => workflow.changes(),
+                        Err(SearchError::NotFound(ref changes)) => changes.iter().collect(),
+                        Err(e) => return Err(InnerSeekError::Planning(e)),
+                    };
+
+                    if !changes.is_empty() {
+                        // FIXME: this dumps internal state on the logs, we
+                        // might need to mask sensitive data like passwords somehow
+                        debug!("pending changes:");
+                        for change in changes {
+                            debug!("- {}", change);
+                        }
+                    }
+                }
+
+                if res.is_err() {
                     warn!(time = ?now.elapsed(), "workflow not found");
                 }
                 res.map_err(InnerSeekError::Planning)?
@@ -833,9 +824,9 @@ impl<O: State> Worker<O, Ready> {
                                     seek_span.record("result", display("interrupted"));
                                     return Ok(SeekStatus::Interrupted);
                                 }
-                                Err(InnerSeekError::Planning(not_found)) =>  {
-                                    if let Some(err) = not_found.into_error() {
-                                        return Err(err);
+                                Err(InnerSeekError::Planning(e)) =>  {
+                                    if let SearchError::Interrupted(err) = e {
+                                        return Err(err)
                                     }
                                     else {
                                         seek_span.record("result", display("workflow_not_found"));

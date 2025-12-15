@@ -98,7 +98,7 @@ impl Distance {
                 // always exist. If it doesn't there is a bug (probbly in jsonptr)
                 let value = newparent
                     .resolve(tgt)
-                    .expect(&format!("path `{path}` should be resolvable on state"));
+                    .unwrap_or_else(|e| panic!("path `{path}` should be resolvable on state: {e}"));
 
                 // Insert a replace operation for each one
                 operations.insert(Operation::from(PatchOperation::Replace(ReplaceOperation {
@@ -116,7 +116,7 @@ impl Distance {
                 // resolvable on the left side of the diff
                 let value = path
                     .resolve(src)
-                    .expect(&format!("path `{path}` should be resolvable on state"));
+                    .unwrap_or_else(|e| panic!("path `{path}` should be resolvable on state: {e}"));
 
                 // add remove operations for inner values
                 insert_remove_ops(&mut operations, path, value);

@@ -3,7 +3,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use super::{Ready, Uninitialized, Worker, WorkerState};
 
 use crate::error::Error;
-use crate::planner::{Domain, NotFound, Planner};
+use crate::planner::{Domain, Planner, SearchError};
 use crate::runtime::{Context, Resources, System};
 use crate::state::State;
 use crate::task::Task;
@@ -69,7 +69,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     /// # Panics
     ///
     /// This function will panic if any error happens during planning
-    pub fn find_workflow(&self, cur: O, tgt: O::Target) -> Result<Workflow, NotFound> {
+    pub fn find_workflow(&self, cur: O, tgt: O::Target) -> Result<Workflow, SearchError> {
         let mut ini = System::try_from(cur).expect("failed to serialize initial state");
         let resources: &Resources = self.inner.as_ref();
         ini.set_resources(resources.clone());
