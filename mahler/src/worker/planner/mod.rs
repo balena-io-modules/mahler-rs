@@ -119,7 +119,6 @@ struct Candidate {
     path: Path,
     domain: BTreeSet<Path>,
     operation: Operation,
-    priority: u8,
     is_method: bool,
 }
 
@@ -141,8 +140,6 @@ impl Ord for Candidate {
             .then(self.is_method.cmp(&other.is_method))
             // Sort by operation (`Any` is after all other)
             .then(self.operation.cmp(&other.operation))
-            // Finally sort by job priority
-            .then(self.priority.cmp(&other.priority))
     }
 }
 
@@ -439,7 +436,6 @@ impl Planner {
                                         domain,
                                         is_method: task.is_method(),
                                         operation: job.operation().clone(),
-                                        priority: job.priority(),
                                     });
                                 }
 
@@ -502,7 +498,6 @@ impl Planner {
                 let mut plan_branches = Vec::new();
                 let mut changes = Vec::new();
                 let mut domain = BTreeSet::new();
-                let mut total_priority = 0;
                 let mut is_method = true;
                 // The path for the candidate is the longest common prefix between child paths
                 let path = longest_common_prefix(concurrent_candidates.keys());
@@ -516,14 +511,11 @@ impl Planner {
                         changes: candidate_changes,
                         domain: candidate_domain,
                         is_method: candidate_is_method,
-                        priority,
                         ..
                     } = candidate;
                     plan_branches.push(partial_plan);
                     changes.extend(candidate_changes);
                     domain.extend(candidate_domain);
-                    // Aggregate each branch priority
-                    total_priority += priority;
                     // Treat the candidate as a method when sorting if all children
                     // are methods
                     is_method = is_method && candidate_is_method;
@@ -537,7 +529,6 @@ impl Planner {
                     path,
                     is_method,
                     operation: Operation::Update,
-                    priority: total_priority,
                 })
             }
 

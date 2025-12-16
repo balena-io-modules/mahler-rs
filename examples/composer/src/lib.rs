@@ -644,8 +644,8 @@ pub fn create_worker() -> Worker<Project, Uninitialized> {
                 }),
                 // give this method higher priority than stop and uninstall
                 // service (default is 0)
-                delete(purge_service).with_priority(8),
-                delete(stop_and_uninstall_service),
+                delete(purge_service),
+                none(stop_and_uninstall_service),
                 update(update_service),
             ],
         )
