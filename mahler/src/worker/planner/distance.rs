@@ -1,11 +1,10 @@
 use json_patch::{diff, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use jsonptr::Pointer;
 use std::collections::btree_set::Iter;
-use std::fmt::{self, Display};
-use std::{cmp::Ordering, collections::BTreeSet};
+use std::collections::BTreeSet;
+use std::fmt;
 
-use crate::json::{Path, Value};
-use crate::task::Operation as JobOperation;
+use crate::json::{Operation, Path, Value};
 
 #[derive(Debug)]
 pub struct Distance {
@@ -49,8 +48,8 @@ fn insert_remove_ops(ops: &mut BTreeSet<Operation>, path: &Pointer, value: &Valu
     }
 }
 
-impl Display for Distance {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Distance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         self.changes.fmt(f)
     }
 }
@@ -140,55 +139,6 @@ impl Distance {
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub(crate) struct Operation(PatchOperation);
-
-impl Operation {
-    pub fn path(&self) -> &Pointer {
-        self.0.path()
-    }
-
-    pub fn matches(&self, op: &JobOperation) -> bool {
-        match self.0 {
-            PatchOperation::Add(..) => op == &JobOperation::Create,
-            PatchOperation::Replace(..) => op == &JobOperation::Update,
-            PatchOperation::Remove(..) => op == &JobOperation::Delete,
-            _ => false,
-        }
-    }
-}
-
-impl Display for Operation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl PartialOrd for Operation {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Operation {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let thispath = self.0.path();
-        let otherpath = other.0.path();
-
-        // Order operations by path length
-        thispath
-            .count()
-            .cmp(&otherpath.count())
-            .then(thispath.cmp(otherpath))
-    }
-}
-
-impl From<PatchOperation> for Operation {
-    fn from(op: PatchOperation) -> Operation {
-        Operation(op)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,7 +151,7 @@ mod tests {
         // Serialize results to make comparison easier
         let ops: Vec<Value> = distance
             .operations()
-            .map(|Operation(o)| serde_json::to_value(o).unwrap())
+            .map(|o| serde_json::to_value(o).unwrap())
             .collect();
 
         assert_eq!(ops, result)
@@ -213,41 +163,41 @@ mod tests {
             json!({"a": 1, "b": "one", "c": {"k": "v"}}),
             json!({"a": 2, "b": "one", "c": {}}),
             vec![
-                json!({"op": "replace", "path": "", "value": {"a": 2, "b": "one", "c": {}}}),
-                json!({"op": "replace", "path": "/a", "value": 2}),
-                json!({"op": "replace", "path": "/c", "value": {}}),
-                json!({"op": "remove", "path": "/c/k"}),
+                json!({"op": "update", "path": "", "value": {"a": 2, "b": "one", "c": {}}}),
+                json!({"op": "update", "path": "/a", "value": 2}),
+                json!({"op": "update", "path": "/c", "value": {}}),
+                json!({"op": "delete", "path": "/c/k"}),
             ],
         );
         distance_eq(
             json!({"a": 1, "b": "one", "c": {"k": "v"}}),
             json!({"a": 2}),
             vec![
-                json!({"op": "replace", "path": "", "value": {"a": 2}}),
-                json!({"op": "replace", "path": "/a", "value": 2}),
-                json!({"op": "remove", "path": "/b"}),
-                json!({"op": "remove", "path": "/c"}),
-                json!({"op": "remove", "path": "/c/k"}),
+                json!({"op": "update", "path": "", "value": {"a": 2}}),
+                json!({"op": "update", "path": "/a", "value": 2}),
+                json!({"op": "delete", "path": "/b"}),
+                json!({"op": "delete", "path": "/c"}),
+                json!({"op": "delete", "path": "/c/k"}),
             ],
         );
         distance_eq(
             json!({"a": 1, "b": "one", "c": {"k": "v"}}),
             json!({"a": 2, "b": "two", "c": {"k": "v"}}),
             vec![
-                json!({"op": "replace", "path": "", "value": {"a": 2, "b": "two", "c": {"k": "v"}}}),
-                json!({"op": "replace", "path": "/a", "value": 2}),
-                json!({"op": "replace", "path": "/b", "value": "two"}),
+                json!({"op": "update", "path": "", "value": {"a": 2, "b": "two", "c": {"k": "v"}}}),
+                json!({"op": "update", "path": "/a", "value": 2}),
+                json!({"op": "update", "path": "/b", "value": "two"}),
             ],
         );
         distance_eq(
             json!({"a": {"b": {"c": {"d": "e"}}}}),
             json!({"a": {"b": {}}}),
             vec![
-                json!({"op": "replace", "path": "", "value": {"a": {"b": {}}}}),
-                json!({"op": "replace", "path": "/a", "value": {"b": {}}}),
-                json!({"op": "replace", "path": "/a/b", "value": {}}),
-                json!({"op": "remove", "path": "/a/b/c"}),
-                json!({"op": "remove", "path": "/a/b/c/d"}),
+                json!({"op": "update", "path": "", "value": {"a": {"b": {}}}}),
+                json!({"op": "update", "path": "/a", "value": {"b": {}}}),
+                json!({"op": "update", "path": "/a/b", "value": {}}),
+                json!({"op": "delete", "path": "/a/b/c"}),
+                json!({"op": "delete", "path": "/a/b/c/d"}),
             ],
         );
     }

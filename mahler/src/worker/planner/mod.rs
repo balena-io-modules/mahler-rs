@@ -9,10 +9,10 @@ use tracing::{field, instrument, trace, trace_span, warn, Span};
 
 use crate::dag::Dag;
 use crate::error::{Error, ErrorKind};
-use crate::json::{self, Path, Value};
+use crate::json::{self, OperationMatcher, Path, Value};
 use crate::runtime::{Context, System};
 use crate::state::{AsInternal, State};
-use crate::task::{Operation, Task};
+use crate::task::Task;
 
 use super::domain::Domain;
 use super::workflow::{WorkUnit, Workflow};
@@ -23,7 +23,7 @@ use distance::*;
 #[derive(Debug, Clone)]
 pub struct Planner(Domain);
 
-/// Returns the longest subset of non-conflicting paths, preferring prefixes over specific paths.
+/// Returns the longest subset of non-conflictiJobOperationng paths, preferring prefixes over specific paths.
 /// When conflicts occur, prioritizes prefixes over more specific paths.
 /// For example, if /config appears after /config/some_var, we prefer /config and remove /config/some_var.
 fn select_non_conflicting_prefer_prefixes<'a, I>(paths: I) -> Vec<Path>
@@ -118,7 +118,7 @@ struct Candidate {
     changes: Vec<PatchOperation>,
     path: Path,
     domain: BTreeSet<Path>,
-    operation: Operation,
+    operation: OperationMatcher,
     is_method: bool,
 }
 
@@ -385,11 +385,11 @@ impl Planner {
 
             // Iterate over distance operations and jobs to find possible candidates
             for op in distance.operations() {
-                let path = Path::new(op.path());
+                let path = op.path();
                 let pointer = path.as_ref();
 
                 // skip the path if any parent path has been halted
-                if halted_state_paths.iter().any(|p| p.is_prefix_of(&path)) {
+                if halted_state_paths.iter().any(|p| p.is_prefix_of(path)) {
                     continue;
                 }
 
@@ -420,48 +420,46 @@ impl Planner {
                     };
 
                     // Filter `None` jobs from the list
-                    for job in jobs.filter(|j| j.operation() != &Operation::None) {
-                        if op.matches(job.operation()) || job.operation() == &Operation::Any {
-                            let task = job.new_task(context.clone());
-                            let mut changes = Vec::new();
-                            let mut domain = BTreeSet::new();
+                    for job in jobs.filter(|j| j.operation().matches(op)) {
+                        let task = job.new_task(context.clone());
+                        let mut changes = Vec::new();
+                        let mut domain = BTreeSet::new();
 
-                            // Try applying this task to the current state
-                            match self.try_task(&task, &cur_state, &mut domain, &mut changes) {
-                                Ok(partial_plan) if !changes.is_empty() => {
-                                    candidates.push(Candidate {
-                                        partial_plan,
-                                        changes,
-                                        path: task.path().clone(),
-                                        domain,
-                                        is_method: task.is_method(),
-                                        operation: job.operation().clone(),
-                                    });
-                                }
+                        // Try applying this task to the current state
+                        match self.try_task(&task, &cur_state, &mut domain, &mut changes) {
+                            Ok(partial_plan) if !changes.is_empty() => {
+                                candidates.push(Candidate {
+                                    partial_plan,
+                                    changes,
+                                    path: task.path().clone(),
+                                    domain,
+                                    is_method: task.is_method(),
+                                    operation: job.operation().clone(),
+                                });
+                            }
 
-                                Err(e) => match e.kind() {
-                                    // Skip the task if condition is not met
-                                    ErrorKind::ConditionNotMet => {}
-                                    // Critical internal errors terminate the search
-                                    ErrorKind::Internal => return Err(e)?,
-                                    // Other job errors are ignored unless debugging
-                                    _ => {
-                                        if cfg!(debug_assertions) {
-                                            return Err(e)?;
-                                        }
-                                        warn!(
-                                            parent: &find_workflow_span,
-                                            "task {} failed: {} ... ignoring",
-                                            task.id(),
-                                            e
-                                        );
+                            Err(e) => match e.kind() {
+                                // Skip the task if condition is not met
+                                ErrorKind::ConditionNotMet => {}
+                                // Critical internal errors terminate the search
+                                ErrorKind::Internal => return Err(e)?,
+                                // Other job errors are ignored unless debugging
+                                _ => {
+                                    if cfg!(debug_assertions) {
                                         return Err(e)?;
                                     }
-                                },
+                                    warn!(
+                                        parent: &find_workflow_span,
+                                        "task {} failed: {} ... ignoring",
+                                        task.id(),
+                                        e
+                                    );
+                                    return Err(e)?;
+                                }
+                            },
 
-                                // ignore if changes is empty
-                                _ => {}
-                            }
+                            // ignore if changes is empty
+                            _ => {}
                         }
                     }
                 }
@@ -528,7 +526,7 @@ impl Planner {
                     domain,
                     path,
                     is_method,
-                    operation: Operation::Update,
+                    operation: OperationMatcher::Update,
                 })
             }
 

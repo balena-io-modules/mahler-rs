@@ -1,27 +1,11 @@
 use std::cmp::Ordering;
 
+use crate::json::OperationMatcher;
 use crate::runtime::Context;
 
 use super::description::Description;
 use super::handler::Handler;
 use super::Task;
-
-#[derive(PartialEq, PartialOrd, Eq, Ord, Debug, Clone)]
-/// The operation a Job is applicable to
-pub enum Operation {
-    /// Tells the `Worker` the job is not to be automatically selected for any operation
-    ///
-    /// `None` jobs can still be used as part of compound tasks
-    None,
-    /// Tells the `Worker` the job is assignable to any operation
-    Any,
-    /// Tells the `Worker` the job is assignable to a [remove](https://datatracker.ietf.org/doc/html/rfc6902#section-4.2) operation
-    Delete,
-    /// Tells the `Worker` the job is assignable to an [add](https://datatracker.ietf.org/doc/html/rfc6902#section-4.1) operation
-    Create,
-    /// Tells the `Worker` the job is assignable to a [replace](https://datatracker.ietf.org/doc/html/rfc6902#section-4.3) operation
-    Update,
-}
 
 /// Encodes a generic repeatable system operation
 ///
@@ -32,16 +16,13 @@ pub enum Operation {
 /// is used to determine the applicability of a job to a state change.
 #[derive(Debug, Clone)]
 pub struct Job {
-    operation: Operation,
+    operation: OperationMatcher,
     task: Task,
 }
 
 impl Job {
-    pub(crate) fn new(task: Task) -> Self {
-        Job {
-            operation: Operation::Update,
-            task,
-        }
+    pub(crate) fn new(task: Task, operation: OperationMatcher) -> Self {
+        Job { operation, task }
     }
 
     /// Get the unique identifier for the job
@@ -52,17 +33,8 @@ impl Job {
     }
 
     /// Get the operation assigned to the job
-    pub fn operation(&self) -> &Operation {
+    pub fn operation(&self) -> &OperationMatcher {
         &self.operation
-    }
-
-    /// Set the job operation
-    ///
-    /// This is for internal use only. Users can set the operation by using the constructor
-    /// functions [`create`], [`update`], [`delete`], etc.
-    fn with_operation(mut self, operation: Operation) -> Self {
-        self.operation = operation;
-        self
     }
 
     /// Set a human readable description for the Job
@@ -104,16 +76,16 @@ macro_rules! define_job {
             H: Handler<T, O, I>,
             I: 'static,
         {
-            Job::new(handler.into_task()).with_operation($operation)
+            Job::new(handler.into_task(), $operation)
         }
     };
 }
 
-define_job!(create, Operation::Create);
-define_job!(update, Operation::Update);
-define_job!(delete, Operation::Delete);
-define_job!(any, Operation::Any);
-define_job!(none, Operation::None);
+define_job!(create, OperationMatcher::Create);
+define_job!(update, OperationMatcher::Update);
+define_job!(delete, OperationMatcher::Delete);
+define_job!(any, OperationMatcher::Any);
+define_job!(none, OperationMatcher::None);
 
 impl PartialEq for Job {
     fn eq(&self, other: &Self) -> bool {

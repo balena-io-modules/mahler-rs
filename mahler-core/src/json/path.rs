@@ -1,10 +1,11 @@
 use jsonptr::{Pointer, PointerBuf};
+use serde::Serialize;
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-#[derive(Clone, Default, PartialEq, Eq, Debug)]
+#[derive(Serialize, Clone, Default, PartialEq, Eq, Debug)]
 pub struct Path(PointerBuf);
 
 impl PartialOrd for Path {
