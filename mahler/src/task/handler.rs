@@ -8,7 +8,7 @@ use crate::error::Error;
 use crate::runtime::{Context, FromSystem, System};
 use crate::serde::Serialize;
 
-/// Trait for functions that can be used as worker jobs
+/// Trait for functions that can be converted into tasks
 ///
 /// A Handler is any function that accepts zero or more "[extractors](`crate::extract`)" as
 /// arguments and returns something that can be converted into an Effect on the
@@ -30,7 +30,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
         Id::from(std::any::type_name::<Self>())
     }
 
-    /// Create a task from the handler using the default context
+    /// Create a task from the handler using the default [Context](`crate::runtime::Context`)
     ///
     /// The generated task can be modified using [`Task::with_target`] and [`Task::with_arg`]
     fn into_task(self) -> Task;
@@ -59,7 +59,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     /// Create a task from the handler with a specific path argument
     ///
     /// This is a convenience method that is equivalent to calling
-    /// `handler.into_task().with_path()`.
+    /// `handler.into_task().with_arg()`.
     ///
     /// ```rust
     /// use mahler::task::Handler;

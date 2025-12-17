@@ -125,8 +125,8 @@ impl Task for WorkUnit {
 /// - If any task returns an error, the workflow execution is interrupted.
 ///
 /// Workflow implements [`Display`], using the [string representation defined for
-/// Dag](`Dag#string-representation-of-a-dag`), where each task is rendered from its provided
-/// [description](`crate::task::Job::with_description`).
+/// Dag](`crate::dag::Dag#string-representation-of-a-dag`), where each task is rendered from its provided
+/// [description](`crate::job::Job::with_description`).
 pub struct Workflow {
     /// The internal DAG that the workflow implements
     dag: Dag<WorkUnit>,

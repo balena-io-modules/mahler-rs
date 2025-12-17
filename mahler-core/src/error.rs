@@ -1,3 +1,5 @@
+//! Error handling types
+
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
@@ -62,6 +64,9 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+/// A mahler Error
+///
+/// All possible error types are described by [`ErrorKind`]
 #[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,

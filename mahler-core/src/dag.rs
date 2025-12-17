@@ -1,3 +1,5 @@
+//! Directed Acyclic Graph implementation and methods
+
 use async_trait::async_trait;
 use std::fmt;
 use std::ops::Add;
@@ -139,7 +141,7 @@ impl<T> Iterator for Iter<T> {
 ///
 /// # Operating with DAGs
 ///
-/// This module provides the [dag](`crate::dag`), [seq](`crate::seq`) and [par](`crate::par`) macros for easy DAG construction, `Dag`
+/// This module provides the [dag](`crate::dag!`), [seq](`crate::seq`) and [par](`crate::par`) macros for easy DAG construction, `Dag`
 /// also implements the [`Add`] trait for simple concatenation, and [`Default`] can be used to
 /// create an empty DAG.
 ///
@@ -939,8 +941,7 @@ pub enum ExecutionStatus {
 #[async_trait]
 /// Utility trait for executable DAGs
 ///
-/// This is different from [`crate::task::Task`]. Workflow items implementing this trait can be
-/// executed as part of a DAG (workflow) execution.
+/// Workflow items implementing this trait can be executed as part of a DAG (workflow) execution.
 pub trait Task {
     /// The input type for the Task
     type Input;

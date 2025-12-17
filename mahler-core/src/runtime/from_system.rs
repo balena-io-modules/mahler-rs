@@ -4,8 +4,6 @@ use super::system::System;
 use crate::result::Result;
 
 /// Trait for types that can be initialized from a system state and a given context
-///
-/// See [`crate::extract`] for more info.
 pub trait FromSystem: Sized {
     /// Try to initialize an extractor from the system state and context
     fn from_system(state: &System, context: &Context) -> Result<Self>;

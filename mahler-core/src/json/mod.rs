@@ -1,3 +1,5 @@
+//! JSON referencing and manipulation
+
 mod operation;
 mod path;
 mod value;

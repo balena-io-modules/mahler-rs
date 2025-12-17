@@ -9,7 +9,8 @@ mod de;
 mod error;
 
 #[derive(Debug)]
-/// Extracts arguments from the Task path and parses them using [`serde`]
+/// Extracts arguments from the Task path and parses them using
+/// [serde](https://docs.rs/serde/latest/serde/)
 ///
 /// # Example
 ///

@@ -1,4 +1,4 @@
-//! Types and traits for declaring and operating with Jobs and Tasks
+//! Types and traits for declaring and operating with Tasks
 mod description;
 mod effect;
 mod handler;
@@ -352,7 +352,7 @@ impl Task {
     /// Set a description for the task
     ///
     /// This is for internal use only, task descriptions must be defined using
-    /// [`Job::with_description`]
+    /// [Job::with_description](`crate::job::Job::with_description`)
     pub(crate) fn with_description<D, T>(self, description: D) -> Self
     where
         D: Description<T>,
@@ -369,7 +369,7 @@ impl Display for Task {
     /// Human readable description for the Task
     ///
     /// The description will be obtained from the [`Description`] handler set by calling
-    /// [`Job::with_description`]. If no description is set it defaults to `<task.id>(<task.path>)`
+    /// [Job::with_description](`crate::job::Job::with_description`). If no description is set it defaults to `<task.id>(<task.path>)`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Action(action) => action.fmt(f),

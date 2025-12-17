@@ -1,6 +1,6 @@
 # mahler
 
-`mahler` is an automated job orchestration library that builds and executes dynamic workflows.
+`mahler` is a library and engine for automatic orchestration of jobs into executable workflows.
 
 [![Crates.io](https://img.shields.io/crates/v/mahler)](https://crates.io/crates/mahler)
 [![Documentation](https://docs.rs/mahler/badge.svg)](https://docs.rs/mahler)
@@ -16,24 +16,25 @@ More information about this crate can be found in the [crate documentation](http
 
 Modern infrastructure requires intelligent automation that can adapt to changing conditions. Traditional static workflows become unmanageable as system complexity grows - you end up with brittle scripts that break when conditions change.
 
-Mahler solves this by using [automated planning](https://en.wikipedia.org/wiki/Automated_planning_and_scheduling) to generate workflows dynamically. Instead of writing complex conditional logic, you define simple jobs with their constraints. The planner automatically discovers the right sequence of operations to reach your target state.
+Mahler solves this by using [automated planning](https://en.wikipedia.org/wiki/Automated_planning_and_scheduling) to generate workflows dynamically. Instead of writing complex conditional logic, in Mahler, tasks are defined via simple Rust functions. The planner automatically discovers the right sequence of operations to reach a desired target state.
 
 ## Core Features
 
-- **Job-based architecture** - Define operations as Rust functions that operate on typed state
-- **Concurrent execution** - Planner detects when jobs can run concurrently based on state paths
-- **JSON state model** - System state represented as JSON with path-based job targeting
-- **Effect isolation** - Jobs separate planning logic from actual I/O operations
-- **Automatic re-planning** - Re-computes workflow when runtime conditions change
-- **Structured logging** - Built-in tracing integration for workflow execution monitoring
+- **Simple API** - system state is defined as Rust structs with the help of the provided [derive](https://crates.io/crates/mahler-derive) crate.
+  Allowed tasks are defined as pure Rust functions acting on a part or the whole system state.
+- **State engine with integrated planner** - tasks are configured as jobs in a `Worker` domain. On a new target state, the worker will look for necessary changes to reach the target and look for a workflow that allows to reach the target from the current state.
+- **Concurrent execution** - the internal planner detects when tasks can run concurrently based on state paths
+- **Automatic re-planning** - re-computes workflow when runtime conditions change
+- **Observable runtime** - monitor the evolving state of the system from the Worker API. For more detailed logging, the library uses the [tracing crate](https://crates.io/crates/tracing).
+- **Easy to debug** - worker observable state and known goals allow easy replicability when issues occur.
 
 ## Basic Usage
 
-In Mahler, a **Job** is a reusable operation you define (like "increment counter"). A **Task** is that job applied to a specific context (like "increment counter 'a' to value 5").
+In Mahler, a **Task** is an operation on a part of the system state that may chose to make changes given some target. It is defined as a pure Rust function. A **Job** is the configuration of the task to an operation on an operation on the system state. For instance a **task** may be "increment counter", but the **job** defines "use the 'increment counter' task for every counter that requires an update operation to reach the target".
 
-This separation lets the planner compose your jobs into workflows that achieve complex state transitions. Jobs are evaluated during planning to determine applicability to a given target and later executed at runtime. This duality needs to be built into the job definition.
+This separation lets the planner compose your jobs into workflows that achieve complex state transitions. Jobs are evaluated during planning to determine applicability to a given target and later executed at runtime.
 
-We'll create a system controller for a simple counting system. Let's define a job that operates on i32
+We'll create a system controller for a simple counting system. Let's define a task that operates on i32
 
 ```rust
 use std::time::Duration;
@@ -42,10 +43,10 @@ use tokio::time::sleep;
 use mahler::task::{IO, with_io};
 use mahler::extract::{Target, View};
 
-// `plus_one` defines a job that updates a counter if it is below some target.
-// The job makes use of two extractors:
+// `plus_one` defines a task that updates a counter if it is below some target.
+// The task makes use of two extractors:
 // - `View`, that provides a mutable view into the system state. By modifying the view,
-// the job task can affect the global state
+// the task can affect the global state
 // - `Target`, providing a read only view to the target being seeked by the planner
 fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
     if *counter < tgt {
@@ -53,7 +54,7 @@ fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
         *counter += 1;
     }
 
-    // The task is called at planning and at runtime, the `with_io` function
+    // This task is called at planning and at runtime, the `with_io` function
     // allows us to define what is returned by the function at each context.
     // The first argument of the function is what the planner receives,
     // the right side of the call is what will be executed at runtime if the
@@ -68,16 +69,16 @@ fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
 }
 ```
 
-The job above updates the counter if it is below the target, otherwise it returns the same value that it currently has. When planning, a job/task that perform no changes on the system state is not selected, which allows us to control when the job is considered applicable.
+The task above updates the counter if it is below the target, otherwise it returns the same value that it currently has. When planning, a task that performs no changes on the system state is not selected, which allows us to control when the task is considered applicable.
 
-The job above defines an atomic task, but we can also define compound tasks, that allow to bias the planner to certain workflows depending on the conditions. Let's define job to increase the counter by `two`.
+The function above defines an atomic task (also called an action), but we can also define compound tasks (also called methods), that allow to bias the planner to certain workflows depending on the conditions. Let's define a task to increase the counter by `two`.
 
 ```rust
 use mahler::task::Handler;
 use mahler::extract::{Target, View};
 
-// `plus_two` is a compound job. Compound job do not modify the state directly
-// but return combination of sub-tasks that are applicable to a certain target
+// `plus_two` is a compound task or method. A method does not modify the state directly
+// but return combination of tasks to be executed to reach the given target.
 fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
     // If the difference between the current state and target is >1
     if tgt - *counter > 1 {
@@ -90,27 +91,30 @@ fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
 }
 ```
 
-To use the jobs, we need to create a system model where the jobs will be applied. We'll use
+To use the tasks, we need to create a system model where the tasks will be applied. We'll use
 a Map.
 
 ```rust
 use mahler::state::{Map, State};
 
-// The state model needs to be Serializable and Deserializable
-// since the library uses JSON internally to access parts
-// of the state
+// The `State` macro allows to models the system in a way that
+// can evaluated by Mahler
 #[derive(State, Debug, PartialEq, Eq)]
 struct Counters(Map<String, i32>);
 ```
 
-Finally in order to create and run workflows we need a `Worker`:
+Finally in order to create and run workflows we need a `Worker`
 
 ```rust
 use mahler::worker::Worker;
 use mahler::job::update;
 
 let mut worker = Worker::new()
+    // try the task `plus_one` if an `update` operation on a counter is required
+    // to reach the target state
     .job("/{counter}", update(plus_one))
+    // try the task `plus_two` if an `update` operation on a counter is required
+    // to reach the target state
     .job("/{counter}", update(plus_two))
     .initial_state(Counters(Map::from([
         ("a".to_string(), 0),
@@ -126,6 +130,9 @@ worker.seek_target(CountersTarget(Map::from([
 
 println!("Final state: {:?}", worker.state().await?);
 ```
+
+Note that `plus_one` and `plus_two` are configured as jobs to `update` operations to a counter, referenced by the route `/{counter}`.
+This means that, when receving a new target, the worker will compare the current state with the target and convert it to a set of operations: `update`, `create`, `delete`, on specific paths of the state, and consider `plus_one` and `plus_two` as candidates whenever a update operation to a counter is required.
 
 ### Complete Example
 
@@ -155,7 +162,7 @@ async fn main() -> Result<()> {
         .init();
 
     let mut worker = Worker::new()
-        // The jobs are applicable to `UPDATE` operations
+        // The  jobs are applicable to `update` operations
         // on individual counters
         .job(
             "/{counter}",

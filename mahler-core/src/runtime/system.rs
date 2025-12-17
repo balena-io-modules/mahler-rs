@@ -35,7 +35,7 @@ impl Display for System {
 impl System {
     /// Try to create a System instance from a serializable state
     ///
-    /// It will return a [SerializationError](`crate::error::ErrorKind::SerializationError`) if the
+    /// It will return an [Error](`crate::error::Error`) of type [ErrorKind::Serialization](`crate::error::ErrorKind::Serialization`) if the
     /// state cannot be serialized into JSON
     pub fn try_from<S>(state: S) -> Result<Self>
     where

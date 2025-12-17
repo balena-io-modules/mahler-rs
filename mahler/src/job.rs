@@ -1,3 +1,5 @@
+//! Types for creating and manipulating Worker Jobs
+
 use std::cmp::Ordering;
 
 use crate::json::OperationMatcher;

@@ -430,7 +430,7 @@ impl<O, S: WorkerState + WithResources> Worker<O, S> {
 }
 
 impl<O> Worker<O, Uninitialized> {
-    /// Add a [Job](`crate::task::Job`) to the worker domain
+    /// Add a [Job](`crate::job::Job`) to the worker domain
     pub fn job(mut self, route: &'static str, job: Job) -> Self {
         self.inner.domain = self.inner.domain.job(route, job);
         self
@@ -470,7 +470,7 @@ impl<O> Worker<O, Uninitialized> {
     /// a different model is needed for the target state. See [State Type Compatibility](#state-type-compatibility).
     ///
     /// # Errors
-    /// The method will throw a [SerializationError](`crate::errors::SerializationError`) if the
+    /// The method will throw an [`Error`] of type [`ErrorKind::Serialization`] if the
     /// provided state cannot be converted to the internal state representation.
     pub fn initial_state(self, state: O) -> Result<Worker<O, Ready>>
     where
@@ -610,7 +610,7 @@ impl<O: State> Worker<O, Ready> {
     ///
     /// # Errors
     ///
-    /// The method will throw a [SerializationError](`crate::errors::SerializationError`) if the
+    /// The method will throw an [`Error`] of kind [`ErrorKind::Serialization`] if the
     /// internal state cannot be deserialized into the output type `<O>`
     pub async fn state(&self) -> Result<O>
     where
@@ -684,7 +684,7 @@ impl<O: State> Worker<O, Ready> {
     /// - `interrupt`: User-controlled interrupt for canceling the operation
     ///
     /// # Errors
-    /// The method will result in a [`SeekError`] if a serialization issue occurs while converting
+    /// The method will result in an [`Error`] if a serialization issue occurs while converting
     /// between state types, if the worker runtime panics or there is an unexpected error during
     /// planning.
     pub async fn seek_with_interrupt(
@@ -900,7 +900,7 @@ impl<O: State> Worker<O, Ready> {
     /// If no plan is found, the search terminates with a [`SeekStatus::NotFound`].
     ///
     /// # Errors
-    /// The method will result in a [`SeekError`] if a serialization issue occurs while converting
+    /// The method will result in an [`Error`] if a serialization issue occurs while converting
     /// between state types, if the worker runtime panics or there is an unexpected error during
     /// planning.
     pub async fn seek_target(&mut self, tgt: O::Target) -> Result<SeekStatus> {

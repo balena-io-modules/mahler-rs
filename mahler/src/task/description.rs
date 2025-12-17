@@ -1,11 +1,11 @@
 use crate::error::Error;
 use crate::runtime::{Context, FromContext};
 
-/// Trait for functions that can be used to describe a Job/Task
+/// Trait for functions that can be used to describe a task
 ///
 /// A description is any function that accepts zero or more context "[extractors](`crate::extract`)" as
 /// arguments and returns a String. A context extractor is a type that implements
-/// [FromContext](`super::FromContext`)
+/// [FromContext](`crate::runtime::FromContext`)
 ///
 /// Supported context extractors are
 ///

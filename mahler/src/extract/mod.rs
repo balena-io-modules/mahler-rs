@@ -4,7 +4,7 @@
 //!
 //! A [handler](`crate::task::Handler`) is any function that accepts zero or more "extractors" as
 //! arguments and returns something that can be converted into an effect on the
-//! system. An extractor is a type that implements [FromSystem](`crate::task::FromSystem`).
+//! system. An extractor is a type that implements [FromSystem](`crate::runtime::FromSystem`).
 //!
 //! ```rust,no_run
 //! use mahler::state::State;
@@ -85,7 +85,7 @@
 //!
 //! # Human readable Job descriptions
 //!
-//! Some extractors implement [FromContext](`crate::task::FromContext`), this means that these
+//! Some extractors implement [FromContext](`crate::runtime::FromContext`), this means that these
 //! extractors can be initialized without need to access to the system and can thus be used as part
 //! of [Job description](`crate::task::Description`).
 //!
