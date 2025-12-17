@@ -109,8 +109,9 @@ impl<T> Iterator for Iter<T> {
 /// automated tests.
 ///
 ///    ```rust
-/// use mahler::task::{self, prelude::*};
 /// use mahler::extract::{View, Target};
+/// use mahler::task::{IO, with_io};
+/// use mahler::job::update;
 /// use mahler::worker::Worker;
 /// use mahler::dag::{Dag, seq};
 ///

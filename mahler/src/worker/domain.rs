@@ -3,9 +3,9 @@ use std::collections::btree_set::Iter;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::error::{Error, ErrorKind};
+use crate::job::Job;
 use crate::json::PathArgs;
 use crate::result::Result;
-use crate::task::Job;
 
 #[derive(Default, Debug, Clone)]
 pub struct Domain {
@@ -198,8 +198,9 @@ mod tests {
     use super::*;
 
     use crate::extract::{Target, View};
+    use crate::job::*;
     use crate::json::PathArgs;
-    use crate::task::*;
+    use crate::task::{Handler, Task};
 
     fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {
         if *counter < *tgt {

@@ -595,8 +595,9 @@ mod tests {
 
     use crate::dag::{dag, par, seq, Dag};
     use crate::extract::{Args, System, Target, View};
+    use crate::job::*;
     use crate::state::{AsInternal, Map, State};
-    use crate::task::*;
+    use crate::task::prelude::*;
 
     fn init() {
         tracing_subscriber::registry()

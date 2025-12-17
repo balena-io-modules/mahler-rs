@@ -30,7 +30,7 @@
 //! ```rust,no_run
 //! use mahler::state::State;
 //! use mahler::worker::Worker;
-//! use mahler::task::prelude::*;
+//! use mahler::job::{create, update};
 //!
 //! #[derive(State)]
 //! struct MySystem;
@@ -434,6 +434,7 @@ pub use mahler_core::result;
 use mahler_core::runtime;
 
 pub mod extract;
+pub mod job;
 pub mod task;
 pub mod worker;
 

@@ -16,7 +16,7 @@ use crate::runtime::{Context, FromSystem, System as SystemState};
 /// use mahler::{
 ///     state::State,
 ///     extract::System,
-///     task::{Handler, update},
+///     job::update,
 ///     worker::{Worker, Ready}
 /// };
 ///

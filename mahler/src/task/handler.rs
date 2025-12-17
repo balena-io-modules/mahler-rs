@@ -44,7 +44,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     /// serialization errors should be rare and this makes the code more concise.
     ///
     /// ```rust
-    /// use mahler::task::prelude::*;
+    /// use mahler::task::{Handler, Task};
     ///
     /// fn foo() {}
     ///
@@ -61,7 +61,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     /// `handler.into_task().with_path()`.
     ///
     /// ```rust
-    /// use mahler::task::prelude::*;
+    /// use mahler::task::Handler;
     ///
     /// fn foo() {}
     ///

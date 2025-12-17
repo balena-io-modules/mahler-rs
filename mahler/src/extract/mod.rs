@@ -7,10 +7,10 @@
 //! system. An extractor is a type that implements [FromSystem](`crate::task::FromSystem`).
 //!
 //! ```rust,no_run
-//! use mahler::extract::{View, Target};
-//! use mahler::task::{Handler, update};
-//! use mahler::worker::{Worker, Ready};
 //! use mahler::state::State;
+//! use mahler::extract::{View, Target};
+//! use mahler::worker::{Worker, Ready};
+//! use mahler::job::update;
 //!
 //! #[derive(State)]
 //! struct Counters {/* .. */}
@@ -90,9 +90,9 @@
 //! of [Job description](`crate::task::Description`).
 //!
 //! ```rust,no_run
-//! use mahler::worker::{Worker, Uninitialized};
-//! use mahler::task::prelude::*;
 //! use mahler::extract::Args;
+//! use mahler::job::update;
+//! use mahler::worker::{Worker, Uninitialized};
 //!
 //! struct SystemState;
 //!

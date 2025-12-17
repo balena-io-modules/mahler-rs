@@ -18,7 +18,7 @@ use crate::runtime::{Context, FromSystem, System};
 /// use mahler::{
 ///     state::State,
 ///     extract::Res,
-///     task::{Handler, update},
+///     job::update,
 ///     worker::{Worker, Ready}
 /// };
 ///
@@ -53,7 +53,8 @@ use crate::runtime::{Context, FromSystem, System};
 /// use mahler::{
 ///     state::State,
 ///     extract::{View, Res},
-///     task::{Handler, update, with_io, IO},
+///     task::{IO, with_io},
+///     job::update,
 ///     worker::{Worker, Ready}
 /// };
 ///

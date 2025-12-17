@@ -4,7 +4,6 @@ mod effect;
 mod handler;
 mod into_result;
 mod io;
-mod job;
 
 use json_patch::Patch;
 use serde::Serialize;
@@ -23,13 +22,11 @@ pub(crate) use into_result::*;
 pub use description::*;
 pub use handler::*;
 pub use io::*;
-pub use job::*;
 
 pub mod prelude {
     //! Core types and traits for setting up tasks
     pub use super::handler::*;
     pub use super::io::*;
-    pub use super::job::{any, create, delete, none, update};
     pub use super::Task;
 }
 
@@ -293,7 +290,7 @@ impl Task {
     /// This function will panic if the serialization of the target fails
     ///
     /// ```rust
-    /// use mahler::task::prelude::*;
+    /// use mahler::task::Handler;
     ///
     /// fn foo() {}
     ///
@@ -307,7 +304,7 @@ impl Task {
     /// Set an argument for the task
     ///
     /// ```rust
-    /// use mahler::task::prelude::*;
+    /// use mahler::task::Handler;
     ///
     /// fn foo() {}
     ///

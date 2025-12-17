@@ -40,10 +40,11 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     ///
     /// # Example
     /// ```rust
-    /// use mahler::task::{self, prelude::*};
+    /// use mahler::task::{IO, with_io};
     /// use mahler::extract::{View, Target};
     /// use mahler::worker::Worker;
     /// use mahler::dag::{Dag, seq};
+    /// use mahler::job::update;
     ///
     /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
     ///    if *counter < tgt {
@@ -122,9 +123,10 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     /// use std::time::Duration;
     /// use tokio::time::sleep;
     ///
-    /// use mahler::task::{self, prelude::*};
+    /// use mahler::task::{Handler, IO, with_io};
     /// use mahler::extract::{View, Target};
     /// use mahler::worker::{Worker, Ready};
+    /// use mahler::job::update;
     ///
     /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
     ///    if *counter < tgt {
@@ -190,6 +192,7 @@ mod tests {
     use super::*;
     use crate::dag::{par, seq, Dag};
     use crate::extract::{Target, View};
+    use crate::job::*;
     use crate::task::*;
 
     fn plus_one(mut counter: View<i32>, tgt: Target<i32>) -> View<i32> {

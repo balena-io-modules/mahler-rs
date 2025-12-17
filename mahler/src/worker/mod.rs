@@ -17,12 +17,12 @@ use tracing::{debug, error, field, info, info_span, span, trace, warn, Instrumen
 mod testing;
 
 use crate::error::{AggregateError, Error, ErrorKind};
+use crate::job::Job;
 use crate::json::Value;
 use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::state::State;
 use crate::sync::{channel, Interrupt, Sender};
-use crate::task::Job;
 
 mod auto_interrupt;
 mod domain;
@@ -142,7 +142,8 @@ impl WithResources for Ready {
 /// use mahler::result::Result;
 /// use mahler::state::{State, Map};
 /// use mahler::worker::{Worker, SeekStatus};
-/// use mahler::task::prelude::*;
+/// use mahler::task::{IO, Task};
+/// use mahler::job::update;
 ///
 /// #[derive(State, Debug, PartialEq, Eq)]
 /// struct Counters(Map<String, i32>);
@@ -361,7 +362,6 @@ impl<O, S: WorkerState + WithResources> Worker<O, S> {
     /// Resources can be accessed by jobs using the [Res extractor](`crate::extract::Res`).
     ///
     /// ```rust
-    /// use mahler::task::prelude::*;
     /// use mahler::extract::Res;
     ///
     /// struct MyConnection;
@@ -410,7 +410,6 @@ impl<O, S: WorkerState + WithResources> Worker<O, S> {
     /// Resources can be accessed by jobs using the [Res extractor](`crate::extract::Res`).
     ///
     /// ```rust
-    /// use mahler::task::prelude::*;
     /// use mahler::extract::Res;
     ///
     /// struct MyConnection;
@@ -443,8 +442,8 @@ impl<O> Worker<O, Uninitialized> {
     ///
     /// ```rust
     /// use mahler::state::State;
+    /// use mahler::job::update;
     /// use mahler::worker::{Worker, Uninitialized};
-    /// use mahler::task::prelude::*;
     ///
     /// #[derive(State)]
     /// struct StateModel;
@@ -918,6 +917,7 @@ mod tests {
 
     use super::*;
     use crate::extract::{Target, View};
+    use crate::job::*;
     use crate::task::*;
     use serde::{Deserialize, Serialize};
     use tokio::time::{sleep, timeout};

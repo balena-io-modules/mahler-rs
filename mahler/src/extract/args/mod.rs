@@ -20,8 +20,8 @@ mod error;
 /// use mahler::{
 ///     state::State,
 ///     extract::Args,
-///     task::{Handler, update},
-///     worker::{Worker, Ready}
+///     job::update,
+///     worker::{Worker, Ready},
 /// };
 ///
 /// #[derive(State)]

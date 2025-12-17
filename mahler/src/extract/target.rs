@@ -16,7 +16,7 @@ use crate::state::State;
 /// use mahler::{
 ///     state::State,
 ///     extract::Target,
-///     task::{Handler, update},
+///     job::update,
 ///     worker::{Worker, Ready}
 /// };
 ///
@@ -40,7 +40,7 @@ use crate::state::State;
 /// use mahler::{
 ///     state::{State, List},
 ///     extract::Target,
-///     task::{Handler, update},
+///     job::update,
 ///     worker::Worker
 /// };
 ///
@@ -75,7 +75,7 @@ use crate::state::State;
 /// use mahler::{
 ///     state::State,
 ///     extract::Target,
-///     task::{Handler, delete},
+///     job::delete,
 ///     worker::{Worker, Ready}
 /// };
 ///
@@ -137,7 +137,7 @@ impl<T: State> Deref for Target<T> {
 /// use mahler::{
 ///     state::State,
 ///     extract::RawTarget,
-///     task::{Handler, update},
+///     job::update,
 ///     worker::{Worker, Ready}
 /// };
 /// use serde::Deserialize;

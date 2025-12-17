@@ -30,7 +30,8 @@ use crate::task::IntoResult;
 /// use mahler::{
 ///     state::State,
 ///     extract::View,
-///     task::{Handler, create, update, with_io, IO},
+///     task::{with_io, IO},
+///     job::{create, update},
 ///     worker::{Worker, Ready}
 /// };
 ///

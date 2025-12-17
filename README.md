@@ -39,7 +39,7 @@ We'll create a system controller for a simple counting system. Let's define a jo
 use std::time::Duration;
 use tokio::time::sleep;
 
-use mahler::task::prelude::*;
+use mahler::task::{IO, with_io};
 use mahler::extract::{Target, View};
 
 // `plus_one` defines a job that updates a counter if it is below some target.
@@ -73,7 +73,7 @@ The job above updates the counter if it is below the target, otherwise it return
 The job above defines an atomic task, but we can also define compound tasks, that allow to bias the planner to certain workflows depending on the conditions. Let's define job to increase the counter by `two`.
 
 ```rust
-use mahler::task::prelude::*;
+use mahler::task::Handler;
 use mahler::extract::{Target, View};
 
 // `plus_two` is a compound job. Compound job do not modify the state directly
@@ -107,7 +107,7 @@ Finally in order to create and run workflows we need a `Worker`:
 
 ```rust
 use mahler::worker::Worker;
-use mahler::task::prelude::*;
+use mahler::job::update;
 
 let mut worker = Worker::new()
     .job("/{counter}", update(plus_one))
@@ -137,7 +137,8 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 use mahler::state::{Map, State};
 use mahler::worker::Worker;
-use mahler::task::prelude::*;
+use mahler::task::{Handler, IO, with_io};
+use mahler::job::update;
 use mahler::extract::Args;
 
 #[tokio::main]
