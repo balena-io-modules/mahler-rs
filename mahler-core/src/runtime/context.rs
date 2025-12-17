@@ -38,19 +38,4 @@ impl Context {
         args.insert(key, encoded);
         Self { args, ..self }
     }
-
-    pub fn decoded_args(&self) -> PathArgs {
-        PathArgs::from(
-            self.args
-                .iter()
-                .map(|(key, value)| {
-                    let decoded = Token::from_encoded(value)
-                        .expect("value should be encoded")
-                        .decoded()
-                        .to_string();
-                    (key.as_ref(), decoded)
-                })
-                .collect::<Vec<(&str, String)>>(),
-        )
-    }
 }

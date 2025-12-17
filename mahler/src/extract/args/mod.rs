@@ -45,7 +45,7 @@ pub struct Args<T>(pub T);
 
 impl<T: DeserializeOwned + Send> FromContext for Args<T> {
     fn from_context(context: &Context) -> Result<Self> {
-        let args = context.decoded_args();
+        let args = context.args.try_as_decoded().map_err(Error::internal)?;
         let value = T::deserialize(de::PathDeserializer::new(&args))
             .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
 

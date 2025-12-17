@@ -1,4 +1,4 @@
-use jsonptr::{Pointer, PointerBuf};
+use jsonptr::{EncodingError, Pointer, PointerBuf, Token};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::fmt::Display;
@@ -102,16 +102,12 @@ impl Deref for Path {
     }
 }
 
-// Structure to store path arguments when matching
-// against a lens
+/// Structure to store path arguments that can be matched
+/// against a route
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct PathArgs(Vec<(Arc<str>, String)>);
 
 impl PathArgs {
-    pub fn iter(&self) -> impl Iterator<Item = &(Arc<str>, String)> {
-        self.0.iter()
-    }
-
     pub fn insert(&mut self, key: impl AsRef<str>, value: impl Into<String>) -> Option<String> {
         let existing = self.0.iter_mut().find(|(k, _)| k.as_ref() == key.as_ref());
         if let Some((_, v)) = existing {
@@ -126,6 +122,19 @@ impl PathArgs {
 
     pub fn contains_key(&self, key: impl AsRef<str>) -> bool {
         self.0.iter().any(|(k, _)| k.as_ref() == key.as_ref())
+    }
+
+    /// Try to decode args assuming RFC 6901 JSON encoding
+    pub fn try_as_decoded(&self) -> Result<PathArgs, EncodingError> {
+        let items: Result<Vec<(&str, String)>, EncodingError> = self
+            .iter()
+            .map(|(key, value)| {
+                let decoded = Token::from_encoded(value)?.decoded().to_string();
+                Ok((key.as_ref(), decoded))
+            })
+            .collect();
+
+        items.map(PathArgs::from)
     }
 }
 
