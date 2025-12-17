@@ -128,4 +128,21 @@ impl OperationMatcher {
             Delete => matches!(operation, Operation::Delete { .. }),
         }
     }
+
+    pub(crate) fn as_str(&self) -> &'static str {
+        use OperationMatcher::*;
+        match *self {
+            None => "none",
+            Any => "any",
+            Update => "update",
+            Create => "create",
+            Delete => "delete",
+        }
+    }
+}
+
+impl fmt::Display for OperationMatcher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(f)
+    }
 }

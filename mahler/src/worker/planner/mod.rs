@@ -4,7 +4,6 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use json_patch::{Patch, PatchOperation};
 use jsonptr::PointerBuf;
-use tracing::field::display;
 use tracing::{field, instrument, trace, trace_span, warn, Span};
 
 use crate::dag::Dag;
@@ -186,7 +185,6 @@ impl Planner {
         domain: &mut BTreeSet<Path>,
         changes: &mut Vec<PatchOperation>,
     ) -> Result<Dag<WorkUnit>, Error> {
-        let span = Span::current();
         match task {
             Task::Action(action) => {
                 let work_id = WorkUnit::new_id(action, cur_state.root());
@@ -198,10 +196,6 @@ impl Planner {
                     // the task condition not being met
                     return Err(ErrorKind::ConditionNotMet)?;
                 }
-
-                // The task has been selected
-                span.record("selected", display(true));
-                span.record("changes", display(&patch));
 
                 let Patch(ops) = patch;
 
@@ -223,7 +217,7 @@ impl Planner {
                 let mut extended_tasks = Vec::new();
 
                 for mut t in tasks.into_iter() {
-                    let task_id = t.id().to_string();
+                    let task_id = t.id();
 
                     let Context {
                         args: method_args, ..
@@ -231,8 +225,8 @@ impl Planner {
                     let Context { args, .. } = t.context_mut();
 
                     // Propagate arguments from the method into the child tasks.
-                    // This is just for better user experience as it avoids having to defint
-                    // arguments for each sub-task in the methos
+                    // This is just for better user experience as it avoids having to define
+                    // arguments for each sub-task in the method
                     for (k, v) in method_args.iter() {
                         if !args.contains_key(k) {
                             args.insert(k, v);
@@ -241,16 +235,16 @@ impl Planner {
 
                     // Find the job path on the domain list, pass the argument for path matching
                     // this will remove any unused arguments in the path
-                    let path = self.0.find_path_for_job(&task_id, args)?;
+                    let path = self.0.find_path(task_id, args)?;
 
                     // Using the path, now find the actual job on the domain.
-                    // The domain job includes metadata like the description that
+                    // The domain job includes additional configuration like the description that
                     // we want to use in the workflow
                     let job = self
                         .0
-                        .find_job(&path, &task_id)
+                        .find_job(&path, task_id)
                         // this should never happen since the path was returned by the domain
-                        .ok_or(Error::internal("should always find the path"))?;
+                        .ok_or(Error::internal(format!("should find a job for {path}")))?;
 
                     // Get a copy of the task for the final list
                     let task = job.new_task(t.context().to_owned()).with_path(path.clone());
@@ -299,10 +293,6 @@ impl Planner {
                 // After all tasks are evaluated, join remaining branches
                 let new_plan = Dag::new(plan_branches);
                 domain.extend(cumulative_domain);
-
-                let patch = Patch(changes.to_vec());
-                span.record("selected", display(true));
-                span.record("changes", display(patch));
 
                 // Include changes in the returned plan
                 Ok(new_plan)

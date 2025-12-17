@@ -2,6 +2,7 @@
 mod description;
 mod effect;
 mod handler;
+mod id;
 mod into_result;
 mod io;
 
@@ -21,6 +22,7 @@ pub(crate) use into_result::*;
 
 pub use description::*;
 pub use handler::*;
+pub use id::*;
 pub use io::*;
 
 pub mod prelude {
@@ -36,10 +38,10 @@ type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
 type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>> + Send + Sync>;
 type Describe = Arc<dyn Fn(&Context) -> Result<String> + Send + Sync>;
 
-#[derive(Clone)]
 /// An atomic task
+#[derive(Clone)]
 pub struct Action {
-    id: &'static str,
+    id: Id,
     scoped: bool,
     context: Context,
     dry_run: DryRun,
@@ -65,7 +67,7 @@ impl fmt::Debug for Action {
     }
 }
 
-fn default_description(id: &'static str, ctx: &Context) -> String {
+fn default_description(id: Id, ctx: &Context) -> String {
     format!("{}({})", id, ctx.path)
 }
 
@@ -102,7 +104,7 @@ impl Action {
     /// Get the unique identifier for the task
     ///
     /// The task id is the [`Handler`] type name
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> Id {
         self.id
     }
 
@@ -134,18 +136,17 @@ impl Action {
 
 impl Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let description = (self.describe)(self.context()).unwrap_or_else(|e| {
-            warn!("failed to expand description for task {}: {}", self.id, e);
-            default_description(self.id, self.context())
-        });
-        write!(f, "{description}")
+        (self.describe)(&self.context)
+            .inspect_err(|e| warn!("failed to expand description for task {}: {}", self.id, e))
+            .unwrap_or_else(|_| default_description(self.id, &self.context))
+            .fmt(f)
     }
 }
 
-#[derive(Clone)]
 /// A compound task, i.e. a task that can be expanded into child tasks
+#[derive(Clone)]
 pub struct Method {
-    id: &'static str,
+    id: Id,
     context: Context,
     expand: Expand,
     describe: Describe,
@@ -184,7 +185,7 @@ impl Method {
     /// Get the unique identifier for the task
     ///
     /// The task id is the [`Handler`] type name
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> Id {
         self.id
     }
 
@@ -199,18 +200,17 @@ impl Method {
 
 impl Display for Method {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let description = (self.describe)(self.context()).unwrap_or_else(|e| {
-            warn!("failed to expand description for task {}: {}", self.id, e);
-            default_description(self.id, self.context())
-        });
-        write!(f, "{description}")
+        (self.describe)(&self.context)
+            .inspect_err(|e| warn!("failed to expand description for task {}: {}", self.id, e))
+            .unwrap_or_else(|_| default_description(self.id, &self.context))
+            .fmt(f)
     }
 }
 
-#[derive(Debug, Clone)]
 /// Utility type to operate either with atomic or compound tasks
 ///
 /// A task describes the application of a [`Handler`] to a context.
+#[derive(Debug, Clone)]
 pub enum Task {
     /// An atomic task
     Action(Action),
@@ -234,8 +234,8 @@ impl Task {
     /// Get the unique identifier for the task
     ///
     /// The task id is the [`Handler`] type name
-    pub fn id(&self) -> &str {
-        match self {
+    pub fn id(&self) -> Id {
+        match *self {
             Self::Action(Action { id, .. }) => id,
             Self::Method(Method { id, .. }) => id,
         }
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn it_gets_metadata_from_function() {
-        assert_eq!(plus_one.id(), "mahler::task::tests::plus_one");
+        assert_eq!(plus_one.id(), "mahler::task::tests::plus_one".into());
     }
 
     #[test]

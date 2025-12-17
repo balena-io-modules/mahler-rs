@@ -13,15 +13,15 @@ use crate::error::{AggregateError, Error, ErrorKind};
 use crate::json::{Operation, Path, Value};
 use crate::runtime::System;
 use crate::sync::{Interrupt, RwLock, Sender};
-use crate::task::Action;
+use crate::task::{Action, Id};
 
-#[derive(Hash)]
 /// Unique representation of a task acting on a specific path and system state.
 ///
 /// The hash of this structure is used as the [`WorkUnit`] id
+#[derive(Hash)]
 struct WorkUnitId<'s> {
     /// The task id
-    task_id: String,
+    task_id: Id,
     /// The task path
     path: String,
     /// The state that is used to test the action
@@ -63,7 +63,7 @@ impl WorkUnit {
         let state = pointer.resolve(state).unwrap_or(&Value::Null);
 
         let action_id = WorkUnitId {
-            task_id: String::from(task.id()),
+            task_id: task.id(),
             path: task.context().path.to_string(),
             state,
         };

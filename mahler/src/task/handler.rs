@@ -2,6 +2,7 @@ use json_patch::Patch;
 use serde::Serialize;
 
 use super::effect::Effect;
+use super::id::Id;
 use super::{Action, Method, Task};
 
 use crate::error::Error;
@@ -25,8 +26,8 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     ///
     /// This is used accross the library to search for tasks for tracing purposes and human
     /// readable logs.
-    fn id(&self) -> &'static str {
-        std::any::type_name::<Self>()
+    fn id(&self) -> Id {
+        Id::from(std::any::type_name::<Self>())
     }
 
     /// Create a task from the handler using the default context

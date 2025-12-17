@@ -84,12 +84,12 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     }
 
     async fn run_task_with_system(&self, mut task: Task, system: &mut System) -> Result<(), Error> {
-        let task_id = task.id().to_string();
+        let task_id = task.id();
         let Context { args, .. } = task.context_mut();
 
         let domain: &Domain = self.inner.as_ref();
         let path = domain
-            .find_path_for_job(task_id.as_str(), args)
+            .find_path(task_id, args)
             .expect("could not find path for task");
 
         let task = task.with_path(path);
@@ -166,11 +166,11 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
         let resources: &Resources = self.inner.as_ref();
         system.set_resources(resources.clone());
 
-        let task_id = task.id().to_string();
+        let task_id = task.id();
         let Context { args, .. } = task.context_mut();
         let domain: &Domain = self.inner.as_ref();
         let path = domain
-            .find_path_for_job(task_id.as_str(), args)
+            .find_path(task_id, args)
             .expect("could not find path for task");
 
         let task = task.with_path(path);

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::json::OperationMatcher;
 use crate::runtime::Context;
-use crate::task::{Description, Handler, Task};
+use crate::task::{Description, Handler, Id, Task};
 
 /// Encodes a generic repeatable system operation
 ///
@@ -23,9 +23,7 @@ impl Job {
     }
 
     /// Get the unique identifier for the job
-    ///
-    /// The id is determined from the [`Handler`] type name
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> Id {
         self.task.id()
     }
 
@@ -99,6 +97,8 @@ impl PartialOrd for Job {
 
 impl Ord for Job {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.task.id().cmp(other.task.id())
+        self.id()
+            .cmp(&other.id())
+            .then(self.operation.cmp(&other.operation))
     }
 }

@@ -6,13 +6,14 @@ use crate::error::{Error, ErrorKind};
 use crate::job::Job;
 use crate::json::PathArgs;
 use crate::result::Result;
+use crate::task::Id as TaskId;
 
 #[derive(Default, Debug, Clone)]
 pub struct Domain {
     // The router stores a list of jobs matching a route
     router: Router<BTreeSet<Job>>,
-    // The index stores the reverse relation of job id to a route
-    index: HashMap<Box<str>, String>,
+    // The index stores the reverse relation of task id to a route
+    index: HashMap<TaskId, String>,
 }
 
 impl Domain {
@@ -37,36 +38,22 @@ impl Domain {
             mut index,
         } = self;
 
-        let job_id = String::from(job.id());
-        let operation = job.operation();
+        let task_id = job.id();
 
         // Remove the route from the router if it exists or create
         // a new set if it doesn't
         let mut queue = router.remove(route).unwrap_or_default();
-
-        // Do not allow the same job to be assigned to
-        // multiple operations. This could cause problems at
-        // runtime
-        if queue.iter().any(|j| j.id() == job_id) {
-            panic!(
-                "cannot assign job '{job_id}' to operation '{operation:?}', a previous assignment exists"
-            )
-        }
-
-        // Insert the route to the queue
-        let updated = queue.insert(job);
+        queue.insert(job);
 
         // (re)insert the queue to the router, we should not have
         // conflicts here
         router.insert(route, queue).expect("route should be valid");
 
         // Only allow one assignment of a job to a route
-        if updated {
-            if let Some(oldroute) =
-                index.insert(job_id.clone().into_boxed_str(), String::from(route))
-            {
+        if let Some(oldroute) = index.insert(task_id, String::from(route)) {
+            if oldroute != route {
                 panic!(
-                    "cannot assign job '{job_id}' to route '{route}', a previous assignment exists to '{oldroute}'"
+                    "cannot assign '{task_id}' to route '{route}', a previous assignment exists to '{oldroute}'"
                 )
             }
         }
@@ -79,18 +66,21 @@ impl Domain {
             .fold(self, |domain, job| domain.job(route, job))
     }
 
-    // This allows to find the path that a task relates to from the
-    // job it belongs to and the arguments given by the user as part
-    // of the context. It will also remove any unused args from the
-    // PathArgs passed as argument. This is not a great interface, but
-    // it allows to parse only once
-    pub(crate) fn find_path_for_job(&self, job_id: &str, args: &mut PathArgs) -> Result<String> {
-        if let Some(route) = self.index.get(job_id) {
+    /// Find the path that matches the given task id, replacing the path arguments
+    /// from the provided list
+    ///
+    /// It will also remove any unused args from the
+    /// PathArgs passed as argument. This is not a great interface, but
+    /// it allows to parse only once
+    pub(crate) fn find_path(&self, task_id: TaskId, args: &mut PathArgs) -> Result<String> {
+        if let Some(route) = self.index.get(&task_id) {
             let mut route = route.clone();
             let mut replacements = Vec::new();
             let mut used_keys = Vec::new();
 
-            // Step 1: Replace `{param}` and `{*param}` placeholders
+            // Step 1: Look for any `{param}` or `{*param}` references
+            // for every key in the argument list. If there any escaped params {{param}}, replace them
+            // with a tem placeholder.
             for (k, v) in args.iter() {
                 let param = format!("{{{k}}}");
                 let wildcard_param = format!("{{*{k}}}");
@@ -113,7 +103,7 @@ impl Domain {
                 route = route.replace(&param, &value);
             }
 
-            // Convert `{{param}}` → `{param}`
+            // Convert any other `{{param}}` → `{param}`
             let mut final_route = String::new();
             let mut chars = route.chars().peekable();
             let mut missing_args = Vec::new();
@@ -145,11 +135,13 @@ impl Domain {
                 }
             }
 
+            // If there are non escaped {param} in the list, then these
+            // arguments are missing a value and we need to fail
             if !missing_args.is_empty() {
                 return Err(Error::new(
                     ErrorKind::MissingArgs,
                     format!(
-                        "missing required arguments for job '{job_id}': {}",
+                        "missing required arguments for job '{task_id}': {}",
                         missing_args.join(", ")
                     ),
                 ));
@@ -169,22 +161,20 @@ impl Domain {
         } else {
             Err(Error::new(
                 ErrorKind::NotFound,
-                format!("{job_id} not in domain"),
+                format!("{task_id} not in domain"),
             ))
         }
     }
 
-    // Find a job given the path and the id
-    pub(crate) fn find_job(&self, path: &str, job_id: &str) -> Option<&Job> {
+    /// Find a job given the path and the id
+    pub(crate) fn find_job(&self, path: &str, task_id: TaskId) -> Option<&Job> {
         self.router
             .at(path)
             .ok()
-            .and_then(|matched| matched.value.iter().find(|job| job.id() == job_id))
+            .and_then(|matched| matched.value.iter().find(|job| job.id() == task_id))
     }
 
     /// Find matches for the given path in the domain
-    /// the matches are sorted in order that they should be
-    /// tested
     pub(crate) fn find_matching_jobs(&self, path: &str) -> Option<(PathArgs, Iter<'_, Job>)> {
         self.router
             .at(path)
@@ -223,18 +213,10 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn it_fails_if_assigning_the_same_job_to_multiple_ops() {
-        Domain::new()
-            .job("/counters/{counter}", update(plus_one))
-            .job("/counters/{counter}", update(plus_one));
-    }
-
-    #[test]
-    #[should_panic]
     fn it_fails_if_assigning_the_same_job_to_multiple_routes() {
         Domain::new()
             .job("/counters/{counter}", update(plus_one))
-            .job("/numbers/{counter}", create(plus_one));
+            .job("/numbers/{counter}", update(plus_one));
     }
 
     #[test]
@@ -244,7 +226,7 @@ mod tests {
             .job("/counters/{counter}", update(plus_two));
 
         let mut args = PathArgs::from(vec![("counter", "one")]);
-        let path = domain.find_path_for_job(plus_one.id(), &mut args).unwrap();
+        let path = domain.find_path(plus_one.id(), &mut args).unwrap();
         assert_eq!(path, String::from("/counters/one"))
     }
 
@@ -254,7 +236,7 @@ mod tests {
         let domain = Domain::new().job("/files/{*path}", update(func));
 
         let mut args = PathArgs::from(vec![("path", "documents/report.pdf")]);
-        let result = domain.find_path_for_job(func.id(), &mut args).unwrap();
+        let result = domain.find_path(func.id(), &mut args).unwrap();
 
         assert_eq!(result, "/files/documents/report.pdf".to_string());
     }
@@ -265,7 +247,7 @@ mod tests {
         let domain = Domain::new().job("/data/{{counter}}/edit", update(func));
 
         let mut args = PathArgs::from(vec![("counter", "456")]);
-        let result = domain.find_path_for_job(func.id(), &mut args).unwrap();
+        let result = domain.find_path(func.id(), &mut args).unwrap();
 
         assert_eq!(result, "/data/{counter}/edit".to_string()); // Escaped `{counter}` remains unchanged
         assert_eq!(args, PathArgs::default()); // counter was never used so it should have been removed
@@ -281,7 +263,7 @@ mod tests {
             ("path", "reports/january.csv"),
             ("unused", "some-value"),
         ]);
-        let result = domain.find_path_for_job(func.id(), &mut args).unwrap();
+        let result = domain.find_path(func.id(), &mut args).unwrap();
 
         assert_eq!(
             result,
@@ -301,7 +283,7 @@ mod tests {
 
         let mut args = PathArgs::from(vec![("counter", "999")]);
 
-        let result = domain.find_path_for_job(func.id(), &mut args);
+        let result = domain.find_path(func.id(), &mut args);
         assert!(result.is_err());
     }
 
@@ -311,7 +293,7 @@ mod tests {
         let domain = Domain::new().job("/tasks/{task_id}/check", update(func));
 
         let mut args = PathArgs::default(); // No arguments provided
-        let result = domain.find_path_for_job(func.id(), &mut args);
+        let result = domain.find_path(func.id(), &mut args);
         assert!(result.is_err());
     }
 
