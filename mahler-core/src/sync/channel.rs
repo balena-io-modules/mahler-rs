@@ -1,7 +1,7 @@
 use std::fmt;
 use tokio::sync::{mpsc, oneshot};
 
-/// A message wrapped with an acknowledgment channel
+/// A message that requires reception acknowledgement
 pub struct WithAck<T> {
     pub data: T,
     ack: Option<oneshot::Sender<()>>,
@@ -40,7 +40,7 @@ impl<T> Clone for Sender<T> {
 }
 
 impl<T> Sender<T> {
-    pub fn new(inner: mpsc::Sender<WithAck<T>>) -> Self {
+    fn new(inner: mpsc::Sender<WithAck<T>>) -> Self {
         Sender { inner }
     }
 
@@ -71,8 +71,26 @@ impl fmt::Display for SendError {
 
 impl std::error::Error for SendError {}
 
-/// Create a new acknowledged channel
-pub fn channel<T>(capacity: usize) -> (Sender<T>, mpsc::Receiver<WithAck<T>>) {
+/// A receiver of acknowledged messages
+pub struct Receiver<T> {
+    inner: mpsc::Receiver<WithAck<T>>,
+}
+
+impl<T> Receiver<T> {
+    fn new(inner: mpsc::Receiver<WithAck<T>>) -> Self {
+        Receiver { inner }
+    }
+
+    pub async fn recv(&mut self) -> Option<WithAck<T>> {
+        self.inner.recv().await
+    }
+}
+
+/// Create a new acknowledged channel with the specified capacity
+///
+/// A sender in an acknowledged channel will wait for the sent message
+/// to be acknowledged before releasing the sender
+pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let (tx, rx) = mpsc::channel(capacity);
-    (Sender::new(tx), rx)
+    (Sender::new(tx), Receiver::new(rx))
 }
