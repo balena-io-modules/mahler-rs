@@ -15,7 +15,6 @@ tracing-subscriber = { version = "0.3.19", default-features = false, features = 
   "ansi",
   "json",
 ] }
-serde = "1.0.219"
 tokio = { version = "1.44.2", default-features = false, features = [
   "rt-multi-thread",
   "time",

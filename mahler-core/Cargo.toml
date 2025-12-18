@@ -16,7 +16,7 @@ futures.workspace = true
 json-patch.workspace = true
 jsonptr.workspace = true
 matchit.workspace = true
-serde.workspace = true
+serde_core.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = [] }
 

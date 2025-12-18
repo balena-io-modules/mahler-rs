@@ -1,8 +1,7 @@
-use serde::de::DeserializeOwned;
-
 use crate::error::{Error, ErrorKind};
 use crate::result::Result;
 use crate::runtime::{Context, FromSystem, System as SystemState};
+use crate::serde::de::DeserializeOwned;
 
 /// Extracts the global system state managed by the [Worker](`crate::worker::Worker`)
 ///

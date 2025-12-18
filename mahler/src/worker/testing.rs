@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use serde::{de::DeserializeOwned, Serialize};
-
 use super::domain::Domain;
 use super::planner::{self, PlanningError};
 use super::workflow::Workflow;
@@ -9,6 +7,7 @@ use super::{Ready, Uninitialized, Worker, WorkerState};
 
 use crate::error::{Error, ErrorKind};
 use crate::runtime::{Resources, System};
+use crate::serde::{de::DeserializeOwned, Serialize};
 use crate::state::State;
 use crate::sync;
 use crate::system_ext::SystemExt;
@@ -184,7 +183,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::collections::HashMap;
 

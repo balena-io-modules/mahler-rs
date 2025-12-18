@@ -1,18 +1,49 @@
 use json_patch::{AddOperation, PatchOperation, RemoveOperation, ReplaceOperation};
-use serde::Serialize;
 use std::cmp::Ordering;
 use std::fmt;
 
 use super::path::Path;
 use super::value::Value;
 
+use crate::serde::{ser::SerializeMap, Serialize, Serializer};
+
 /// An operation on the system state
-#[derive(Serialize, Debug, PartialEq, Eq, Clone)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Operation {
     Create { path: Path, value: Value },
     Update { path: Path, value: Value },
     Delete { path: Path },
+}
+
+impl Serialize for Operation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use Operation::*;
+        match self {
+            Create { path, value } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("op", "create")?;
+                map.serialize_entry("path", path)?;
+                map.serialize_entry("value", value)?;
+                map.end()
+            }
+            Update { path, value } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("op", "update")?;
+                map.serialize_entry("path", path)?;
+                map.serialize_entry("value", value)?;
+                map.end()
+            }
+            Delete { path } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("op", "delete")?;
+                map.serialize_entry("path", path)?;
+                map.end()
+            }
+        }
+    }
 }
 
 impl Operation {

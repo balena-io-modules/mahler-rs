@@ -1,7 +1,6 @@
 //! Automated planning and execution of task workflows
 
 use json_patch::Patch;
-use serde::de::DeserializeOwned;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,6 +20,7 @@ use crate::job::Job;
 use crate::json::Value;
 use crate::result::Result;
 use crate::runtime::{Resources, System};
+use crate::serde::de::DeserializeOwned;
 use crate::state::State;
 use crate::sync::{channel, Interrupt, Sender};
 use crate::system_ext::SystemExt;

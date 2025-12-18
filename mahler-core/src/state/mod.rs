@@ -3,8 +3,9 @@
 //! This module provides the State trait which defines how types are serialized
 //! and deserialized in a standardized way, including the halted state.
 
-use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
+
+use crate::serde::{self, Deserialize, Serialize};
 
 mod collections;
 

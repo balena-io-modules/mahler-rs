@@ -430,6 +430,7 @@
 pub use mahler_core::error;
 pub use mahler_core::json;
 pub use mahler_core::result;
+pub use mahler_core::serde;
 
 use mahler_core::runtime;
 

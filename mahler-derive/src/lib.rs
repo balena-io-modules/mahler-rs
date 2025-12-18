@@ -277,12 +277,12 @@ fn generate_serialize_impl(
         .collect();
 
     quote! {
-        impl #impl_generics ::serde::Serialize for #struct_name #ty_generics #where_clause {
+        impl #impl_generics ::mahler::serde::Serialize for #struct_name #ty_generics #where_clause {
             fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
             where
-                __S: ::serde::Serializer,
+                __S: ::mahler::serde::Serializer,
             {
-                use ::serde::ser::SerializeStruct;
+                use ::mahler::serde::ser::SerializeStruct;
                 let mut __state = __serializer.serialize_struct(#struct_name_str, #field_count)?;
                 #(#field_serializations)*
                 __state.end()
@@ -331,7 +331,7 @@ fn generate_deserialize_impl(
                 })
             } else {
                 Some(quote! {
-                    #field_name: #field_name.ok_or_else(|| ::serde::de::Error::missing_field(#field_str))?
+                    #field_name: #field_name.ok_or_else(|| ::mahler::serde::de::Error::missing_field(#field_str))?
                 })
             }
         })
@@ -352,10 +352,10 @@ fn generate_deserialize_impl(
     };
 
     quote! {
-        impl #de_impl_generics ::serde::Deserialize<'de> for #struct_name #ty_generics #de_where_clause {
+        impl #de_impl_generics ::mahler::serde::Deserialize<'de> for #struct_name #ty_generics #de_where_clause {
             fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
             where
-                __D: ::serde::Deserializer<'de>,
+                __D: ::mahler::serde::Deserializer<'de>,
             {
                 #[allow(non_camel_case_types)]
                 enum __Field {
@@ -363,14 +363,14 @@ fn generate_deserialize_impl(
                     __ignore,
                 }
 
-                impl<'de> ::serde::Deserialize<'de> for __Field {
+                impl<'de> ::mahler::serde::Deserialize<'de> for __Field {
                     fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
                     where
-                        __D: ::serde::Deserializer<'de>,
+                        __D: ::mahler::serde::Deserializer<'de>,
                     {
                         struct __FieldVisitor;
 
-                        impl<'de> ::serde::de::Visitor<'de> for __FieldVisitor {
+                        impl<'de> ::mahler::serde::de::Visitor<'de> for __FieldVisitor {
                             type Value = __Field;
 
                             fn expecting(&self, __formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -379,7 +379,7 @@ fn generate_deserialize_impl(
 
                             fn visit_str<__E>(self, __value: &str) -> ::core::result::Result<Self::Value, __E>
                             where
-                                __E: ::serde::de::Error,
+                                __E: ::mahler::serde::de::Error,
                             {
                                 match __value {
                                     #(#field_strs => Ok(__Field::#field_names),)*
@@ -396,7 +396,7 @@ fn generate_deserialize_impl(
                     __phantom: ::core::marker::PhantomData<#struct_name #ty_generics>,
                 }
 
-                impl #de_impl_generics ::serde::de::Visitor<'de> for __Visitor #ty_generics #de_where_clause {
+                impl #de_impl_generics ::mahler::serde::de::Visitor<'de> for __Visitor #ty_generics #de_where_clause {
                     type Value = #struct_name #ty_generics;
 
                     fn expecting(&self, __formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -405,7 +405,7 @@ fn generate_deserialize_impl(
 
                     fn visit_map<__A>(self, mut __map: __A) -> ::core::result::Result<Self::Value, __A::Error>
                     where
-                        __A: ::serde::de::MapAccess<'de>,
+                        __A: ::mahler::serde::de::MapAccess<'de>,
                     {
                         #(let mut #field_names: Option<_> = None;)*
 
@@ -413,12 +413,12 @@ fn generate_deserialize_impl(
                             match __key {
                                 #(__Field::#field_names => {
                                     if #field_names.is_some() {
-                                        return Err(::serde::de::Error::duplicate_field(#field_strs));
+                                        return Err(::mahler::serde::de::Error::duplicate_field(#field_strs));
                                     }
                                     #field_names = Some(__map.next_value()?);
                                 })*
                                 __Field::__ignore => {
-                                    let _ = __map.next_value::<::serde::de::IgnoredAny>()?;
+                                    let _ = __map.next_value::<::mahler::serde::de::IgnoredAny>()?;
                                 }
                             }
                         }
@@ -504,9 +504,9 @@ fn generate_as_internal_impl(
     quote! {
         fn as_internal<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
         where
-            __S: ::serde::Serializer,
+            __S: ::mahler::serde::Serializer,
         {
-            use ::serde::ser::SerializeStruct;
+            use ::mahler::serde::ser::SerializeStruct;
 
             let mut __state = __serializer.serialize_struct(#struct_name_str, #field_count)?;
 
@@ -637,21 +637,21 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                     };
 
                     let expanded = quote! {
-                        impl #impl_generics ::serde::Serialize for #struct_name #ty_generics #where_clause {
+                        impl #impl_generics ::mahler::serde::Serialize for #struct_name #ty_generics #where_clause {
                             fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
                             where
-                                __S: ::serde::Serializer,
+                                __S: ::mahler::serde::Serializer,
                             {
                                 self.0.serialize(__serializer)
                             }
                         }
 
-                        impl #de_impl_generics ::serde::Deserialize<'de> for #struct_name #ty_generics #de_where_clause {
+                        impl #de_impl_generics ::mahler::serde::Deserialize<'de> for #struct_name #ty_generics #de_where_clause {
                             fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
                             where
-                                __D: ::serde::Deserializer<'de>,
+                                __D: ::mahler::serde::Deserializer<'de>,
                             {
-                                Ok(#struct_name(<#field_type as ::serde::Deserialize>::deserialize(__deserializer)?))
+                                Ok(#struct_name(<#field_type as ::mahler::serde::Deserialize>::deserialize(__deserializer)?))
                             }
                         }
 
@@ -659,21 +659,21 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                         #(#struct_attrs)*
                         #visibility struct #target_name #generics (#(#target_fields,)*) #where_clause;
 
-                        impl #impl_generics ::serde::Serialize for #target_name #ty_generics #where_clause {
+                        impl #impl_generics ::mahler::serde::Serialize for #target_name #ty_generics #where_clause {
                             fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
                             where
-                                __S: ::serde::Serializer,
+                                __S: ::mahler::serde::Serializer,
                             {
                                 self.0.serialize(__serializer)
                             }
                         }
 
-                        impl #de_impl_generics ::serde::Deserialize<'de> for #target_name #ty_generics #de_where_clause {
+                        impl #de_impl_generics ::mahler::serde::Deserialize<'de> for #target_name #ty_generics #de_where_clause {
                             fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
                             where
-                                __D: ::serde::Deserializer<'de>,
+                                __D: ::mahler::serde::Deserializer<'de>,
                             {
-                                Ok(#target_name(<#field_type as ::serde::Deserialize>::deserialize(__deserializer)?))
+                                Ok(#target_name(<#field_type as ::mahler::serde::Deserialize>::deserialize(__deserializer)?))
                             }
                         }
 
@@ -711,23 +711,23 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                     };
 
                     let expanded = quote! {
-                        impl #impl_generics ::serde::Serialize for #struct_name #ty_generics #where_clause {
+                        impl #impl_generics ::mahler::serde::Serialize for #struct_name #ty_generics #where_clause {
                             fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
                             where
-                                __S: ::serde::Serializer,
+                                __S: ::mahler::serde::Serializer,
                             {
                                 __serializer.serialize_unit_struct(#struct_name_str)
                             }
                         }
 
-                        impl #de_impl_generics ::serde::Deserialize<'de> for #struct_name #ty_generics #de_where_clause {
+                        impl #de_impl_generics ::mahler::serde::Deserialize<'de> for #struct_name #ty_generics #de_where_clause {
                             fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
                             where
-                                __D: ::serde::Deserializer<'de>,
+                                __D: ::mahler::serde::Deserializer<'de>,
                             {
                                 struct __Visitor;
 
-                                impl<'de> ::serde::de::Visitor<'de> for __Visitor {
+                                impl<'de> ::mahler::serde::de::Visitor<'de> for __Visitor {
                                     type Value = #struct_name;
 
                                     fn expecting(&self, __formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -736,7 +736,7 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 
                                     fn visit_unit<__E>(self) -> ::core::result::Result<Self::Value, __E>
                                     where
-                                        __E: ::serde::de::Error,
+                                        __E: ::mahler::serde::de::Error,
                                     {
                                         Ok(#struct_name)
                                     }
@@ -790,10 +790,10 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
             };
 
             let expanded = quote! {
-                impl #impl_generics ::serde::Serialize for #struct_name #ty_generics #where_clause {
+                impl #impl_generics ::mahler::serde::Serialize for #struct_name #ty_generics #where_clause {
                     fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
                     where
-                        __S: ::serde::Serializer,
+                        __S: ::mahler::serde::Serializer,
                     {
                         match self {
                             #(#struct_name::#variant_names => __serializer.serialize_unit_variant(
@@ -805,24 +805,24 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                     }
                 }
 
-                impl #de_impl_generics ::serde::Deserialize<'de> for #struct_name #ty_generics #de_where_clause {
+                impl #de_impl_generics ::mahler::serde::Deserialize<'de> for #struct_name #ty_generics #de_where_clause {
                     fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
                     where
-                        __D: ::serde::Deserializer<'de>,
+                        __D: ::mahler::serde::Deserializer<'de>,
                     {
                         #[allow(non_camel_case_types)]
                         enum __Field {
                             #(#variant_names,)*
                         }
 
-                        impl<'de> ::serde::Deserialize<'de> for __Field {
+                        impl<'de> ::mahler::serde::Deserialize<'de> for __Field {
                             fn deserialize<__D>(__deserializer: __D) -> ::core::result::Result<Self, __D::Error>
                             where
-                                __D: ::serde::Deserializer<'de>,
+                                __D: ::mahler::serde::Deserializer<'de>,
                             {
                                 struct __FieldVisitor;
 
-                                impl<'de> ::serde::de::Visitor<'de> for __FieldVisitor {
+                                impl<'de> ::mahler::serde::de::Visitor<'de> for __FieldVisitor {
                                     type Value = __Field;
 
                                     fn expecting(&self, __formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -831,33 +831,33 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 
                                     fn visit_u64<__E>(self, __value: u64) -> ::core::result::Result<Self::Value, __E>
                                     where
-                                        __E: ::serde::de::Error,
+                                        __E: ::mahler::serde::de::Error,
                                     {
-                                        Err(::serde::de::Error::invalid_value(
-                                            ::serde::de::Unexpected::Unsigned(__value),
+                                        Err(::mahler::serde::de::Error::invalid_value(
+                                            ::mahler::serde::de::Unexpected::Unsigned(__value),
                                             &"string"
                                         ))
                                     }
 
                                     fn visit_str<__E>(self, __value: &str) -> ::core::result::Result<Self::Value, __E>
                                     where
-                                        __E: ::serde::de::Error,
+                                        __E: ::mahler::serde::de::Error,
                                     {
                                         match __value {
                                             #(#variant_strs => Ok(__Field::#variant_names),)*
-                                            _ => Err(::serde::de::Error::unknown_variant(__value, &[#(#variant_strs,)*])),
+                                            _ => Err(::mahler::serde::de::Error::unknown_variant(__value, &[#(#variant_strs,)*])),
                                         }
                                     }
 
                                     fn visit_bytes<__E>(self, __value: &[u8]) -> ::core::result::Result<Self::Value, __E>
                                     where
-                                        __E: ::serde::de::Error,
+                                        __E: ::mahler::serde::de::Error,
                                     {
                                         match __value {
                                             #(v if v == #variant_strs.as_bytes() => Ok(__Field::#variant_names),)*
                                             _ => {
                                                 let __value = &::core::str::from_utf8(__value).unwrap_or("\u{fffd}");
-                                                Err(::serde::de::Error::unknown_variant(__value, &[#(#variant_strs,)*]))
+                                                Err(::mahler::serde::de::Error::unknown_variant(__value, &[#(#variant_strs,)*]))
                                             }
                                         }
                                     }
@@ -871,7 +871,7 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                             __phantom: ::core::marker::PhantomData<#struct_name #ty_generics>,
                         }
 
-                        impl #de_impl_generics ::serde::de::Visitor<'de> for __Visitor #ty_generics #de_where_clause {
+                        impl #de_impl_generics ::mahler::serde::de::Visitor<'de> for __Visitor #ty_generics #de_where_clause {
                             type Value = #struct_name #ty_generics;
 
                             fn expecting(&self, __formatter: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -880,9 +880,9 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 
                             fn visit_enum<__A>(self, __data: __A) -> ::core::result::Result<Self::Value, __A::Error>
                             where
-                                __A: ::serde::de::EnumAccess<'de>,
+                                __A: ::mahler::serde::de::EnumAccess<'de>,
                             {
-                                use ::serde::de::VariantAccess;
+                                use ::mahler::serde::de::VariantAccess;
                                 match __data.variant()? {
                                     #((__Field::#variant_names, __variant) => {
                                         __variant.unit_variant()?;

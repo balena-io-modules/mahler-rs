@@ -1,12 +1,22 @@
 use jsonptr::{EncodingError, Pointer, PointerBuf, Token};
-use serde::Serialize;
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-#[derive(Serialize, Clone, Default, PartialEq, Eq, Debug)]
+use crate::serde::{Serialize, Serializer};
+
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Path(PointerBuf);
+
+impl Serialize for Path {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
 
 impl PartialOrd for Path {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {

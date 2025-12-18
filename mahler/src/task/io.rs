@@ -1,13 +1,13 @@
 use std::{convert::Infallible, future::Future};
 
 use json_patch::Patch;
-use serde::Serialize;
 
 use super::effect::Effect;
 use super::into_result::IntoResult;
 
 use crate::error::Error;
 use crate::extract::View;
+use crate::serde::Serialize;
 
 /// A type representing a lazy I/O operation producing a value of type `T` or an error of type `E`.
 ///

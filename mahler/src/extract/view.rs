@@ -4,8 +4,6 @@ use json_patch::{
 };
 use jsonptr::resolve::ResolveError;
 use jsonptr::PointerBuf;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use serde_json::Value;
 use std::ops::{Deref, DerefMut};
 
@@ -13,6 +11,7 @@ use crate::error::{Error, ErrorKind};
 use crate::json::Path;
 use crate::result::Result;
 use crate::runtime::{Context, FromSystem, System};
+use crate::serde::{de::DeserializeOwned, Serialize};
 use crate::task::IntoResult;
 
 /// Extracts a view to a sub-element of the global state indicated

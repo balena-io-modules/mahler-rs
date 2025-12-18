@@ -16,6 +16,8 @@
 
 use std::fmt;
 
+use crate::serde;
+
 // this wrapper type is used as the deserializer error to hide the `serde::de::Error` impl which
 // would otherwise be public if we used `ErrorKind` as the error directly
 #[derive(Debug)]

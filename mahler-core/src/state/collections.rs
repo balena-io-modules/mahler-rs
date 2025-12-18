@@ -10,6 +10,8 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
+use crate::serde;
+
 use super::{AsInternal, State, StateDeserializer};
 
 /// A list of State values (newtype over Vec).
@@ -196,7 +198,6 @@ impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for ListVisitor<T>
 /// # Example
 /// ```
 /// use mahler::state::{set, Set, State};
-/// use serde::{Deserialize, Serialize};
 ///
 /// #[derive(State)]
 /// struct MyState {

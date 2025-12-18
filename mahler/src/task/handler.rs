@@ -1,5 +1,4 @@
 use json_patch::Patch;
-use serde::Serialize;
 
 use super::effect::Effect;
 use super::id::Id;
@@ -7,6 +6,7 @@ use super::{Action, Method, Task};
 
 use crate::error::Error;
 use crate::runtime::{Context, FromSystem, System};
+use crate::serde::Serialize;
 
 /// Trait for functions that can be used as worker jobs
 ///

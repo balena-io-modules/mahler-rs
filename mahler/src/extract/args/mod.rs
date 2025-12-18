@@ -1,9 +1,9 @@
-use serde::de::DeserializeOwned;
 use std::ops::Deref;
 
 use crate::error::{Error, ErrorKind};
 use crate::result::Result;
 use crate::runtime::{Context, FromContext, FromSystem, System};
+use crate::serde::de::DeserializeOwned;
 
 mod de;
 mod error;

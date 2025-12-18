@@ -15,7 +15,7 @@
 // of the Software.
 use super::error::{ArgsDeserializationError, ErrorKind};
 
-use serde::{
+use crate::serde::{
     de::{self, DeserializeSeed, EnumAccess, Error, MapAccess, SeqAccess, VariantAccess, Visitor},
     forward_to_deserialize_any, Deserializer,
 };
