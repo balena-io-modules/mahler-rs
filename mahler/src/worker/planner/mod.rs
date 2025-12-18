@@ -11,6 +11,7 @@ use crate::error::{Error, ErrorKind};
 use crate::json::{self, OperationMatcher, Path, Value};
 use crate::runtime::{Context, System};
 use crate::state::{AsInternal, State};
+use crate::system_ext::SystemExt;
 use crate::task::Task;
 
 use super::domain::Domain;
@@ -110,7 +111,7 @@ where
 
 /// Get a hash for the system state
 fn hash_state(state: &System) -> u64 {
-    let value = state.root();
+    let value = state.inner_state();
 
     // Create a DefaultHasher
     let mut hasher = DefaultHasher::new();
@@ -235,7 +236,7 @@ fn try_task_into_workflow(
 ) -> Result<Dag<WorkUnit>, Error> {
     match task {
         Task::Action(action) => {
-            let work_id = WorkUnit::new_id(action, cur_state.root());
+            let work_id = WorkUnit::new_id(action, cur_state.inner_state());
 
             // Simulate the task and get the list of changes
             let patch = action.dry_run(cur_state)?;
@@ -330,9 +331,7 @@ fn try_task_into_workflow(
                     };
 
                 // Apply the task changes
-                cur_state
-                    .patch(Patch(task_changes.to_vec()))
-                    .map_err(Error::internal)?;
+                cur_state.patch(Patch(task_changes.to_vec()))?;
 
                 // Add the new dag to the list of branches and update the cummulative domain
                 plan_branches.push(partial_plan);
@@ -368,8 +367,7 @@ where
     // calculate the distance to the target at the beginning of the search
     let ini = system
         .state::<T::Target>()
-        .and_then(serde_json::to_value)
-        .map_err(Error::from)?;
+        .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
     let Patch(changes) = json_patch::diff(&ini, tgt);
     let changes: Vec<json::Operation> = changes.into_iter().map(json::Operation::from).collect();
 
@@ -382,8 +380,7 @@ where
     // FIXME: remove this, we will replace it with some different mechanism
     let initial_state_with_meta = system
         .state::<T>()
-        .and_then(|t| serde_json::to_value(AsInternal(&t)))
-        .map_err(Error::from)?;
+        .and_then(|s| serde_json::to_value(AsInternal(&s)).map_err(Error::from))?;
     let mut halted_state_paths: Vec<Path> = Vec::new();
 
     // Keep track of visited states
@@ -399,8 +396,7 @@ where
         // Normalize state: deserialize into the target type and re-serialize to remove internal fields
         let cur = cur_state
             .state::<T::Target>()
-            .and_then(serde_json::to_value)
-            .map_err(Error::from)?;
+            .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
 
         // add the current state to the visited list
         visited_states.insert(hash_state(&cur_state));
@@ -587,7 +583,7 @@ where
         } in candidates.into_iter().rev()
         {
             let mut new_state = cur_state.clone();
-            new_state.patch(Patch(changes)).map_err(Error::internal)?;
+            new_state.patch(Patch(changes))?;
 
             // Ignore the candidate if it takes us to a state the planner has visited before,
             // this avoids the planner just trying tasks in a different order or potentially

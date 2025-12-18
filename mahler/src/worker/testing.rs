@@ -11,6 +11,7 @@ use crate::error::{Error, ErrorKind};
 use crate::runtime::{Resources, System};
 use crate::state::State;
 use crate::sync;
+use crate::system_ext::SystemExt;
 use crate::task::Task;
 
 impl AsRef<Resources> for Uninitialized {

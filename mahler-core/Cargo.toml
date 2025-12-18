@@ -29,7 +29,6 @@ tracing-subscriber = { version = "0.3.19", default-features = false, features = 
   "fmt",
   "env-filter",
 ] }
-tokio-test = "0.4.4"
 
 # Used to compile documentation 
 mahler = { path = "../mahler" }

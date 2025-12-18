@@ -23,6 +23,7 @@ use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::state::State;
 use crate::sync::{channel, Interrupt, Sender};
+use crate::system_ext::SystemExt;
 
 mod auto_interrupt;
 mod domain;

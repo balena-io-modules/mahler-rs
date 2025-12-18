@@ -1,10 +1,15 @@
-use json_patch::{patch, Patch};
 use serde::{de::DeserializeOwned, Serialize};
-use std::{fmt::Display, ops::Deref, sync::Arc};
+use std::{fmt::Display, sync::Arc};
+
+use crate::json::Value;
+use crate::result::Result;
 
 use super::resources::Resources;
-use crate::json::Value;
 
+/// The underlying system state and associated resources
+///
+/// This is used by the Worker to keep track of the system state while
+/// executing tasks
 #[derive(Clone)]
 pub struct System {
     state: Value,
@@ -27,7 +32,14 @@ impl Display for System {
 }
 
 impl System {
-    pub fn try_from<S: Serialize>(state: S) -> Result<Self, serde_json::Error> {
+    /// Try to create a System instance from a serializable state
+    ///
+    /// It will return a [SerializationError](`crate::error::ErrorKind::SerializationError`) if the
+    /// state cannot be serialized into JSON
+    pub fn try_from<S>(state: S) -> Result<Self>
+    where
+        S: Serialize,
+    {
         let state = serde_json::to_value(state)?;
         Ok(Self {
             state,
@@ -35,36 +47,35 @@ impl System {
         })
     }
 
-    pub fn root(&self) -> &Value {
+    /// Get a reference to the inner system state as a [json::Value](`Value`)
+    pub fn inner_state(&self) -> &Value {
         &self.state
     }
 
-    pub fn patch(&mut self, changes: Patch) -> Result<(), json_patch::PatchError> {
-        patch(&mut self.state, &changes)?;
-        Ok(())
+    /// Get a mutable reference to the inner system state as a [json::Value](`Value`)
+    pub fn inner_state_mut(&mut self) -> &mut Value {
+        &mut self.state
     }
 
-    pub fn state<S: DeserializeOwned>(&self) -> Result<S, serde_json::Error> {
+    /// Try to deserialize the inner system state into the desired type
+    pub fn state<S>(&self) -> Result<S>
+    where
+        S: DeserializeOwned,
+    {
         let s = serde_json::from_value(self.state.clone())?;
         Ok(s)
     }
 
+    /// Update the system resources
     pub fn set_resources(&mut self, resources: Resources) {
         self.resources = resources;
     }
 
+    /// Get a reference resource of type `<R>` from the system
     pub fn resource<R>(&self) -> Option<Arc<R>>
     where
         R: Send + Sync + 'static,
     {
         self.resources.get::<R>()
-    }
-}
-
-impl Deref for System {
-    type Target = Value;
-
-    fn deref(&self) -> &Self::Target {
-        &self.state
     }
 }

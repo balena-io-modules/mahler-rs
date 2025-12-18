@@ -96,7 +96,7 @@ impl<T> View<T> {
 impl<T: DeserializeOwned> FromSystem for View<T> {
     fn from_system(system: &System, context: &Context) -> Result<Self> {
         let pointer = context.path.as_ref();
-        let root = system.root();
+        let root = system.inner_state();
 
         // Use the parent of the pointer unless we are at the root
         let parent = pointer.parent().unwrap_or(pointer);
@@ -235,6 +235,7 @@ mod tests {
     use super::*;
     use crate::runtime::System;
     use crate::state::State;
+    use crate::system_ext::SystemExt;
 
     use json_patch::Patch;
     use pretty_assertions::assert_eq;
@@ -517,7 +518,7 @@ mod tests {
 
         system.patch(changes).unwrap();
         assert_eq!(
-            system.root(),
+            system.inner_state(),
             &serde_json::from_value::<Value>(json!({"numbers": ["one", "three"]})).unwrap()
         );
     }
