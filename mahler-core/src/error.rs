@@ -27,6 +27,8 @@ pub enum ErrorKind {
     Runtime,
     /// An internal error happened, this is probably a bug in mahler or one of its dependencies
     Internal,
+    /// An input to the worker is not valid
+    InvalidInput,
 }
 
 impl ErrorKind {
@@ -41,6 +43,7 @@ impl ErrorKind {
             MissingArgs => "missing arguments",
             Runtime => "runtime error",
             Internal => "internal error",
+            InvalidInput => "invalid input",
         }
     }
 }

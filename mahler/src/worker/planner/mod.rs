@@ -354,7 +354,7 @@ fn try_task_into_workflow(
 /// Find a workflow that takes the system from its current state
 /// to the target state using the tasks in the provided Domain
 #[instrument(level = "trace", skip_all, err(level = "trace"))]
-pub fn find_workflow_for_target<T>(
+pub fn find_workflow_to_target<T>(
     db: &Domain,
     system: &System,
     tgt: &Value,
@@ -407,9 +407,10 @@ where
         // If there are no more operations, we’ve reached the goal
         if distance.is_empty() {
             // we need to reverse the plan before returning
-            return Ok(Workflow::new(cur_plan.reverse())
-                .with_ignored(halted_state_paths)
-                .with_changes(changes));
+            let mut workflow = Workflow::new(cur_plan.reverse());
+            workflow.ignored = halted_state_paths;
+            workflow.operations = changes;
+            return Ok(workflow);
         }
 
         let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
@@ -700,7 +701,7 @@ mod tests {
         let system =
             crate::runtime::System::try_from(cur).expect("failed to serialize current state");
 
-        let res = find_workflow_for_target::<T>(db, &system, &tgt)?;
+        let res = find_workflow_to_target::<T>(db, &system, &tgt)?;
         Ok(res)
     }
 

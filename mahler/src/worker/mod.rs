@@ -2,6 +2,7 @@
 
 use json_patch::Patch;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{watch, Notify};
@@ -10,7 +11,9 @@ use tokio::{select, sync::RwLock};
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::field::display;
-use tracing::{debug, error, field, info, info_span, span, trace, warn, Instrument, Level, Span};
+use tracing::{
+    debug, error, field, info, info_span, instrument, span, trace, warn, Instrument, Level, Span,
+};
 
 #[cfg(debug_assertions)]
 mod testing;
@@ -86,6 +89,8 @@ pub struct Ready {
     update_event_channel: watch::Sender<()>,
     patch_tx: Sender<Patch>,
     notify_writer_closed: Arc<Notify>,
+    worker_id: u64,
+    generation: Arc<AtomicU64>,
 }
 
 /// Final state of a Worker
@@ -273,8 +278,6 @@ impl WithResources for Ready {
 /// The best way to avoid this is to use the `State` derive macro.
 ///
 /// ```rust
-/// use serde::{Deserialize, Serialize};
-///
 /// use mahler::state::State;
 ///
 /// #[derive(State, Debug)]
@@ -534,6 +537,11 @@ impl<O> Worker<O, Uninitialized> {
             );
         }
 
+        // Generate unique worker ID using random hash
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let worker_id = RandomState::new().build_hasher().finish();
+
         Ok(Worker::from_inner(Ready {
             domain,
             resources,
@@ -541,6 +549,8 @@ impl<O> Worker<O, Uninitialized> {
             update_event_channel,
             patch_tx,
             notify_writer_closed,
+            worker_id,
+            generation: Arc::new(AtomicU64::new(0)),
         }))
     }
 }
@@ -665,6 +675,129 @@ impl<O: State> Worker<O, Ready> {
         )
     }
 
+    /// Find a workflow to reach a target state
+    ///
+    /// Returns a workflow that can be executed with [`run_workflow`](Self::run_workflow).
+    /// The workflow remains valid while other workflows have been executed in the meantime.
+    ///
+    /// # Errors
+    /// Returns [`PlanningError::NotFound`] if no workflow can be found
+    /// Returns [`PlanningError::Aborted`] on internal errors
+    pub async fn find_workflow_to_target(
+        &self,
+        tgt: O::Target,
+    ) -> core::result::Result<Workflow, PlanningError> {
+        let tgt = serde_json::to_value(tgt).map_err(Error::from)?;
+
+        let Ready {
+            domain,
+            system_rwlock,
+            worker_id,
+            generation,
+            ..
+        } = &self.inner;
+
+        let system = system_rwlock.read().await;
+        let current_generation = generation.load(Ordering::Acquire);
+
+        let mut workflow = planner::find_workflow_to_target::<O>(domain, &system, &tgt)?;
+
+        // Attach worker metadata
+        workflow.worker_id = *worker_id;
+        workflow.generation = current_generation;
+
+        Ok(workflow)
+    }
+
+    /// Execute a previously found workflow
+    ///
+    /// This will only succeed if:
+    /// - The workflow was created by this worker (worker_id matches)
+    /// - No other workflows have been executed since the workflow was created (generation matches)
+    ///
+    /// # Errors
+    /// - [`ErrorKind::WorkflowWorkerMismatch`] if workflow was created by different worker
+    /// - [`ErrorKind::WorkflowStale`] if workflow generation doesn't match current generation
+    /// - [`ErrorKind::ConditionNotMet`] if workflow conditions changed at runtime (caller should re-plan)
+    /// - Returns [`SeekStatus::Aborted`] if workflow execution fails with runtime errors
+    #[instrument(skip_all)]
+    pub async fn run_workflow(
+        &mut self,
+        workflow: Workflow,
+        interrupt: Interrupt,
+    ) -> Result<SeekStatus> {
+        let Ready {
+            system_rwlock,
+            patch_tx,
+            worker_id,
+            generation,
+            notify_writer_closed,
+            ..
+        } = &self.inner;
+
+        // Validate workflow belongs to this worker
+        if workflow.worker_id != *worker_id {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "workflow worker_id {} does not match current worker_id {}",
+                    workflow.worker_id, worker_id
+                ),
+            ));
+        }
+
+        // Validate workflow is still current
+        let current_generation = generation.load(Ordering::Acquire);
+        if workflow.generation != current_generation {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "workflow created at generation {} but current generation is {}",
+                    workflow.generation, current_generation
+                ),
+            ));
+        }
+
+        let res = select! {
+            biased;
+            _ = notify_writer_closed.notified() => {
+                return Err(Error::internal("state patch failed, worker state possibly tainted"));
+            }
+            res = workflow.execute(system_rwlock, patch_tx.clone(), interrupt) => res
+        };
+
+        // Increment generation after every workflow execution as
+        // the state may have been changed by the workflow
+        generation.fetch_add(1, Ordering::Release);
+
+        match res {
+            Ok(status) => match status {
+                WorkflowStatus::Completed => Ok(SeekStatus::Success),
+                WorkflowStatus::Interrupted => Ok(SeekStatus::Interrupted),
+            },
+            Err(agg_err) => {
+                let AggregateError(all) = agg_err;
+                let mut recoverable = Vec::new();
+                let mut other = Vec::new();
+
+                for e in all.into_iter() {
+                    match e.kind() {
+                        ErrorKind::Runtime => recoverable.push(e),
+                        ErrorKind::ConditionNotMet => recoverable.push(e),
+                        _ => other.push(e),
+                    }
+                }
+
+                if !other.is_empty() {
+                    return Err(Error::internal(AggregateError::from(other)));
+                }
+
+                // All remaining errors are recoverable, abort
+                Ok(SeekStatus::Aborted(recoverable))
+            }
+        }
+    }
+
     /// Trigger system changes by providing a new target state and interrupt signal
     ///
     /// When called, this method tells the worker to look for a plan for the given
@@ -700,6 +833,7 @@ impl<O: State> Worker<O, Ready> {
             system_rwlock,
             notify_writer_closed,
             patch_tx,
+            generation,
             ..
         } = self.inner.clone();
 
@@ -726,25 +860,24 @@ impl<O: State> Worker<O, Ready> {
             tgt: &Value,
             patch_tx: &Sender<Patch>,
             sigint: &Interrupt,
+            generation: &Arc<AtomicU64>,
         ) -> core::result::Result<InnerSeekResult, InnerSeekError> {
             info!("searching workflow");
             let now = Instant::now();
 
             let workflow = {
                 let system = sys_reader.read().await;
-                let res = planner::find_workflow_for_target::<T>(domain, &system, tgt);
+                let res = planner::find_workflow_to_target::<T>(domain, &system, tgt);
 
                 // Show pending changes at debug level
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     let changes = match res {
-                        Ok(ref workflow) => workflow.changes(),
+                        Ok(ref workflow) => workflow.operations(),
                         Err(PlanningError::NotFound(ref changes)) => changes.iter().collect(),
                         Err(e) => return Err(InnerSeekError::Planning(e)),
                     };
 
                     if !changes.is_empty() {
-                        // FIXME: this dumps internal state on the logs, we
-                        // might need to mask sensitive data like passwords somehow
                         debug!("pending changes:");
                         for change in changes {
                             debug!("- {}", change);
@@ -756,6 +889,9 @@ impl<O: State> Worker<O, Ready> {
                     warn!(time = ?now.elapsed(), "workflow not found");
                 }
                 res.map_err(InnerSeekError::Planning)?
+
+                // NOTE: there is no need to set the workflow generation here since the
+                // workflow is only used internally
             };
 
             if workflow.is_empty() {
@@ -779,11 +915,17 @@ impl<O: State> Worker<O, Ready> {
 
             let now = Instant::now();
             info!("executing workflow");
-            let status = workflow
+            let res = workflow
                 .execute(sys_reader, patch_tx.clone(), sigint.clone())
                 .await
-                .map_err(InnerSeekError::Runtime)?;
+                .map_err(InnerSeekError::Runtime);
 
+            // Increment worker generation after every workflow execution as
+            // state may have changed
+            generation.fetch_add(1, Ordering::Release);
+
+            // Get the status from the result
+            let status = res?;
             info!(time = ?now.elapsed(), "workflow executed successfully");
 
             if matches!(status, WorkflowStatus::Interrupted) {
@@ -806,77 +948,77 @@ impl<O: State> Worker<O, Ready> {
 
             // We spawn a task rather than looping directly so we can catch panics happening
             // within the loop
-            tokio::spawn(async move {
-                let seek_span = Span::current();
-                info!("applying target state");
-                loop {
-                    select! {
-                        biased;
+            tokio::spawn(
+                async move {
+                    let seek_span = Span::current();
+                    info!("applying target state");
+                    loop {
+                        let res = select! {
+                            biased;
+                            _ = err_rx.notified() => {
+                                return Err(Error::internal("state patch failed, worker state possibly tainted"));
+                            }
+                            res = find_and_run_workflow::<O>(&domain, &sys_reader, &tgt, &patch_tx, &interrupt, &generation) => res
+                        };
 
-                        _ = err_rx.notified() => {
-                            return Err(Error::internal("state patch failed, worker state possibly tainted"))?;
-                        }
+                        match res {
+                            Ok(InnerSeekResult::TargetReached) => {
+                                info!("target state applied");
+                                seek_span.record("result", display("success"));
+                                return Ok(SeekStatus::Success);
+                            }
+                            Ok(InnerSeekResult::WorkflowCompleted) => {}
+                            Ok(InnerSeekResult::Interrupted) => {
+                                warn!("target state apply interrupted by user request");
+                                seek_span.record("result", display("interrupted"));
 
-                        res = find_and_run_workflow::<O>(&domain, &sys_reader, &tgt, &patch_tx, &interrupt) => {
-                            match res {
-                                Ok(InnerSeekResult::TargetReached) => {
-                                    info!("target state applied");
-                                    seek_span.record("result", display("success"));
-                                    return Ok(SeekStatus::Success);
+                                return Ok(SeekStatus::Interrupted);
+                            }
+                            Err(InnerSeekError::Planning(e)) => {
+                                if let PlanningError::Aborted(err) = e {
+                                    return Err(err);
+                                } else {
+                                    seek_span.record("result", display("workflow_not_found"));
+                                    return Ok(SeekStatus::NotFound);
                                 }
-                                Ok(InnerSeekResult::WorkflowCompleted) => {}
-                                Ok(InnerSeekResult::Interrupted) => {
-                                    warn!("target state apply interrupted by user request");
-                                    seek_span.record("result", display("interrupted"));
-                                    return Ok(SeekStatus::Interrupted);
-                                }
-                                Err(InnerSeekError::Planning(e)) =>  {
-                                    if let PlanningError::Aborted(err) = e {
-                                        return Err(err)
-                                    }
-                                    else {
-                                        seek_span.record("result", display("workflow_not_found"));
-                                        return Ok(SeekStatus::NotFound);
+                            }
+                            Err(InnerSeekError::Runtime(err)) => {
+                                let mut io = Vec::new();
+                                let mut other = Vec::new();
+                                let AggregateError(all) = err;
+                                for e in all.into_iter() {
+                                    match e.kind() {
+                                        ErrorKind::Runtime => io.push(e),
+                                        ErrorKind::ConditionNotMet => {}
+                                        _ => other.push(e),
                                     }
                                 }
-                                Err(InnerSeekError::Runtime(err)) => {
-                                    let mut io = Vec::new();
-                                    let mut other = Vec::new();
-                                    let AggregateError (all) = err;
-                                    for e in all.into_iter() {
-                                        match e.kind() {
-                                            ErrorKind::Runtime => io.push(e),
-                                            ErrorKind::ConditionNotMet => {}
-                                            _ => other.push(e)
-                                        }
 
-                                    }
-
-                                    // If there are non-IO errors, there is
-                                    // probably a bug somewhere so we package it as an internal
-                                    // error
-                                    if !other.is_empty() {
-                                        return Err(Error::internal(AggregateError::from(other)))?;
-                                    }
-
-                                    // Abort if there are any runtime errors as those
-                                    // should be recoverable
-                                    if !io.is_empty() {
-                                        warn!("target state apply interrupted due to error");
-                                        seek_span.record("result", display("aborted"));
-                                        return Ok(SeekStatus::Aborted(io))
-                                    }
-
-                                    // If we got here, all errors were of type ConditionNotMet
-                                    // in which case we re-plan as the state may have changed
-                                    // underneath the worker
-                                    continue;
+                                // If there are non-IO errors, there is
+                                // probably a bug somewhere so we package them as an internal
+                                // error
+                                if !other.is_empty() {
+                                    return Err(Error::internal(AggregateError::from(other)))?;
                                 }
+
+                                // Abort if there are any runtime errors as those
+                                // should be recoverable
+                                if !io.is_empty() {
+                                    warn!("target state apply interrupted due to error");
+                                    seek_span.record("result", display("aborted"));
+                                    return Ok(SeekStatus::Aborted(io));
+                                }
+
+                                // If we got here, all errors were of type ConditionNotMet
+                                // in which case we re-plan as the state may have changed
+                                // underneath the worker
+                                continue;
                             }
                         }
                     }
                 }
-            }.instrument(info_span!("seek_target", result=field::Empty)))
+                .instrument(info_span!("seek_target", result = field::Empty)),
+            )
         };
 
         let status = match handle.await {
@@ -998,6 +1140,81 @@ mod tests {
                 ("two".to_string(), 0),
             ]))
         );
+    }
+
+    #[tokio::test]
+    async fn test_worker_find_and_run_separately() {
+        init();
+        let mut worker = Worker::new()
+            .job("/{counter}", update(plus_one))
+            .initial_state(Counters(HashMap::from([
+                ("one".to_string(), 0),
+                ("two".to_string(), 0),
+            ])))
+            .unwrap();
+
+        let workflow = worker
+            .find_workflow_to_target(Counters(HashMap::from([
+                ("one".to_string(), 2),
+                ("two".to_string(), 0),
+            ])))
+            .await
+            .unwrap();
+
+        let workflow_copy = workflow.clone();
+
+        // Run the workflow
+        let status = worker
+            .run_workflow(workflow, Interrupt::new())
+            .await
+            .unwrap();
+
+        assert_eq!(status, SeekStatus::Success);
+        let state = worker.state().await.unwrap();
+        assert_eq!(
+            state,
+            Counters(HashMap::from([
+                ("one".to_string(), 2),
+                ("two".to_string(), 0),
+            ]))
+        );
+
+        // Try to run the old-workflow again, this should fail
+        let res = worker.run_workflow(workflow_copy, Interrupt::new()).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_worker_workflow_mismatch_should_fail() {
+        init();
+        let worker = Worker::new()
+            .job("/{counter}", update(plus_one))
+            .initial_state(Counters(HashMap::from([
+                ("one".to_string(), 0),
+                ("two".to_string(), 0),
+            ])))
+            .unwrap();
+
+        let workflow = worker
+            .find_workflow_to_target(Counters(HashMap::from([
+                ("one".to_string(), 2),
+                ("two".to_string(), 0),
+            ])))
+            .await
+            .unwrap();
+
+        // Create a different worker
+        let mut worker = Worker::new()
+            .job("/{counter}", update(plus_one))
+            .initial_state(Counters(HashMap::from([
+                ("one".to_string(), 0),
+                ("two".to_string(), 0),
+            ])))
+            .unwrap();
+
+        // Running the workflow should fail
+        let res = worker.run_workflow(workflow, Interrupt::new()).await;
+        assert!(res.is_err());
     }
 
     #[tokio::test]

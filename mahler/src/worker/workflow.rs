@@ -100,7 +100,13 @@ impl Task for WorkUnit {
         if changes != self.output {
             // If the result is different then we assume it's because the
             // conditions changed since planning
-            return Err(ErrorKind::ConditionNotMet.into());
+            return Err(Error::new(
+                ErrorKind::ConditionNotMet,
+                format!(
+                    "runtime and planning states do not match for task {}",
+                    self.action
+                ),
+            ));
         }
 
         self.action.run(system).await
@@ -129,13 +135,19 @@ impl Task for WorkUnit {
 /// [description](`crate::job::Job::with_description`).
 pub struct Workflow {
     /// The internal DAG that the workflow implements
-    dag: Dag<WorkUnit>,
+    pub(super) dag: Dag<WorkUnit>,
 
-    /// List of ignored paths during planning due to a halted state
-    ignored: Vec<Path>,
+    /// List of skipped paths/operations during planning due to a halted state
+    pub(super) ignored: Vec<Path>,
 
-    /// The list of operations that this workflow will perform
-    changes: Vec<Operation>,
+    /// The list of operations that triggered this workflow creation
+    pub(super) operations: Vec<Operation>,
+
+    /// The worker that created this workflow
+    pub(super) worker_id: u64,
+
+    /// The generation when this workflow was created
+    pub(super) generation: u64,
 }
 
 /// Runtime status of a workflow execution
@@ -161,26 +173,20 @@ impl Workflow {
         Workflow {
             dag,
             ignored: Vec::new(),
-            changes: Vec::new(),
+            operations: Vec::new(),
+            worker_id: 0,
+            generation: 0,
         }
     }
 
-    pub(crate) fn with_ignored(mut self, ignored: Vec<Path>) -> Self {
-        self.ignored = ignored;
-        self
-    }
-
-    pub(crate) fn with_changes(mut self, changes: Vec<Operation>) -> Self {
-        self.changes = changes;
-        self
-    }
-
+    /// Return the list of ignored paths during planning due to halted states
     pub fn ignored(&self) -> Vec<&Path> {
         self.ignored.iter().collect()
     }
 
-    pub fn changes(&self) -> Vec<&Operation> {
-        self.changes.iter().collect()
+    /// Return the list of operations that triggered this workflow to be built
+    pub fn operations(&self) -> Vec<&Operation> {
+        self.operations.iter().collect()
     }
 
     /// Return `true` if the Workflow's internal graph has no elements
@@ -188,7 +194,17 @@ impl Workflow {
         self.dag.is_empty()
     }
 
-    pub(crate) async fn execute(
+    /// Get the worker ID that created this workflow
+    pub fn worker_id(&self) -> u64 {
+        self.worker_id
+    }
+
+    /// Get the generation when this workflow was created
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(super) async fn execute(
         self,
         sys_reader: &Arc<RwLock<System>>,
         patch_tx: Sender<Patch>,

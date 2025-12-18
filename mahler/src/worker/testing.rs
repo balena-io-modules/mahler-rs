@@ -39,7 +39,7 @@ impl AsRef<Domain> for Ready {
 
 impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     #[cfg_attr(docsrs, doc(cfg(debug_assertions)))]
-    /// Find a workflow for testing purposes within the context of the worker
+    /// Find a workflow for testing purposes given an initial and target state
     ///
     /// # Example
     /// ```rust
@@ -70,19 +70,15 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     /// let expected: Dag<&str> = seq!("+1", "+1");
     /// assert_eq!(workflow.to_string(), expected.to_string());
     /// ```
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if any error happens during planning
-    pub fn find_workflow(&self, cur: O, tgt: O::Target) -> Result<Workflow, PlanningError> {
-        let mut ini = System::try_from(cur).map_err(Error::from)?;
+    pub fn find_workflow(&self, ini: O, tgt: O::Target) -> Result<Workflow, PlanningError> {
+        let mut ini = System::try_from(ini)?;
         let resources: &Resources = self.inner.as_ref();
         ini.set_resources(resources.clone());
         let tgt = serde_json::to_value(tgt).map_err(Error::from)?;
 
         let domain: &Domain = self.inner.as_ref();
 
-        planner::find_workflow_for_target::<O>(domain, &ini, &tgt)
+        planner::find_workflow_to_target::<O>(domain, &ini, &tgt)
     }
 
     #[cfg_attr(docsrs, doc(cfg(debug_assertions)))]
@@ -130,16 +126,13 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
         O: Serialize + DeserializeOwned,
     {
         let mut system = System::try_from(initial_state)?;
+        let resources: &Resources = self.inner.as_ref();
+        system.set_resources(resources.clone());
 
         // look for a workflow for the task
         let workflow = planner::find_workflow_for_task(task, self.inner.as_ref(), &system)?;
 
-        let resources: &Resources = self.inner.as_ref();
-        system.set_resources(resources.clone());
-
-        // FIXME: this implementation is too messy, a future change will allow
-        // worker to execute workflows generated from a search and we should be
-        // able to clean this up
+        // Since we don't want to
         let sys_reader = Arc::new(sync::RwLock::new(system));
         let (tx, mut rx) = sync::channel(10);
         let interrupt = sync::Interrupt::new();
