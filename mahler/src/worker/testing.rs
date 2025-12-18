@@ -1,13 +1,16 @@
+use std::sync::Arc;
+
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::domain::Domain;
-use super::planner::{Planner, PlanningError};
+use super::planner::{self, PlanningError};
 use super::workflow::Workflow;
 use super::{Ready, Uninitialized, Worker, WorkerState};
 
-use crate::error::Error;
-use crate::runtime::{Context, Resources, System};
+use crate::error::{Error, ErrorKind};
+use crate::runtime::{Resources, System};
 use crate::state::State;
+use crate::sync;
 use crate::task::Task;
 
 impl AsRef<Resources> for Uninitialized {
@@ -72,47 +75,14 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     ///
     /// This function will panic if any error happens during planning
     pub fn find_workflow(&self, cur: O, tgt: O::Target) -> Result<Workflow, PlanningError> {
-        let mut ini = System::try_from(cur).expect("failed to serialize initial state");
+        let mut ini = System::try_from(cur).map_err(Error::from)?;
         let resources: &Resources = self.inner.as_ref();
         ini.set_resources(resources.clone());
-        let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
+        let tgt = serde_json::to_value(tgt).map_err(Error::from)?;
 
         let domain: &Domain = self.inner.as_ref();
-        let planner = Planner::new(domain.clone());
 
-        planner.find_workflow::<O>(&ini, &tgt)
-    }
-
-    async fn run_task_with_system(&self, mut task: Task, system: &mut System) -> Result<(), Error> {
-        let task_id = task.id();
-        let Context { args, .. } = task.context_mut();
-
-        let domain: &Domain = self.inner.as_ref();
-        let path = domain
-            .find_path(task_id, args)
-            .expect("could not find path for task");
-
-        let task = task.with_path(path);
-        match &task {
-            Task::Action(action) => {
-                let changes = action.run(system).await?;
-                system
-                    .patch(changes)
-                    .expect("failed to patch the system state");
-            }
-            Task::Method(method) => {
-                let tasks = method.expand(system)?;
-                for mut task in tasks {
-                    // Propagate the parent args to the child task
-                    for (k, v) in method.context().args.iter() {
-                        task = task.with_arg(k, v)
-                    }
-                    Box::pin(self.run_task_with_system(task, system)).await?;
-                }
-            }
-        }
-
-        Ok(())
+        planner::find_workflow_for_target::<O>(domain, &ini, &tgt)
     }
 
     #[cfg_attr(docsrs, doc(cfg(debug_assertions)))]
@@ -123,6 +93,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     /// use std::time::Duration;
     /// use tokio::time::sleep;
     ///
+    /// use mahler::error::ErrorKind;
     /// use mahler::task::{Handler, IO, with_io};
     /// use mahler::extract::{View, Target};
     /// use mahler::worker::{Worker, Ready};
@@ -148,35 +119,62 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
     /// // Run task emulating a target of 2 and initial state of 0
     /// assert_eq!(worker.run_task(0, plus_one.with_target(2)).await.unwrap(), 1);
     ///
-    /// // Run task emulating a target of 2 and initial state of 2 (no changes)
+    /// // Run task emulating a target of 2 and initial state of 2 (condition not met)
     /// let worker: Worker<i32, _> = Worker::new().job("", update(plus_one));
-    /// assert_eq!(worker.run_task(2, plus_one.with_target(2)).await.unwrap(), 2);
+    /// let err = worker.run_task(2, plus_one.with_target(2)).await.unwrap_err();
+    /// assert_eq!(err.kind(), ErrorKind::ConditionNotMet);
     /// # })
     /// ```
-    ///
-    /// # Panics
-    /// This function will panic if a sewrialization or internal error happens during execution
-    pub async fn run_task(&self, initial_state: O, mut task: Task) -> Result<O, Error>
+    pub async fn run_task(&self, initial_state: O, task: Task) -> Result<O, Error>
     where
         O: Serialize + DeserializeOwned,
     {
-        let mut system =
-            System::try_from(initial_state).expect("failed to serialize initial state");
+        let mut system = System::try_from(initial_state)?;
+
+        // look for a workflow for the task
+        let workflow = planner::find_workflow_for_task(task, self.inner.as_ref(), &system)?;
 
         let resources: &Resources = self.inner.as_ref();
         system.set_resources(resources.clone());
 
-        let task_id = task.id();
-        let Context { args, .. } = task.context_mut();
-        let domain: &Domain = self.inner.as_ref();
-        let path = domain
-            .find_path(task_id, args)
-            .expect("could not find path for task");
+        // FIXME: this implementation is too messy, a future change will allow
+        // worker to execute workflows generated from a search and we should be
+        // able to clean this up
+        let sys_reader = Arc::new(sync::RwLock::new(system));
+        let (tx, mut rx) = sync::channel(10);
+        let interrupt = sync::Interrupt::new();
 
-        let task = task.with_path(path);
-        self.run_task_with_system(task, &mut system).await?;
+        // Await for changes
+        {
+            let sys_writer = sys_reader.clone();
+            tokio::spawn(async move {
+                while let Some(mut msg) = rx.recv().await {
+                    let changes = std::mem::take(&mut msg.data);
+                    let mut system = sys_writer.write().await;
+                    system.patch(changes).unwrap();
+                    msg.ack();
+                }
+            });
+        }
 
-        let new_state = system.state().expect("failed to serialize output state");
+        // Run the workflow
+        workflow
+            .execute(&sys_reader, tx, interrupt)
+            .await
+            .map_err(|errors| {
+                // this should not really happen since we have the only copy
+                // of the system
+                if errors
+                    .iter()
+                    .any(|e| e.kind() == ErrorKind::ConditionNotMet)
+                {
+                    return Error::from(ErrorKind::ConditionNotMet);
+                }
+                Error::runtime(errors)
+            })?;
+
+        let system = sys_reader.read().await;
+        let new_state = system.state()?;
 
         Ok(new_state)
     }

@@ -17,12 +17,10 @@ use super::domain::Domain;
 use super::workflow::{WorkUnit, Workflow};
 
 mod distance;
-use distance::*;
+use distance::Distance;
 
-#[derive(Debug, Clone)]
-pub struct Planner(Domain);
-
-/// Returns the longest subset of non-conflictiJobOperationng paths, preferring prefixes over specific paths.
+/// Returns the longest subset of non-conflicting paths, preferring prefixes over specific paths.
+///
 /// When conflicts occur, prioritizes prefixes over more specific paths.
 /// For example, if /config appears after /config/some_var, we prefer /config and remove /config/some_var.
 fn select_non_conflicting_prefer_prefixes<'a, I>(paths: I) -> Vec<Path>
@@ -60,7 +58,19 @@ where
     false
 }
 
-/// Computes the longest common prefix over a list of `Path`
+/// Computes the longest common prefix over a list of `Path` objects
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let paths = vec![
+///     Path::from_static("/config/server/host"),
+///     Path::from_static("/config/server/port"),
+///     Path::from_static("/config/server/ssl"),
+/// ];
+/// let result = longest_common_prefix(&paths);
+/// assert_eq!(result.as_str(), "/config/server");
+/// ```
 fn longest_common_prefix<'a, I>(paths: I) -> Path
 where
     I: IntoIterator<Item = &'a Path>,
@@ -98,6 +108,7 @@ where
     Path::new(&buf)
 }
 
+/// Get a hash for the system state
 fn hash_state(state: &System) -> u64 {
     let value = state.root();
 
@@ -173,401 +184,442 @@ impl From<Error> for PlanningError {
     }
 }
 
-impl Planner {
-    pub fn new(domain: Domain) -> Self {
-        Self(domain)
-    }
+/// Convert the task into a workflow if possible
+///
+/// For primitive tasks, the workflow will just contain a single node, however
+/// for composite tasks, the workflow will create a Dag with concurrent branches
+/// depending on the operational domain of each sub-task.
+///
+/// # Arguments
+/// * `db` - a reference to the worker [`Domain`]
+/// * `task` - the task to convert to a workflow
+/// * `cur_state` - the state of the system before running the task
+pub fn find_workflow_for_task(
+    mut task: Task,
+    db: &Domain,
+    cur_state: &System,
+) -> Result<Workflow, Error> {
+    // Look-up the task on the domain to find its path
+    let task_id = task.id();
+    let Context { args, .. } = task.context_mut();
+    let path = db.find_path(task_id, args)?;
 
-    fn try_task(
-        &self,
-        task: &Task,
-        cur_state: &System,
-        domain: &mut BTreeSet<Path>,
-        changes: &mut Vec<PatchOperation>,
-    ) -> Result<Dag<WorkUnit>, Error> {
-        match task {
-            Task::Action(action) => {
-                let work_id = WorkUnit::new_id(action, cur_state.root());
+    // Set the correct path for the task
+    let task = task.with_path(path);
 
-                // Simulate the task and get the list of changes
-                let patch = action.dry_run(cur_state)?;
-                if patch.is_empty() {
-                    // An empty result from the task is equivalent to
-                    // the task condition not being met
-                    return Err(ErrorKind::ConditionNotMet)?;
-                }
+    let mut task_domain = BTreeSet::new();
+    let mut task_changes = Vec::new();
+    let dag = try_task_into_workflow(&task, db, cur_state, &mut task_domain, &mut task_changes)?;
 
-                let Patch(ops) = patch;
+    Ok(Workflow::new(dag.reverse()))
+}
 
-                // Prepend a new node to the workflow, include a copy
-                // of the changes for validation during runtime
-                let new_plan = Dag::from(WorkUnit::new(work_id, action.clone(), ops.clone()));
+/// Convert the task into a workflow if possible
+///
+/// For primitive tasks, the workflow will just contain a single node, however
+/// for composite tasks, the workflow will create a Dag with concurrent branches
+/// depending on the operational domain of each sub-task.
+///
+/// # Arguments
+/// * `task` - the task to convert to a workflow
+/// * `db` - a reference to the worker [`Domain`]
+/// * `cur_state` - the state of the system before running the task
+/// * `domain` - the task operational domain, used for conflict detection
+/// * `change` - the cumulative changes performed by the task and its sub-tasks (if any)
+fn try_task_into_workflow(
+    task: &Task,
+    db: &Domain,
+    cur_state: &System,
+    domain: &mut BTreeSet<Path>,
+    changes: &mut Vec<PatchOperation>,
+) -> Result<Dag<WorkUnit>, Error> {
+    match task {
+        Task::Action(action) => {
+            let work_id = WorkUnit::new_id(action, cur_state.root());
 
-                domain.insert(action.domain());
-                changes.extend(ops);
-
-                Ok(new_plan)
+            // Simulate the task and get the list of changes
+            let patch = action.dry_run(cur_state)?;
+            if patch.is_empty() {
+                // An empty result from the task is equivalent to
+                // the task condition not being met
+                return Err(ErrorKind::ConditionNotMet)?;
             }
-            Task::Method(method) => {
-                // Get the list of referenced tasks
-                let tasks = method.expand(cur_state)?;
 
-                // Extended tasks will store the correct references from the domain with the
-                // right path and description
-                let mut extended_tasks = Vec::new();
+            let Patch(ops) = patch;
 
-                for mut t in tasks.into_iter() {
-                    let task_id = t.id();
+            // Prepend a new node to the workflow, include a copy
+            // of the changes for validation during runtime
+            let new_plan = Dag::from(WorkUnit::new(work_id, action.clone(), ops.clone()));
 
-                    let Context {
-                        args: method_args, ..
-                    } = method.context();
-                    let Context { args, .. } = t.context_mut();
+            domain.insert(action.domain());
+            changes.extend(ops);
 
-                    // Propagate arguments from the method into the child tasks.
-                    // This is just for better user experience as it avoids having to define
-                    // arguments for each sub-task in the method
-                    for (k, v) in method_args.iter() {
-                        if !args.contains_key(k) {
-                            args.insert(k, v);
-                        }
+            Ok(new_plan)
+        }
+        Task::Method(method) => {
+            // Get the list of referenced tasks
+            let tasks = method.expand(cur_state)?;
+
+            // Extended tasks will store the correct references from the domain with the
+            // right path and description
+            let mut extended_tasks = Vec::new();
+
+            for mut t in tasks.into_iter() {
+                let task_id = t.id();
+
+                let Context {
+                    args: method_args, ..
+                } = method.context();
+                let Context { args, .. } = t.context_mut();
+
+                // Propagate arguments from the method into the child tasks.
+                // This is just for better user experience as it avoids having to define
+                // arguments for each sub-task in the method
+                for (k, v) in method_args.iter() {
+                    if !args.contains_key(k) {
+                        args.insert(k, v);
                     }
-
-                    // Find the job path on the domain list, pass the argument for path matching
-                    // this will remove any unused arguments in the path
-                    let path = self.0.find_path(task_id, args)?;
-
-                    // Using the path, now find the actual job on the domain.
-                    // The domain job includes additional configuration like the description that
-                    // we want to use in the workflow
-                    let job = self
-                        .0
-                        .find_job(&path, task_id)
-                        // this should never happen since the path was returned by the domain
-                        .ok_or(Error::internal(format!("should find a job for {path}")))?;
-
-                    // Get a copy of the task for the final list
-                    let task = job.new_task(t.context().to_owned()).with_path(path.clone());
-
-                    extended_tasks.push(task);
                 }
 
-                let mut plan_branches = Vec::new();
-                let mut cumulative_domain = BTreeSet::new();
-                let mut cur_state = cur_state.clone();
+                // Find the job path on the domain list, pass the argument for path matching
+                // this will remove any unused arguments in the path
+                let path = db.find_path(task_id, args)?;
 
-                // Iterate over the list of sub-tasks
-                for task in extended_tasks {
-                    // Run the task as if it was a sequential plan
-                    let mut task_domain = BTreeSet::new();
-                    let mut task_changes = Vec::new();
-                    let partial_plan =
-                        self.try_task(&task, &cur_state, &mut task_domain, &mut task_changes)?;
+                // Using the path, now find the actual job on the domain.
+                // The domain job includes additional configuration like the description that
+                // we want to use in the workflow
+                let job = db
+                    .find_job(&path, task_id)
+                    // this should never happen since the path was returned by the domain
+                    .ok_or(Error::internal(format!("should find a job for {path}")))?;
 
-                    // Check if the task domain conflicts with the cumulative domain from branches
-                    let partial_plan =
-                        if domains_are_conflicting(&cumulative_domain, task_domain.iter()) {
-                            // If so, join the existing branches and concatenate the returned workflow
-                            // we reverse the branches to preserve the expected order of tasks in the plan
-                            let dag = Dag::new(plan_branches).prepend(partial_plan);
-                            plan_branches = Vec::new();
+                // Get a copy of the task for the final list
+                let task = job.new_task(t.context().to_owned()).with_path(path.clone());
 
-                            dag
-                        } else {
-                            partial_plan
-                        };
-
-                    // Apply the task changes
-                    cur_state
-                        .patch(Patch(task_changes.to_vec()))
-                        .map_err(Error::internal)?;
-
-                    // Add the new dag to the list of branches and update the cummulative domain
-                    plan_branches.push(partial_plan);
-                    cumulative_domain.extend(task_domain);
-
-                    // Append the changes to the parent list
-                    changes.extend(task_changes);
-                }
-
-                // After all tasks are evaluated, join remaining branches
-                let new_plan = Dag::new(plan_branches);
-                domain.extend(cumulative_domain);
-
-                // Include changes in the returned plan
-                Ok(new_plan)
+                extended_tasks.push(task);
             }
+
+            let mut plan_branches = Vec::new();
+            let mut cumulative_domain = BTreeSet::new();
+            let mut cur_state = cur_state.clone();
+
+            // Iterate over the list of sub-tasks
+            for task in extended_tasks {
+                // Run the task as if it was a sequential plan
+                let mut task_domain = BTreeSet::new();
+                let mut task_changes = Vec::new();
+                let partial_plan = try_task_into_workflow(
+                    &task,
+                    db,
+                    &cur_state,
+                    &mut task_domain,
+                    &mut task_changes,
+                )?;
+
+                // Check if the task domain conflicts with the cumulative domain from branches
+                let partial_plan =
+                    if domains_are_conflicting(&cumulative_domain, task_domain.iter()) {
+                        // If so, join the existing branches and concatenate the returned workflow
+                        // we reverse the branches to preserve the expected order of tasks in the plan
+                        let dag = Dag::new(plan_branches).prepend(partial_plan);
+                        plan_branches = Vec::new();
+
+                        dag
+                    } else {
+                        partial_plan
+                    };
+
+                // Apply the task changes
+                cur_state
+                    .patch(Patch(task_changes.to_vec()))
+                    .map_err(Error::internal)?;
+
+                // Add the new dag to the list of branches and update the cummulative domain
+                plan_branches.push(partial_plan);
+                cumulative_domain.extend(task_domain);
+
+                // Append the changes to the parent list
+                changes.extend(task_changes);
+            }
+
+            // After all tasks are evaluated, join remaining branches
+            let new_plan = Dag::new(plan_branches);
+            domain.extend(cumulative_domain);
+
+            // Include changes in the returned plan
+            Ok(new_plan)
         }
     }
+}
 
-    #[instrument(level = "trace", skip_all, err(level = "trace"))]
-    pub(crate) fn find_workflow<T>(
-        &self,
-        system: &System,
-        tgt: &Value,
-    ) -> Result<Workflow, PlanningError>
-    where
-        T: State,
-    {
-        trace!(initial=%system, target=%tgt, "searching for workflow");
+/// Find a workflow that takes the system from its current state
+/// to the target state using the tasks in the provided Domain
+#[instrument(level = "trace", skip_all, err(level = "trace"))]
+pub fn find_workflow_for_target<T>(
+    db: &Domain,
+    system: &System,
+    tgt: &Value,
+) -> Result<Workflow, PlanningError>
+where
+    T: State,
+{
+    trace!(initial=%system, target=%tgt, "searching for workflow");
 
-        // calculate the distance to the target at the beginning of the search
-        let ini = system
+    // calculate the distance to the target at the beginning of the search
+    let ini = system
+        .state::<T::Target>()
+        .and_then(serde_json::to_value)
+        .map_err(Error::from)?;
+    let Patch(changes) = json_patch::diff(&ini, tgt);
+    let changes: Vec<json::Operation> = changes.into_iter().map(json::Operation::from).collect();
+
+    // The search stack stores (current_state, current_plan, depth)
+    let mut stack = vec![(system.clone(), Dag::default(), 0)];
+
+    let find_workflow_span = Span::current();
+
+    // We serialize the state using AsInternal to get state metadata
+    // FIXME: remove this, we will replace it with some different mechanism
+    let initial_state_with_meta = system
+        .state::<T>()
+        .and_then(|t| serde_json::to_value(AsInternal(&t)))
+        .map_err(Error::from)?;
+    let mut halted_state_paths: Vec<Path> = Vec::new();
+
+    // Keep track of visited states
+    let mut visited_states = HashSet::new();
+
+    while let Some((cur_state, cur_plan, depth)) = stack.pop() {
+        // Prevent infinite recursion (e.g., from buggy tasks or recursive methods)
+        if depth >= 256 {
+            warn!(parent: &find_workflow_span, "reached max search depth (256)");
+            return Err(PlanningError::NotFound(changes));
+        }
+
+        // Normalize state: deserialize into the target type and re-serialize to remove internal fields
+        let cur = cur_state
             .state::<T::Target>()
             .and_then(serde_json::to_value)
             .map_err(Error::from)?;
-        let Patch(changes) = json_patch::diff(&ini, tgt);
-        let changes: Vec<json::Operation> =
-            changes.into_iter().map(json::Operation::from).collect();
 
-        // The search stack stores (current_state, current_plan, depth)
-        let mut stack = vec![(system.clone(), Dag::default(), 0)];
+        // add the current state to the visited list
+        visited_states.insert(hash_state(&cur_state));
 
-        let find_workflow_span = Span::current();
+        // Compute the difference between current and target state
+        let distance = Distance::new(&cur, tgt, &halted_state_paths);
 
-        // We serialize the state using AsInternal to get state metadata
-        // FIXME: remove this, we will replace it with some different mechanism
-        let initial_state_with_meta = system
-            .state::<T>()
-            .and_then(|t| serde_json::to_value(AsInternal(&t)))
-            .map_err(Error::from)?;
-        let mut halted_state_paths: Vec<Path> = Vec::new();
+        // If there are no more operations, we’ve reached the goal
+        if distance.is_empty() {
+            // we need to reverse the plan before returning
+            return Ok(Workflow::new(cur_plan.reverse())
+                .with_ignored(halted_state_paths)
+                .with_changes(changes));
+        }
 
-        // Keep track of visited states
-        let mut visited_states = HashSet::new();
+        let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
+        next_span.in_scope(|| {
+            // make a copy of the plan for the logs if in the tracing scope
+            next_span.record("cur_plan", field::display(cur_plan.clone().reverse()));
+        });
+        let _enter = next_span.enter();
 
-        while let Some((cur_state, cur_plan, depth)) = stack.pop() {
-            // Prevent infinite recursion (e.g., from buggy tasks or recursive methods)
-            if depth >= 256 {
-                warn!(parent: &find_workflow_span, "reached max search depth (256)");
-                return Err(PlanningError::NotFound(changes))?;
+        // List of candidate plans at this level in the stack
+        let mut candidates: Vec<Candidate> = Vec::new();
+
+        // Iterate over distance operations and jobs to find possible candidates
+        for op in distance.operations() {
+            let path = op.path();
+            let pointer = path.as_ref();
+
+            // skip the path if any parent path has been halted
+            if halted_state_paths.iter().any(|p| p.is_prefix_of(path)) {
+                continue;
             }
 
-            // Normalize state: deserialize into the target type and re-serialize to remove internal fields
-            let cur = cur_state
-                .state::<T::Target>()
-                .and_then(serde_json::to_value)
-                .map_err(Error::from)?;
+            // resolve the operation pointer to a value on the initial state
+            let state = pointer
+                .resolve(&initial_state_with_meta)
+                .unwrap_or(&Value::Null);
 
-            // add the current state to the visited list
-            visited_states.insert(hash_state(&cur_state));
-
-            // Compute the difference between current and target state
-            let distance = Distance::new(&cur, tgt, &halted_state_paths);
-
-            // If there are no more operations, we’ve reached the goal
-            if distance.is_empty() {
-                // we need to reverse the plan before returning
-                return Ok(Workflow::new(cur_plan.reverse())
-                    .with_ignored(halted_state_paths)
-                    .with_changes(changes));
-            }
-
-            let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
-            next_span.in_scope(|| {
-                // make a copy of the plan for the logs if in the tracing scope
-                next_span.record("cur_plan", field::display(cur_plan.clone().reverse()));
-            });
-            let _enter = next_span.enter();
-
-            // List of candidate plans at this level in the stack
-            let mut candidates: Vec<Candidate> = Vec::new();
-
-            // Iterate over distance operations and jobs to find possible candidates
-            for op in distance.operations() {
-                let path = op.path();
-                let pointer = path.as_ref();
-
-                // skip the path if any parent path has been halted
-                if halted_state_paths.iter().any(|p| p.is_prefix_of(path)) {
-                    continue;
-                }
-
-                // resolve the operation pointer to a value on the initial state
-                let state = pointer
-                    .resolve(&initial_state_with_meta)
-                    .unwrap_or(&Value::Null);
-
-                // if the state pointed by the operation has been halted, we add it to the list of
-                // operations and skip it
-                if let Some(true) = state
-                    .get("__mahler(halted)")
-                    .and_then(|value| value.as_bool())
-                {
-                    halted_state_paths.push(path.clone());
-                    continue;
-                }
-
-                // resolve the operation pointer on the target state
-                let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
-
-                // Retrieve matching jobs at this path
-                if let Some((args, jobs)) = self.0.find_matching_jobs(path.as_str()) {
-                    let context = Context {
-                        path: path.clone(),
-                        args,
-                        target: target.clone(),
-                    };
-
-                    // Filter `None` jobs from the list
-                    for job in jobs.filter(|j| j.operation().matches(op)) {
-                        let task = job.new_task(context.clone());
-                        let mut changes = Vec::new();
-                        let mut domain = BTreeSet::new();
-
-                        // Try applying this task to the current state
-                        match self.try_task(&task, &cur_state, &mut domain, &mut changes) {
-                            Ok(partial_plan) if !changes.is_empty() => {
-                                candidates.push(Candidate {
-                                    partial_plan,
-                                    changes,
-                                    path: task.path().clone(),
-                                    domain,
-                                    is_method: task.is_method(),
-                                    operation: job.operation().clone(),
-                                });
-                            }
-
-                            Err(e) => match e.kind() {
-                                // Skip the task if condition is not met
-                                ErrorKind::ConditionNotMet => {}
-                                // Critical internal errors terminate the search
-                                ErrorKind::Internal => return Err(e)?,
-                                // Other job errors are ignored unless debugging
-                                _ => {
-                                    if cfg!(debug_assertions) {
-                                        return Err(e)?;
-                                    }
-                                    warn!(
-                                        parent: &find_workflow_span,
-                                        "task {} failed: {} ... ignoring",
-                                        task.id(),
-                                        e
-                                    );
-                                    return Err(e)?;
-                                }
-                            },
-
-                            // ignore if changes is empty
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            // Find the longest list of non-conflicting tasks based on paths (for prioritization)
-            let non_conflicting_paths = select_non_conflicting_prefer_prefixes(
-                candidates.iter().map(|Candidate { path, .. }| path),
-            );
-
-            // Find candidates that can run concurrently using both path and domain-based conflict detection
-            let mut concurrent_candidates: BTreeMap<Path, Candidate> = BTreeMap::new();
-            let mut cumulative_domain = BTreeSet::new();
-
-            for candidate in candidates.iter() {
-                if let Some(prev_candidate) = concurrent_candidates.get(&candidate.path) {
-                    if *prev_candidate >= *candidate {
-                        // skip the candidate is there is a previous candidate for the path
-                        // higher priority
-                        continue;
-                    }
-                }
-
-                // If the domain of the candidate doesn't conflict with the cumulative domain
-                if non_conflicting_paths.iter().any(|p| p == &candidate.path)
-                    && !domains_are_conflicting(&cumulative_domain, candidate.domain.iter())
-                {
-                    cumulative_domain.extend(candidate.domain.clone());
-                    concurrent_candidates.insert(candidate.path.clone(), candidate.clone());
-                }
-            }
-
-            if concurrent_candidates.len() > 1 {
-                let mut plan_branches = Vec::new();
-                let mut changes = Vec::new();
-                let mut domain = BTreeSet::new();
-                let mut is_method = true;
-                // The path for the candidate is the longest common prefix between child paths
-                let path = longest_common_prefix(concurrent_candidates.keys());
-                for candidate in concurrent_candidates.into_values() {
-                    // Do not use the candidate individually if already selected as part
-                    // of a concurrent candidate
-                    candidates.retain(|c| *c != candidate);
-
-                    let Candidate {
-                        partial_plan,
-                        changes: candidate_changes,
-                        domain: candidate_domain,
-                        is_method: candidate_is_method,
-                        ..
-                    } = candidate;
-                    plan_branches.push(partial_plan);
-                    changes.extend(candidate_changes);
-                    domain.extend(candidate_domain);
-                    // Treat the candidate as a method when sorting if all children
-                    // are methods
-                    is_method = is_method && candidate_is_method;
-                }
-
-                // Construct a new candidate using the concurrent branches
-                candidates.push(Candidate {
-                    partial_plan: Dag::new(plan_branches),
-                    changes,
-                    domain,
-                    path,
-                    is_method,
-                    operation: OperationMatcher::Update,
-                })
-            }
-
-            // sort candidates
-            candidates.sort();
-
-            // Record candidates found for this planning step
-            trace!(candidates=%candidates.len());
-
-            // Insert the best candidate that doesn't introduce cycles into the stack
-            for Candidate {
-                partial_plan,
-                changes,
-                ..
-            } in candidates.into_iter().rev()
+            // if the state pointed by the operation has been halted, we add it to the list of
+            // operations and skip it
+            if let Some(true) = state
+                .get("__mahler(halted)")
+                .and_then(|value| value.as_bool())
             {
-                let mut new_state = cur_state.clone();
-                new_state.patch(Patch(changes)).map_err(Error::internal)?;
-
-                // Ignore the candidate if it takes us to a state the planner has visited before,
-                // this avoids the planner just trying tasks in a different order or potentially
-                // looping forever jumping between a few visited states
-                let state_hash = hash_state(&new_state);
-                if visited_states.contains(&state_hash) {
-                    continue;
-                }
-
-                // Check if the new workflow contains any visited tasks
-                if cur_plan.any(|unit| partial_plan.any(|u| u.id == unit.id)) {
-                    // skip this candidate because it is creating a loop
-                    continue;
-                }
-
-                // Extend current plan
-                let new_plan = cur_plan.shallow_clone().prepend(partial_plan);
-
-                // Add the new plan to the search stack
-                stack.push((new_state, new_plan, depth + 1));
-
-                // Only add the most qualified candidate (greedy search)
-                break;
+                halted_state_paths.push(path.clone());
+                continue;
             }
 
-            if stack.is_empty() {
-                trace!(last_evaluated_state=%cur_state, "no plan was found");
+            // resolve the operation pointer on the target state
+            let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
+
+            // Retrieve matching jobs at this path
+            if let Some((args, jobs)) = db.find_matching_jobs(path.as_str()) {
+                let context = Context {
+                    path: path.clone(),
+                    args,
+                    target: target.clone(),
+                };
+
+                // Filter `None` jobs from the list
+                for job in jobs.filter(|j| j.operation().matches(op)) {
+                    let task = job.new_task(context.clone());
+                    let mut changes = Vec::new();
+                    let mut domain = BTreeSet::new();
+
+                    // Try applying this task to the current state
+                    match try_task_into_workflow(&task, db, &cur_state, &mut domain, &mut changes) {
+                        Ok(partial_plan) if !changes.is_empty() => {
+                            candidates.push(Candidate {
+                                partial_plan,
+                                changes,
+                                path: task.path().clone(),
+                                domain,
+                                is_method: task.is_method(),
+                                operation: job.operation().clone(),
+                            });
+                        }
+
+                        Err(e) => match e.kind() {
+                            // Skip the task if condition is not met
+                            ErrorKind::ConditionNotMet => {}
+                            // Critical internal errors terminate the search
+                            ErrorKind::Internal => return Err(e)?,
+                            // Other job errors are ignored unless debugging
+                            _ => {
+                                if cfg!(debug_assertions) {
+                                    return Err(e.into());
+                                }
+                                warn!(
+                                    parent: &find_workflow_span,
+                                    "task {} failed: {} ... ignoring",
+                                    task.id(),
+                                    e
+                                );
+                                return Err(e.into());
+                            }
+                        },
+
+                        // ignore if changes is empty
+                        _ => {}
+                    }
+                }
             }
         }
 
-        // No candidate plan reached the goal state
-        Err(PlanningError::NotFound(changes))?
+        // Find the longest list of non-conflicting tasks based on paths (for prioritization)
+        let non_conflicting_paths = select_non_conflicting_prefer_prefixes(
+            candidates.iter().map(|Candidate { path, .. }| path),
+        );
+
+        // Find candidates that can run concurrently using both path and domain-based conflict detection
+        let mut concurrent_candidates: BTreeMap<Path, Candidate> = BTreeMap::new();
+        let mut cumulative_domain = BTreeSet::new();
+
+        for candidate in candidates.iter() {
+            if let Some(prev_candidate) = concurrent_candidates.get(&candidate.path) {
+                if *prev_candidate >= *candidate {
+                    // skip the candidate is there is a previous candidate for the path
+                    // higher priority
+                    continue;
+                }
+            }
+
+            // If the domain of the candidate doesn't conflict with the cumulative domain
+            if non_conflicting_paths.iter().any(|p| p == &candidate.path)
+                && !domains_are_conflicting(&cumulative_domain, candidate.domain.iter())
+            {
+                cumulative_domain.extend(candidate.domain.clone());
+                concurrent_candidates.insert(candidate.path.clone(), candidate.clone());
+            }
+        }
+
+        if concurrent_candidates.len() > 1 {
+            let mut plan_branches = Vec::new();
+            let mut changes = Vec::new();
+            let mut domain = BTreeSet::new();
+            let mut is_method = true;
+            // The path for the candidate is the longest common prefix between child paths
+            let path = longest_common_prefix(concurrent_candidates.keys());
+            for candidate in concurrent_candidates.into_values() {
+                // Do not use the candidate individually if already selected as part
+                // of a concurrent candidate
+                candidates.retain(|c| *c != candidate);
+
+                let Candidate {
+                    partial_plan,
+                    changes: candidate_changes,
+                    domain: candidate_domain,
+                    is_method: candidate_is_method,
+                    ..
+                } = candidate;
+                plan_branches.push(partial_plan);
+                changes.extend(candidate_changes);
+                domain.extend(candidate_domain);
+                // Treat the candidate as a method when sorting if all children
+                // are methods
+                is_method = is_method && candidate_is_method;
+            }
+
+            // Construct a new candidate using the concurrent branches
+            candidates.push(Candidate {
+                partial_plan: Dag::new(plan_branches),
+                changes,
+                domain,
+                path,
+                is_method,
+                operation: OperationMatcher::Update,
+            })
+        }
+
+        // sort candidates
+        candidates.sort();
+
+        // Record candidates found for this planning step
+        trace!(candidates=%candidates.len());
+
+        // Insert the best candidate that doesn't introduce cycles into the stack
+        for Candidate {
+            partial_plan,
+            changes,
+            ..
+        } in candidates.into_iter().rev()
+        {
+            let mut new_state = cur_state.clone();
+            new_state.patch(Patch(changes)).map_err(Error::internal)?;
+
+            // Ignore the candidate if it takes us to a state the planner has visited before,
+            // this avoids the planner just trying tasks in a different order or potentially
+            // looping forever jumping between a few visited states
+            let state_hash = hash_state(&new_state);
+            if visited_states.contains(&state_hash) {
+                continue;
+            }
+
+            // Check if the new workflow contains any visited tasks
+            if cur_plan.any(|unit| partial_plan.any(|u| u.id == unit.id)) {
+                // skip this candidate because it is creating a loop
+                continue;
+            }
+
+            // Extend current plan
+            let new_plan = cur_plan.shallow_clone().prepend(partial_plan);
+
+            // Add the new plan to the search stack
+            stack.push((new_state, new_plan, depth + 1));
+
+            // Only add the most qualified candidate (greedy search)
+            break;
+        }
+
+        if stack.is_empty() {
+            trace!(last_evaluated_state=%cur_state, "no plan was found");
+        }
     }
+
+    // No candidate plan reached the goal state
+    Err(PlanningError::NotFound(changes))?
 }
 
 #[cfg(test)]
@@ -643,7 +695,7 @@ mod tests {
         counter
     }
 
-    pub fn find_plan<T>(planner: Planner, cur: T, tgt: T::Target) -> Result<Workflow, PlanningError>
+    pub fn find_plan<T>(db: &Domain, cur: T, tgt: T::Target) -> Result<Workflow, PlanningError>
     where
         T: State,
     {
@@ -652,7 +704,7 @@ mod tests {
         let system =
             crate::runtime::System::try_from(cur).expect("failed to serialize current state");
 
-        let res = planner.find_workflow::<T>(&system, &tgt)?;
+        let res = find_workflow_for_target::<T>(db, &system, &tgt)?;
         Ok(res)
     }
 
@@ -662,8 +714,7 @@ mod tests {
             .job("", update(plus_one))
             .job("", update(minus_one));
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, 0, 2).unwrap();
+        let workflow = find_plan(&domain, 0, 2).unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -678,8 +729,7 @@ mod tests {
     fn it_ignores_none_jobs() {
         let domain = Domain::new().job("", none(plus_one));
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, 0, 2);
+        let workflow = find_plan(&domain, 0, 2);
 
         assert!(matches!(workflow, Err(PlanningError::NotFound(_))));
     }
@@ -690,8 +740,7 @@ mod tests {
             .job("", update(buggy_plus_one))
             .job("", update(minus_one));
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, 0, 2);
+        let workflow = find_plan(&domain, 0, 2);
         assert!(workflow.is_err());
     }
 
@@ -702,8 +751,7 @@ mod tests {
             .job("", update(plus_two))
             .job("", none(plus_one));
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, 0, 2).unwrap();
+        let workflow = find_plan(&domain, 0, 2).unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -737,8 +785,7 @@ mod tests {
             .job("/counters/{counter}", update(minus_one))
             .job("/counters/{counter}", update(plus_one));
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
 
         // We expect counters to be updated concurrently
         let expected: Dag<&str> = par!(
@@ -775,8 +822,7 @@ mod tests {
             .job("/counters/{counter}", none(plus_one))
             .job("/counters/{counter}", update(plus_two));
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
 
         // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(
@@ -817,8 +863,7 @@ mod tests {
             .job("/counters/{counter}", none(plus_two))
             .job("/counters/{counter}", update(plus_three));
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -847,8 +892,7 @@ mod tests {
             .job("/{counter}", none(plus_one))
             .job("/{counter}", update(plus_other));
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
 
         // We expect a parallel dag for this specific target
         let expected: Dag<&str> = par!(
@@ -976,8 +1020,7 @@ mod tests {
         }))
         .unwrap();
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
         // app `two` has halted, but a plan is generated to install the other two apps
         let expected: Dag<&str> =
             par!("install app one", "prepare app three") + seq!("install app three");
@@ -1112,8 +1155,7 @@ mod tests {
         }))
         .unwrap();
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target);
+        let workflow = find_plan(&domain, initial, target);
         assert!(workflow.is_err(), "unexpected plan:\n{}", workflow.unwrap());
     }
 
@@ -1198,8 +1240,7 @@ mod tests {
         )
         .unwrap();
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
 
         let expected: Dag<&str> = seq!(
             "create image 'ubuntu'",
@@ -1270,8 +1311,7 @@ mod tests {
         )
         .unwrap();
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
 
         let expected: Dag<&str> = par!("update configurations", "create counter 'one'");
         assert_eq!(expected.to_string(), workflow.to_string());
@@ -1357,8 +1397,7 @@ mod tests {
             ]),
         };
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
 
         // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(seq!("a++", "a++"), seq!("b++", "b++"))
@@ -1448,8 +1487,7 @@ mod tests {
             ]),
         };
 
-        let planner = Planner::new(domain);
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
 
         // Should run concurrently because different array elements and map keys don't conflict
         let expected: Dag<&str> = par!("mahler::worker::planner::tests::test_array_element_conflicts::update_config(/configs/database)",
@@ -1692,8 +1730,6 @@ mod tests {
             )
             .job("/blocks", update(move_blks));
 
-        let planner = Planner::new(domain);
-
         let initial = World {
             blocks: Map::from([
                 (Block::A, Location::Table),
@@ -1709,7 +1745,7 @@ mod tests {
             ]),
         };
 
-        let workflow = find_plan(planner, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap();
         let expected: Dag<&str> = seq!(
             "unstack block C",
             "put down block C",

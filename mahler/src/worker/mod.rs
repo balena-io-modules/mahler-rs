@@ -30,7 +30,7 @@ mod planner;
 mod workflow;
 use auto_interrupt::AutoInterrupt;
 use domain::Domain;
-use planner::{Planner, PlanningError};
+use planner::PlanningError;
 
 pub use workflow::*;
 
@@ -702,9 +702,6 @@ impl<O: State> Worker<O, Ready> {
             ..
         } = self.inner.clone();
 
-        // Create new planner
-        let planner = Planner::new(domain);
-
         // Update system resources
         {
             let mut system = self.inner.system_rwlock.write().await;
@@ -723,7 +720,7 @@ impl<O: State> Worker<O, Ready> {
         }
 
         async fn find_and_run_workflow<T: State>(
-            planner: &Planner,
+            domain: &Domain,
             sys_reader: &Arc<RwLock<System>>,
             tgt: &Value,
             patch_tx: &Sender<Patch>,
@@ -734,7 +731,7 @@ impl<O: State> Worker<O, Ready> {
 
             let workflow = {
                 let system = sys_reader.read().await;
-                let res = planner.find_workflow::<T>(&system, tgt);
+                let res = planner::find_workflow_for_target::<T>(domain, &system, tgt);
 
                 // Show pending changes at debug level
                 if tracing::enabled!(tracing::Level::DEBUG) {
@@ -819,7 +816,7 @@ impl<O: State> Worker<O, Ready> {
                             return Err(Error::internal("state patch failed, worker state possibly tainted"))?;
                         }
 
-                        res = find_and_run_workflow::<O>(&planner, &sys_reader, &tgt, &patch_tx, &interrupt) => {
+                        res = find_and_run_workflow::<O>(&domain, &sys_reader, &tgt, &patch_tx, &interrupt) => {
                             match res {
                                 Ok(InnerSeekResult::TargetReached) => {
                                     info!("target state applied");
