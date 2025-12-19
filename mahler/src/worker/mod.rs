@@ -5,9 +5,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{watch, Notify};
+use tokio::select;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio::{select, sync::RwLock};
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::field::display;
@@ -25,7 +25,7 @@ use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::serde::de::DeserializeOwned;
 use crate::state::State;
-use crate::sync::{channel, Interrupt, Sender};
+use crate::sync::{channel, Interrupt, RwLock, Sender};
 use crate::system_ext::SystemExt;
 
 mod auto_interrupt;
@@ -88,7 +88,7 @@ pub struct Ready {
     system_rwlock: Arc<RwLock<System>>,
     update_event_channel: watch::Sender<()>,
     patch_tx: Sender<Patch>,
-    notify_writer_closed: Arc<Notify>,
+    writer_closed_rx: watch::Receiver<()>,
     worker_id: u64,
     generation: Arc<AtomicU64>,
 }
@@ -495,14 +495,18 @@ impl<O> Worker<O, Uninitialized> {
         let (patch_tx, mut patch_rx) = channel::<Patch>(100);
 
         // Patch error signal (notify)
-        let notify_writer_closed = Arc::new(Notify::new());
+        let (writer_closed_tx, writer_closed_rx) = watch::channel(());
 
         // Broadcast channel for state updates
         let (update_event_channel, _) = watch::channel(());
 
+        // Generate unique worker ID using random hash
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let worker_id = RandomState::new().build_hasher().finish();
+
         // Spawn system writer task
         {
-            let notify_writer_closed = notify_writer_closed.clone();
             let system_writer = Arc::clone(&system_rwlock);
             let update_event_tx = update_event_channel.clone();
             tokio::spawn(
@@ -520,27 +524,23 @@ impl<O> Worker<O, Uninitialized> {
                             // internal state may have become inconsistent and we cannot continue
                             // applying changes
                             error!("patch failed: {e}");
-                            notify_writer_closed.notify_one();
+
+                            // We drop the channel to let receivers know the writer task has closed
+                            drop(writer_closed_tx);
                             break;
                         }
                         trace!("patch successful");
 
-                        // Notify watchers, ignore errors if no receivers
-                        // exist
+                        // Notify worker followers, ignore errors if no receivers exist
                         let _ = update_event_tx.send(());
 
                         // yield back to the workflow
                         msg.ack();
                     }
                 }
-                .instrument(span!(Level::TRACE, "worker_sync",)),
+                .instrument(span!(Level::TRACE, "worker_writer", worker_id=%worker_id)),
             );
         }
-
-        // Generate unique worker ID using random hash
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
-        let worker_id = RandomState::new().build_hasher().finish();
 
         Ok(Worker::from_inner(Ready {
             domain,
@@ -548,7 +548,7 @@ impl<O> Worker<O, Uninitialized> {
             system_rwlock,
             update_event_channel,
             patch_tx,
-            notify_writer_closed,
+            writer_closed_rx,
             worker_id,
             generation: Arc::new(AtomicU64::new(0)),
         }))
@@ -731,17 +731,25 @@ impl<O: State> Worker<O, Ready> {
             patch_tx,
             worker_id,
             generation,
-            notify_writer_closed,
+            writer_closed_rx,
             ..
         } = &self.inner;
+
+        // do not execute the workflow if the writer task has closed
+        if writer_closed_rx.has_changed().is_err() {
+            return Err(Error::new(
+                ErrorKind::Internal,
+                format!("worker ({worker_id}) is in an inconsistent state",),
+            ));
+        }
 
         // Validate workflow belongs to this worker
         if workflow.worker_id != *worker_id {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!(
-                    "workflow worker_id {} does not match current worker_id {}",
-                    workflow.worker_id, worker_id
+                    "workflow worker_id {} does not match current worker_id {worker_id}",
+                    workflow.worker_id,
                 ),
             ));
         }
@@ -752,15 +760,16 @@ impl<O: State> Worker<O, Ready> {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!(
-                    "workflow created at generation {} but current generation is {}",
-                    workflow.generation, current_generation
+                    "workflow created at generation {} but current generation is {current_generation}",
+                    workflow.generation,
                 ),
             ));
         }
 
+        let mut writer_closed_rx = writer_closed_rx.clone();
         let res = select! {
             biased;
-            _ = notify_writer_closed.notified() => {
+            _ = writer_closed_rx.changed() => {
                 return Err(Error::internal("state patch failed, worker state possibly tainted"));
             }
             res = workflow.execute(system_rwlock, patch_tx.clone(), interrupt) => res
@@ -831,11 +840,20 @@ impl<O: State> Worker<O, Ready> {
             resources,
             domain,
             system_rwlock,
-            notify_writer_closed,
+            writer_closed_rx,
             patch_tx,
             generation,
+            worker_id,
             ..
         } = self.inner.clone();
+
+        // abort if the writer has closed
+        if writer_closed_rx.has_changed().is_err() {
+            return Err(Error::new(
+                ErrorKind::Internal,
+                format!("worker ({worker_id}) is in an inconsistent state",),
+            ));
+        }
 
         // Update system resources
         {
@@ -940,7 +958,7 @@ impl<O: State> Worker<O, Ready> {
 
         // Main seek_with_interrupt planning and execution loop
         let handle: JoinHandle<Result<SeekStatus>> = {
-            let err_rx = notify_writer_closed;
+            let mut err_rx = writer_closed_rx;
             let interrupt = drop_interrupt.clone();
             // No writing allowed on this copy of the system lock
             let sys_reader = system_rwlock;
@@ -955,7 +973,7 @@ impl<O: State> Worker<O, Ready> {
                     loop {
                         let res = select! {
                             biased;
-                            _ = err_rx.notified() => {
+                            _ = err_rx.changed() => {
                                 return Err(Error::internal("state patch failed, worker state possibly tainted"));
                             }
                             res = find_and_run_workflow::<O>(&domain, &sys_reader, &tgt, &patch_tx, &interrupt, &generation) => res
