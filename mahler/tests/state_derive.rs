@@ -414,58 +414,6 @@ fn test_option_skip_none_serialization() {
 }
 
 #[test]
-fn test_option_skip_none_as_internal() {
-    use mahler::state::AsInternal;
-
-    #[derive(State, Debug)]
-    struct Config {
-        name: String,
-        host: Option<String>,
-        port: Option<u16>,
-        timeout: Option<i32>,
-    }
-
-    // Test that None values are skipped in as_internal serialization
-    let config = Config {
-        name: "app".to_string(),
-        host: Some("localhost".to_string()),
-        port: None,
-        timeout: None,
-    };
-
-    let json = serde_json::to_value(AsInternal(&config)).unwrap();
-
-    // as_internal adds "__mahler(halted)" field
-    assert_eq!(
-        json.get("__mahler(halted)"),
-        Some(&serde_json::json!(false))
-    );
-    assert_eq!(json.get("name"), Some(&serde_json::json!("app")));
-    assert_eq!(json.get("host"), Some(&serde_json::json!("localhost")));
-    assert_eq!(json.get("port"), None); // Should be skipped
-    assert_eq!(json.get("timeout"), None); // Should be skipped
-
-    // Test with all None
-    let config2 = Config {
-        name: "test".to_string(),
-        host: None,
-        port: None,
-        timeout: None,
-    };
-
-    let json2 = serde_json::to_value(AsInternal(&config2)).unwrap();
-
-    assert_eq!(
-        json2.get("__mahler(halted)"),
-        Some(&serde_json::json!(false))
-    );
-    assert_eq!(json2.get("name"), Some(&serde_json::json!("test")));
-    assert_eq!(json2.get("host"), None); // Skipped
-    assert_eq!(json2.get("port"), None); // Skipped
-    assert_eq!(json2.get("timeout"), None); // Skipped
-}
-
-#[test]
 fn test_collection_default_deserialization() {
     use mahler::state::{List, Map, Set};
 

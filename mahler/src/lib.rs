@@ -144,10 +144,10 @@
 //!
 //! Note that only one resource of each type can be provided to the worker.
 //!
-//! # Jobs and Tasks
+//! # Tasks and Jobs
 //!
 //! A [Task](`task::Task`) in Mahler is an operation on a part of the system state that may chose
-//! to make changes to the state given some target. It is device as a pure Rust handler  and it may
+//! to make changes to the state given some target. It is defined as a pure Rust handler  and it may
 //! or may not perform IO. A [Job](`job::Job`) is the configuration of a task to an operation on
 //! the system state.
 //!
@@ -454,6 +454,7 @@ use mahler_core::runtime;
 
 mod system_ext;
 
+pub mod exception;
 pub mod extract;
 pub mod job;
 pub mod task;

@@ -96,29 +96,6 @@ fn extract_mahler_derives(attrs: &[Attribute]) -> Result<Option<proc_macro2::Tok
     Ok(None)
 }
 
-/// Extract should_halt_if function name from #[mahler(should_halt_if = "fn")] attribute
-fn extract_should_halt_if(attrs: &[Attribute]) -> Result<Option<String>> {
-    for attr in attrs {
-        if attr.path().is_ident("mahler") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let tokens_str = meta_list.tokens.to_string();
-
-                if let Some(function_part) = tokens_str.strip_prefix("should_halt_if") {
-                    let function_part = function_part.trim();
-                    if let Some(function_part) = function_part.strip_prefix('=') {
-                        let function_part = function_part.trim();
-                        let function_name = function_part.trim_matches('"').trim();
-                        if !function_name.is_empty() {
-                            return Ok(Some(function_name.to_string()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
 /// Filter attributes, removing mahler and derive attributes
 fn filter_attributes(attrs: &[Attribute]) -> Vec<&Attribute> {
     attrs
@@ -439,101 +416,6 @@ fn generate_deserialize_impl(
     }
 }
 
-/// Generate the as_internal method for structs with named fields
-fn generate_as_internal_impl(
-    struct_name: &syn::Ident,
-    fields: &syn::punctuated::Punctuated<Field, syn::Token![,]>,
-) -> proc_macro2::TokenStream {
-    let all_fields: Vec<_> = fields.iter().collect();
-    let field_count = all_fields.len() + 1; // +1 for halted
-    let struct_name_str = struct_name.to_string();
-
-    let field_serializations: Vec<_> = all_fields
-        .iter()
-        .filter_map(|field| {
-            let field_name = field.ident.as_ref()?;
-            let field_name_str = field_name.to_string();
-
-            let is_internal = has_mahler_internal_attribute(&field.attrs).unwrap_or(false);
-            let is_option = is_option_type(&field.ty);
-
-            if is_internal {
-                // Internal fields serialize directly without AsInternal wrapper
-                if is_option {
-                    // Skip None values for internal Option fields
-                    Some(quote! {
-                        if self.#field_name.is_some() {
-                            __state.serialize_field(
-                                #field_name_str,
-                                &self.#field_name
-                            )?;
-                        }
-                    })
-                } else {
-                    Some(quote! {
-                        __state.serialize_field(
-                            #field_name_str,
-                            &self.#field_name
-                        )?;
-                    })
-                }
-            } else {
-                // Non-internal fields use AsInternal wrapper
-                if is_option {
-                    // Skip None values for non-internal Option fields
-                    Some(quote! {
-                        if self.#field_name.is_some() {
-                            __state.serialize_field(
-                                #field_name_str,
-                                &::mahler::state::AsInternal(&self.#field_name)
-                            )?;
-                        }
-                    })
-                } else {
-                    Some(quote! {
-                        __state.serialize_field(
-                            #field_name_str,
-                            &::mahler::state::AsInternal(&self.#field_name)
-                        )?;
-                    })
-                }
-            }
-        })
-        .collect();
-
-    quote! {
-        fn as_internal<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
-        where
-            __S: ::mahler::serde::Serializer,
-        {
-            use ::mahler::serde::ser::SerializeStruct;
-
-            let mut __state = __serializer.serialize_struct(#struct_name_str, #field_count)?;
-
-            __state.serialize_field("__mahler(halted)", &self.is_halted())?;
-
-            #(#field_serializations)*
-
-            __state.end()
-        }
-    }
-}
-
-/// Generate is_halted implementation if should_halt_if is specified
-fn generate_is_halted_impl(should_halt_if_fn: &Option<String>) -> proc_macro2::TokenStream {
-    if let Some(ref fn_name) = should_halt_if_fn {
-        let fn_path: syn::Path =
-            syn::parse_str(fn_name).expect("Failed to parse should_halt_if function path");
-        quote! {
-            fn is_halted(&self) -> bool {
-                #fn_path(self)
-            }
-        }
-    } else {
-        quote! {}
-    }
-}
-
 /// Generate derive attributes for the target type
 fn generate_target_derives(
     extra_derives: Option<proc_macro2::TokenStream>,
@@ -561,7 +443,6 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 
     let extra_derives = extract_mahler_derives(&input.attrs)?;
     let has_extra_derives = extra_derives.is_some();
-    let should_halt_if_fn = extract_should_halt_if(&input.attrs)?;
 
     let derives = generate_target_derives(extra_derives);
 
@@ -570,8 +451,6 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
             match data_struct.fields {
                 Fields::Named(fields) => {
                     let target_fields = process_named_fields(&fields.named)?;
-                    let as_internal_impl = generate_as_internal_impl(struct_name, &fields.named);
-                    let is_halted_impl = generate_is_halted_impl(&should_halt_if_fn);
                     let serialize_impl =
                         generate_serialize_impl(struct_name, &fields.named, generics, false);
                     let deserialize_impl =
@@ -598,10 +477,6 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 
                         impl #impl_generics #model_path for #struct_name #ty_generics #where_clause {
                             type Target = #target_name #ty_generics;
-
-                            #is_halted_impl
-
-                            #as_internal_impl
                         }
                     };
 
@@ -617,12 +492,8 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                     }
 
                     let target_fields = process_unnamed_fields(&fields.unnamed)?;
-                    let halted_impl = generate_is_halted_impl(&should_halt_if_fn);
-
                     let struct_attrs = filter_attributes(&input.attrs);
-
                     let field_type = &fields.unnamed.iter().next().unwrap().ty;
-
                     let de_impl_generics = if generics.params.is_empty() {
                         quote! { <'de> }
                     } else {
@@ -673,14 +544,12 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                             where
                                 __D: ::mahler::serde::Deserializer<'de>,
                             {
-                                Ok(#target_name(<#field_type as ::mahler::serde::Deserialize>::deserialize(__deserializer)?))
+                                Ok(#target_name(<<#field_type as ::mahler::state::State>::Target as ::mahler::serde::Deserialize>::deserialize(__deserializer)?))
                             }
                         }
 
                         impl #impl_generics #model_path for #struct_name #ty_generics #where_clause {
                             type Target = #target_name #ty_generics;
-
-                            #halted_impl
                         }
                     };
 
@@ -694,7 +563,6 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                         ));
                     }
 
-                    let halted_impl = generate_is_halted_impl(&should_halt_if_fn);
                     let struct_name_str = struct_name.to_string();
 
                     let de_impl_generics = if generics.params.is_empty() {
@@ -750,8 +618,6 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 
                         impl #impl_generics #model_path for #struct_name #ty_generics #where_clause {
                             type Target = Self;
-
-                            #halted_impl
                         }
                     };
 
@@ -768,8 +634,6 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                     "#[mahler(derive(...))] cannot be used on enums. Add the derives directly to the parent type instead.",
                 ));
             }
-
-            let halted_impl = generate_is_halted_impl(&should_halt_if_fn);
             let struct_name_str = struct_name.to_string();
 
             let variants: Vec<_> = data_enum.variants.iter().collect();
@@ -904,8 +768,6 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 
                 impl #impl_generics #model_path for #struct_name #ty_generics #where_clause {
                     type Target = Self;
-
-                    #halted_impl
                 }
             };
 
@@ -943,7 +805,6 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 ///   Only applies when a new target struct is created (i.e. when the source structure is not an
 ///   enum or a unit type).
 ///   The derives are added in addition to the default `Debug` and `Clone` derives.
-/// - `#[mahler(should_halt_if = "function_name")]` - Specifies a function to determine if the state is halted.
 ///   The function must have the signature `fn(&T) -> bool` where `T` is the type being derived.
 ///   When provided, generates a `is_halted()` implementation that calls the specified function.
 ///   A halted state doesn't admit changes during planning.

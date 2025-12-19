@@ -19,6 +19,7 @@ use tracing::{
 mod testing;
 
 use crate::error::{AggregateError, Error, ErrorKind};
+use crate::exception::Exception;
 use crate::job::Job;
 use crate::json::Value;
 use crate::result::Result;
@@ -436,6 +437,12 @@ impl<O> Worker<O, Uninitialized> {
     /// Add a [Job](`crate::job::Job`) to the worker domain
     pub fn job(mut self, route: &'static str, job: Job) -> Self {
         self.inner.domain = self.inner.domain.job(route, job);
+        self
+    }
+
+    /// Add an [Exception](`crate::job::Exception`) to the worker domain
+    pub fn exception(mut self, route: &'static str, exception: Exception) -> Self {
+        self.inner.domain = self.inner.domain.exception(route, exception);
         self
     }
 

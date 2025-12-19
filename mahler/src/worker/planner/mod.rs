@@ -10,7 +10,7 @@ use crate::dag::Dag;
 use crate::error::{Error, ErrorKind};
 use crate::json::{self, OperationMatcher, Path, Value};
 use crate::runtime::{Context, System};
-use crate::state::{AsInternal, State};
+use crate::state::State;
 use crate::system_ext::SystemExt;
 use crate::task::Task;
 
@@ -375,13 +375,7 @@ where
     let mut stack = vec![(system.clone(), Dag::default(), 0)];
 
     let find_workflow_span = Span::current();
-
-    // We serialize the state using AsInternal to get state metadata
-    // FIXME: remove this, we will replace it with some different mechanism
-    let initial_state_with_meta = system
-        .state::<T>()
-        .and_then(|s| serde_json::to_value(AsInternal(&s)).map_err(Error::from))?;
-    let mut halted_state_paths: Vec<Path> = Vec::new();
+    let mut skipped_state_paths: Vec<Path> = Vec::new();
 
     // Keep track of visited states
     let mut visited_states = HashSet::new();
@@ -402,13 +396,13 @@ where
         visited_states.insert(hash_state(&cur_state));
 
         // Compute the difference between current and target state
-        let distance = Distance::new(&cur, tgt, &halted_state_paths);
+        let distance = Distance::new(&cur, tgt, &skipped_state_paths);
 
         // If there are no more operations, we’ve reached the goal
         if distance.is_empty() {
             // we need to reverse the plan before returning
             let mut workflow = Workflow::new(cur_plan.reverse());
-            workflow.ignored = halted_state_paths;
+            workflow.ignored = skipped_state_paths;
             workflow.operations = changes;
             return Ok(workflow);
         }
@@ -429,27 +423,34 @@ where
             let pointer = path.as_ref();
 
             // skip the path if any parent path has been halted
-            if halted_state_paths.iter().any(|p| p.is_prefix_of(path)) {
-                continue;
-            }
-
-            // resolve the operation pointer to a value on the initial state
-            let state = pointer
-                .resolve(&initial_state_with_meta)
-                .unwrap_or(&Value::Null);
-
-            // if the state pointed by the operation has been halted, we add it to the list of
-            // operations and skip it
-            if let Some(true) = state
-                .get("__mahler(halted)")
-                .and_then(|value| value.as_bool())
-            {
-                halted_state_paths.push(path.clone());
+            if skipped_state_paths.iter().any(|p| p.is_prefix_of(path)) {
                 continue;
             }
 
             // resolve the operation pointer on the target state
             let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
+
+            // Look for matching exceptions for the path and operation
+            if let Some((args, exceptions)) = db.find_matching_exceptions(path.as_str()) {
+                let context = Context {
+                    path: path.clone(),
+                    args,
+                    target: target.clone(),
+                };
+
+                // if there are any exceptions that apply to the context, add the path to
+                // the list and skip the path
+                if exceptions.filter(|j| j.operation().matches(op)).any(|exception| {
+                    exception.test(&cur_state, &context)
+                        .inspect_err(
+                            |e| warn!(parent: &find_workflow_span, "cannot evaluate {exception}: {e}"),
+                        )
+                        .unwrap_or(false)
+                }) {
+                    skipped_state_paths.push(path.clone());
+                    continue;
+                }
+            }
 
             // Retrieve matching jobs at this path
             if let Some((args, jobs)) = db.find_matching_jobs(path.as_str()) {
@@ -459,7 +460,7 @@ where
                     target: target.clone(),
                 };
 
-                // Filter `None` jobs from the list
+                // Look for jobs matching the operation
                 for job in jobs.filter(|j| j.operation().matches(op)) {
                     let task = job.new_task(context.clone());
                     let mut changes = Vec::new();
@@ -635,7 +636,7 @@ mod tests {
     use crate::dag::{dag, par, seq, Dag};
     use crate::extract::{Args, System, Target, View};
     use crate::job::*;
-    use crate::state::{AsInternal, Map, State};
+    use crate::state::{Map, State};
     use crate::task::prelude::*;
 
     fn init() {
@@ -898,130 +899,6 @@ mod tests {
         );
 
         assert_eq!(workflow.to_string(), expected.to_string(),);
-    }
-
-    #[test]
-    fn it_ignores_halted_sub_states_when_planning() {
-        init();
-
-        #[derive(Serialize, Deserialize)]
-        struct AppTarget {
-            running: bool,
-        }
-
-        #[derive(Serialize, Deserialize)]
-        struct App {
-            running: bool,
-
-            #[serde(default)]
-            install_failed: bool,
-        }
-
-        impl State for App {
-            type Target = AppTarget;
-
-            fn is_halted(&self) -> bool {
-                self.install_failed
-            }
-
-            // we cannot derive State in these tests, normally users
-            // won't have to define this function
-            fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                use serde::ser::SerializeStruct;
-                let mut state = serializer.serialize_struct("App", 3)?;
-                state.serialize_field("__mahler(halted)", &self.is_halted())?;
-                state.serialize_field("running", &self.running)?;
-                state.serialize_field("install_failed", &self.install_failed)?;
-                state.end()
-            }
-        }
-
-        #[derive(Serialize, Deserialize)]
-        struct Device {
-            apps: Map<String, App>,
-        }
-
-        #[derive(Serialize, Deserialize)]
-        struct DeviceTarget {
-            apps: Map<String, AppTarget>,
-        }
-
-        impl State for Device {
-            type Target = DeviceTarget;
-
-            // we cannot derive State in these tests, normally users
-            // won't have to define this function
-            fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                use serde::ser::SerializeStruct;
-                let mut state = serializer.serialize_struct("Device", 2)?;
-                state.serialize_field("apps", &AsInternal(&self.apps))?;
-                state.end()
-            }
-        }
-
-        fn prepare_app(mut app: View<Option<App>>) -> View<Option<App>> {
-            app.replace(App {
-                running: false,
-                install_failed: false,
-            });
-            app
-        }
-
-        fn install_app(mut app: View<App>) -> View<App> {
-            app.running = true;
-            app
-        }
-
-        let domain = Domain::new().jobs(
-            "/apps/{app_name}",
-            [
-                create(prepare_app).with_description(|Args(app_name): Args<String>| {
-                    format!("prepare app {app_name}")
-                }),
-                update(install_app).with_description(|Args(app_name): Args<String>| {
-                    format!("install app {app_name}")
-                }),
-            ],
-        );
-
-        let initial = serde_json::from_value::<Device>(json!({
-            "apps": {
-                "one": {
-                    "running": false,
-                },
-                "two": {
-                    "running": false,
-                    "install_failed": true,
-                }
-            }
-        }))
-        .unwrap();
-        let target = serde_json::from_value::<DeviceTarget>(json!({
-            "apps": {
-                "one": {
-                    "running": true,
-                },
-                "two": {
-                    "running": true,
-                },
-                "three": {
-                    "running": true,
-                }
-            }
-        }))
-        .unwrap();
-
-        let workflow = find_plan(&domain, initial, target).unwrap();
-        // app `two` has halted, but a plan is generated to install the other two apps
-        let expected: Dag<&str> =
-            par!("install app one", "prepare app three") + seq!("install app three");
-        assert_eq!(expected.to_string(), workflow.to_string());
     }
 
     // This test will fail to find a plan due to a bug in the task definitions,
@@ -1889,5 +1766,686 @@ mod tests {
         ];
         let result = longest_common_prefix(&paths);
         assert_eq!(result.as_str(), "/a");
+    }
+
+    #[test]
+    fn test_exception_skips_path_with_simple_condition() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct Service {
+            running: bool,
+            #[serde(default)]
+            failed: bool,
+        }
+
+        impl State for Service {
+            type Target = ServiceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct ServiceTarget {
+            running: bool,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Device {
+            services: Map<String, Service>,
+        }
+
+        impl State for Device {
+            type Target = DeviceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct DeviceTarget {
+            services: Map<String, ServiceTarget>,
+        }
+
+        fn start_service(mut service: View<Service>) -> View<Service> {
+            service.running = true;
+            service
+        }
+
+        // Exception: skip failed services
+        fn skip_failed(view: View<Service>) -> bool {
+            view.failed
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/services/{service}",
+                update(start_service).with_description(|Args(service): Args<String>| {
+                    format!("start service {service}")
+                }),
+            )
+            .exception("/services/{service}", crate::exception::update(skip_failed));
+
+        let initial = serde_json::from_value::<Device>(json!({
+            "services": {
+                "one": { "running": false, "failed": false },
+                "two": { "running": false, "failed": true },
+                "three": { "running": false, "failed": false }
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<DeviceTarget>(json!({
+            "services": {
+                "one": { "running": true },
+                "two": { "running": true },
+                "three": { "running": true }
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap();
+
+        // Service "two" should be skipped because it failed
+        let expected: Dag<&str> = par!("start service one", "start service three");
+        assert_eq!(expected.to_string(), workflow.to_string());
+
+        // Verify that the ignored paths include service two
+        assert_eq!(workflow.ignored.len(), 1);
+        assert_eq!(workflow.ignored[0].as_str(), "/services/two");
+    }
+
+    #[test]
+    fn test_exception_with_target_extractor() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct App {
+            version: String,
+            #[serde(default)]
+            pinned_version: Option<String>,
+        }
+
+        impl State for App {
+            type Target = AppTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct AppTarget {
+            version: String,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct System {
+            apps: Map<String, App>,
+        }
+
+        impl State for System {
+            type Target = SystemTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct SystemTarget {
+            apps: Map<String, AppTarget>,
+        }
+
+        fn update_app(mut app: View<App>, Target(tgt): Target<App>) -> View<App> {
+            app.version = tgt.version;
+            app
+        }
+
+        // Exception: skip if target version doesn't match pinned version
+        fn skip_if_pinned(view: View<App>, Target(tgt): Target<App>) -> bool {
+            if let Some(ref pinned) = view.pinned_version {
+                pinned != &tgt.version
+            } else {
+                false
+            }
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/apps/{app}",
+                update(update_app)
+                    .with_description(|Args(app): Args<String>| format!("update app {app}")),
+            )
+            .exception("/apps/{app}", crate::exception::update(skip_if_pinned));
+
+        let initial = serde_json::from_value::<System>(json!({
+            "apps": {
+                "foo": { "version": "1.0", "pinned_version": "1.0" },
+                "bar": { "version": "1.0", "pinned_version": null },
+                "baz": { "version": "1.0" }
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<SystemTarget>(json!({
+            "apps": {
+                "foo": { "version": "2.0" },
+                "bar": { "version": "2.0" },
+                "baz": { "version": "2.0" }
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap();
+
+        // App "foo" should be skipped because it's pinned to 1.0
+        let expected: Dag<&str> = par!("update app bar", "update app baz");
+        assert_eq!(expected.to_string(), workflow.to_string());
+        assert_eq!(workflow.ignored.len(), 1);
+        assert_eq!(workflow.ignored[0].as_str(), "/apps/foo");
+    }
+
+    #[test]
+    fn test_exception_only_applies_to_matching_operation() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct Resource {
+            value: i32,
+        }
+
+        impl State for Resource {
+            type Target = Self;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Container {
+            resources: Map<String, Resource>,
+        }
+
+        impl State for Container {
+            type Target = Self;
+        }
+
+        fn create_resource(
+            mut res: View<Option<Resource>>,
+            Target(tgt): Target<Resource>,
+        ) -> View<Option<Resource>> {
+            *res = Some(tgt);
+            res
+        }
+
+        fn update_resource(
+            mut res: View<Resource>,
+            Target(tgt): Target<Resource>,
+        ) -> View<Resource> {
+            res.value = tgt.value;
+            res
+        }
+
+        // Exception: skip updates when value is negative
+        fn skip_negative_updates(Target(tgt): Target<Resource>) -> bool {
+            tgt.value < 0
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/resources/{name}",
+                create(create_resource)
+                    .with_description(|Args(name): Args<String>| format!("create resource {name}")),
+            )
+            .job(
+                "/resources/{name}",
+                update(update_resource)
+                    .with_description(|Args(name): Args<String>| format!("update resource {name}")),
+            )
+            .exception(
+                "/resources/{name}",
+                crate::exception::update(skip_negative_updates),
+            );
+
+        // Test 1: Update operation should be skipped for negative values
+        let initial = serde_json::from_value::<Container>(json!({
+            "resources": {
+                "a": { "value": 10 },
+                "b": { "value": 20 }
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<Container>(json!({
+            "resources": {
+                "a": { "value": -5 },
+                "b": { "value": 30 }
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap();
+
+        // Resource "a" update should be skipped, but "b" should be updated
+        let expected: Dag<&str> = seq!("update resource b");
+        assert_eq!(expected.to_string(), workflow.to_string());
+        assert_eq!(workflow.ignored.len(), 1);
+
+        // Test 2: Create operation should NOT be skipped even for negative values
+        // because the exception only applies to update operations
+        let initial = serde_json::from_value::<Container>(json!({
+            "resources": {}
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<Container>(json!({
+            "resources": {
+                "c": { "value": -10 }
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap();
+
+        // Resource "c" should be created even though value is negative
+        let expected: Dag<&str> = seq!("create resource c");
+        assert_eq!(expected.to_string(), workflow.to_string());
+        assert!(workflow.ignored.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_exceptions_on_different_paths() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct Service {
+            running: bool,
+            #[serde(default)]
+            install_failed: bool,
+        }
+
+        impl State for Service {
+            type Target = ServiceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct ServiceTarget {
+            running: bool,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Config {
+            value: String,
+            #[serde(default)]
+            readonly: bool,
+        }
+
+        impl State for Config {
+            type Target = ConfigTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct ConfigTarget {
+            value: String,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Device {
+            services: Map<String, Service>,
+            config: Map<String, Config>,
+        }
+
+        impl State for Device {
+            type Target = DeviceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct DeviceTarget {
+            services: Map<String, ServiceTarget>,
+            config: Map<String, ConfigTarget>,
+        }
+
+        fn start_service(mut service: View<Service>) -> View<Service> {
+            service.running = true;
+            service
+        }
+
+        fn update_config(mut config: View<Config>, Target(tgt): Target<Config>) -> View<Config> {
+            config.value = tgt.value;
+            config
+        }
+
+        // Exception 1: skip failed services
+        fn skip_failed_services(view: View<Service>) -> bool {
+            view.install_failed
+        }
+
+        // Exception 2: skip readonly configs
+        fn skip_readonly_configs(view: View<Config>) -> bool {
+            view.readonly
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/services/{service}",
+                update(start_service).with_description(|Args(service): Args<String>| {
+                    format!("start service {service}")
+                }),
+            )
+            .job(
+                "/config/{key}",
+                update(update_config)
+                    .with_description(|Args(key): Args<String>| format!("update config {key}")),
+            )
+            .exception(
+                "/services/{service}",
+                crate::exception::update(skip_failed_services),
+            )
+            .exception(
+                "/config/{key}",
+                crate::exception::update(skip_readonly_configs),
+            );
+
+        let initial = serde_json::from_value::<Device>(json!({
+            "services": {
+                "web": { "running": false, "install_failed": true },
+                "api": { "running": false, "install_failed": false }
+            },
+            "config": {
+                "host": { "value": "old", "readonly": true },
+                "port": { "value": "8080", "readonly": false }
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<DeviceTarget>(json!({
+            "services": {
+                "web": { "running": true },
+                "api": { "running": true }
+            },
+            "config": {
+                "host": { "value": "new" },
+                "port": { "value": "9090" }
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap();
+
+        // Service "web" and config "host" should be skipped
+        // Check that both tasks are present (order may vary)
+        let workflow_str = workflow.to_string();
+        assert!(workflow_str.contains("start service api"));
+        assert!(workflow_str.contains("update config port"));
+        assert_eq!(workflow.ignored.len(), 2);
+        assert!(workflow
+            .ignored
+            .contains(&Path::from_static("/services/web")));
+        assert!(workflow
+            .ignored
+            .contains(&Path::from_static("/config/host")));
+    }
+
+    #[test]
+    fn test_exception_with_args_extractor() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct Item {
+            value: String,
+        }
+
+        impl State for Item {
+            type Target = Self;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Items {
+            items: Map<String, Item>,
+        }
+
+        impl State for Items {
+            type Target = Self;
+        }
+
+        fn update_item(mut item: View<Item>, Target(tgt): Target<Item>) -> View<Item> {
+            item.value = tgt.value;
+            item
+        }
+
+        // Exception: skip items with specific names
+        fn skip_protected_items(crate::extract::Args(name): crate::extract::Args<String>) -> bool {
+            name == "protected" || name == "system"
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/items/{name}",
+                update(update_item)
+                    .with_description(|Args(name): Args<String>| format!("update item {name}")),
+            )
+            .exception(
+                "/items/{name}",
+                crate::exception::update(skip_protected_items),
+            );
+
+        let initial = serde_json::from_value::<Items>(json!({
+            "items": {
+                "normal": { "value": "old1" },
+                "protected": { "value": "old2" },
+                "system": { "value": "old3" },
+                "user": { "value": "old4" }
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<Items>(json!({
+            "items": {
+                "normal": { "value": "new1" },
+                "protected": { "value": "new2" },
+                "system": { "value": "new3" },
+                "user": { "value": "new4" }
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap();
+
+        // Items "protected" and "system" should be skipped
+        let expected: Dag<&str> = par!("update item normal", "update item user");
+        assert_eq!(expected.to_string(), workflow.to_string());
+        assert_eq!(workflow.ignored.len(), 2);
+        assert!(workflow
+            .ignored
+            .contains(&Path::from_static("/items/protected")));
+        assert!(workflow
+            .ignored
+            .contains(&Path::from_static("/items/system")));
+    }
+
+    #[test]
+    fn test_exception_with_system_extractor() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct App {
+            image: String,
+        }
+
+        impl State for App {
+            type Target = Self;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Image {
+            available: bool,
+        }
+
+        impl State for Image {
+            type Target = Self;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Device {
+            apps: Map<String, App>,
+            images: Map<String, Image>,
+        }
+
+        impl State for Device {
+            type Target = DeviceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct DeviceTarget {
+            apps: Map<String, App>,
+        }
+
+        fn update_app(mut app: View<App>, Target(tgt): Target<App>) -> View<App> {
+            app.image = tgt.image;
+            app
+        }
+
+        // Exception: skip apps if their image is not available
+        fn skip_if_image_unavailable(
+            view: View<App>,
+            crate::extract::System(device): crate::extract::System<Device>,
+        ) -> bool {
+            device
+                .images
+                .get(&view.image)
+                .map(|img| !img.available)
+                .unwrap_or(true)
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/apps/{app}",
+                update(update_app)
+                    .with_description(|Args(app): Args<String>| format!("update app {app}")),
+            )
+            .exception(
+                "/apps/{app}",
+                crate::exception::update(skip_if_image_unavailable),
+            );
+
+        let initial = serde_json::from_value::<Device>(json!({
+            "apps": {
+                "web": { "image": "nginx:1.0" },
+                "api": { "image": "node:14" },
+                "worker": { "image": "python:3.9" }
+            },
+            "images": {
+                "nginx:1.0": { "available": true },
+                "node:14": { "available": false },
+                "python:3.9": { "available": true }
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<DeviceTarget>(json!({
+            "apps": {
+                "web": { "image": "nginx:2.0" },
+                "api": { "image": "node:16" },
+                "worker": { "image": "python:3.10" }
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap();
+
+        // App "api" should be skipped because node:14 image is not available
+        let expected: Dag<&str> = par!("update app web", "update app worker");
+        assert_eq!(expected.to_string(), workflow.to_string());
+        assert_eq!(workflow.ignored.len(), 1);
+        assert_eq!(workflow.ignored[0].as_str(), "/apps/api");
+    }
+
+    #[test]
+    fn test_exception_preserves_parent_path_skip() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct NestedValue {
+            inner: String,
+        }
+
+        impl State for NestedValue {
+            type Target = Self;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Container {
+            name: String,
+            nested: NestedValue,
+        }
+
+        impl State for Container {
+            type Target = Self;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Root {
+            containers: Map<String, Container>,
+        }
+
+        impl State for Root {
+            type Target = Self;
+        }
+
+        fn update_name(mut name: View<String>, Target(tgt): Target<String>) -> View<String> {
+            *name = tgt;
+            name
+        }
+
+        fn update_inner(mut inner: View<String>, Target(tgt): Target<String>) -> View<String> {
+            *inner = tgt;
+            inner
+        }
+
+        // Exception: skip containers with name "disabled"
+        fn skip_disabled_containers(view: View<Container>) -> bool {
+            view.name == "disabled"
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/containers/{id}/name",
+                update(update_name).with_description(|Args(id): Args<String>| {
+                    format!("update container {id} name")
+                }),
+            )
+            .job(
+                "/containers/{id}/nested/inner",
+                update(update_inner).with_description(|Args(id): Args<String>| {
+                    format!("update container {id} nested value")
+                }),
+            )
+            .exception(
+                "/containers/{id}",
+                crate::exception::update(skip_disabled_containers),
+            );
+
+        let initial = serde_json::from_value::<Root>(json!({
+            "containers": {
+                "a": {
+                    "name": "disabled",
+                    "nested": { "inner": "old1" }
+                },
+                "b": {
+                    "name": "enabled",
+                    "nested": { "inner": "old2" }
+                }
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<Root>(json!({
+            "containers": {
+                "a": {
+                    "name": "still-disabled",
+                    "nested": { "inner": "new1" }
+                },
+                "b": {
+                    "name": "still-enabled",
+                    "nested": { "inner": "new2" }
+                }
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap();
+
+        // Container "a" and all its nested fields should be skipped
+        let expected: Dag<&str> =
+            par!("update container b name", "update container b nested value");
+        assert_eq!(expected.to_string(), workflow.to_string());
+
+        // The parent path /containers/a should be on the ignore list
+        assert_eq!(workflow.ignored[0].as_str(), "/containers/a");
     }
 }

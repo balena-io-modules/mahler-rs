@@ -3,6 +3,7 @@ use std::collections::btree_set::Iter;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::error::{Error, ErrorKind};
+use crate::exception::Exception;
 use crate::job::Job;
 use crate::json::PathArgs;
 use crate::result::Result;
@@ -11,7 +12,9 @@ use crate::task::Id as TaskId;
 #[derive(Default, Debug, Clone)]
 pub struct Domain {
     // The router stores a list of jobs matching a route
-    router: Router<BTreeSet<Job>>,
+    jobs: Router<BTreeSet<Job>>,
+    // List of exceptions matching a route
+    exceptions: Router<BTreeSet<Exception>>,
     // The index stores the reverse relation of task id to a route
     index: HashMap<TaskId, String>,
 }
@@ -19,7 +22,8 @@ pub struct Domain {
 impl Domain {
     pub fn new() -> Self {
         Self {
-            router: Router::new(),
+            jobs: Router::new(),
+            exceptions: Router::new(),
             index: HashMap::new(),
         }
     }
@@ -34,20 +38,21 @@ impl Domain {
         // TODO: it would be great to figure out a way to validate
         // that the pointer is valid for the parent state at compile time
         let Self {
-            mut router,
+            mut jobs,
             mut index,
+            ..
         } = self;
 
         let task_id = job.id();
 
         // Remove the route from the router if it exists or create
         // a new set if it doesn't
-        let mut queue = router.remove(route).unwrap_or_default();
+        let mut queue = jobs.remove(route).unwrap_or_default();
         queue.insert(job);
 
         // (re)insert the queue to the router, we should not have
         // conflicts here
-        router.insert(route, queue).expect("route should be valid");
+        jobs.insert(route, queue).expect("route should be valid");
 
         // Only allow one assignment of a job to a route
         if let Some(oldroute) = index.insert(task_id, String::from(route)) {
@@ -58,7 +63,29 @@ impl Domain {
             }
         }
 
-        Self { router, index }
+        Self {
+            jobs,
+            index,
+            ..self
+        }
+    }
+
+    /// Add an exception to the domain
+    pub fn exception(self, route: &'static str, exception: Exception) -> Self {
+        let Self { mut exceptions, .. } = self;
+
+        // Remove the route from the router if it exists or create
+        // a new set if it doesn't
+        let mut queue = exceptions.remove(route).unwrap_or_default();
+        queue.insert(exception);
+
+        // (re)insert the queue to the router, we should not have
+        // conflicts here
+        exceptions
+            .insert(route, queue)
+            .expect("route should be valid");
+
+        Self { exceptions, ..self }
     }
 
     pub fn jobs<const N: usize>(self, route: &'static str, list: [Job; N]) -> Self {
@@ -167,16 +194,24 @@ impl Domain {
     }
 
     /// Find a job given the path and the id
-    pub(crate) fn find_job(&self, path: &str, task_id: TaskId) -> Option<&Job> {
-        self.router
+    pub fn find_job(&self, path: &str, task_id: TaskId) -> Option<&Job> {
+        self.jobs
             .at(path)
             .ok()
             .and_then(|matched| matched.value.iter().find(|job| job.id() == task_id))
     }
 
-    /// Find matches for the given path in the domain
-    pub(crate) fn find_matching_jobs(&self, path: &str) -> Option<(PathArgs, Iter<'_, Job>)> {
-        self.router
+    /// Find [`Job`] matches for the given path in the domain
+    pub fn find_matching_jobs(&self, path: &str) -> Option<(PathArgs, Iter<'_, Job>)> {
+        self.jobs
+            .at(path)
+            .map(|matched| (PathArgs::from(matched.params), matched.value.iter()))
+            .ok()
+    }
+
+    /// Find [`Exception`] matches for the given path in the domain
+    pub fn find_matching_exceptions(&self, path: &str) -> Option<(PathArgs, Iter<'_, Exception>)> {
+        self.exceptions
             .at(path)
             .map(|matched| (PathArgs::from(matched.params), matched.value.iter()))
             .ok()
