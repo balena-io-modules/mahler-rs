@@ -805,9 +805,6 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 ///   Only applies when a new target struct is created (i.e. when the source structure is not an
 ///   enum or a unit type).
 ///   The derives are added in addition to the default `Debug` and `Clone` derives.
-///   The function must have the signature `fn(&T) -> bool` where `T` is the type being derived.
-///   When provided, generates a `is_halted()` implementation that calls the specified function.
-///   A halted state doesn't admit changes during planning.
 ///
 /// # Examples
 ///

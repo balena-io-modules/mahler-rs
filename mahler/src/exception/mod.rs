@@ -129,7 +129,7 @@ impl PartialOrd for Exception {
 impl Ord for Exception {
     fn cmp(&self, other: &Self) -> Ordering {
         self.id
-            .cmp(&other.id)
+            .cmp(other.id)
             .then(self.operation.cmp(&other.operation))
     }
 }

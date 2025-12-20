@@ -173,8 +173,8 @@ impl<T: Send + 'static, E: 'static> IO<T, E> {
 /// Convert an IO operation into the internal effect representation.
 ///
 /// This conversion allows IO operations to be executed by the workflow engine.
-/// Any I/O errors are wrapped as [`IOError`] and the final result is converted
-/// to a JSON patch representing the state changes.
+/// Any I/O errors are wrapped as [`Error`] with [`ErrorKind::Runtime`] and the final
+/// result is converted to a JSON patch representing the state changes.
 impl<T, E> From<IO<T, E>> for Effect<Patch, Error, View<T>>
 where
     T: Serialize + Send + 'static,

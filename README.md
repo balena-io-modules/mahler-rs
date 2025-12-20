@@ -139,7 +139,6 @@ This means that, when receving a new target, the worker will compare the current
 Here's the full runnable example with logging and error handling:
 
 ```rust
-use anyhow::{Context, Result};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use mahler::state::{Map, State};
@@ -147,6 +146,7 @@ use mahler::worker::Worker;
 use mahler::task::{Handler, IO, with_io};
 use mahler::job::update;
 use mahler::extract::Args;
+use mahler::result::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -176,8 +176,7 @@ async fn main() -> Result<()> {
         .initial_state(Counters(Map::from([
             ("a".to_string(), 0),
             ("b".to_string(), 0),
-        ])))
-        .with_context(|| "failed to serialize initial state")?;
+        ])))?;
 
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
@@ -186,16 +185,12 @@ async fn main() -> Result<()> {
             ("a".to_string(), 1),
             ("b".to_string(), 2),
         ])))
-        .await
-        .with_context(|| "failed to reach target state")?;
+        .await?;
 
     // Get the internal state from the Worker. The worker
     // is idle but the state may not be static so we need
     // to use an await to get the current state.
-    let state = worker
-        .state()
-        .await
-        .with_context(|| "failed to deserialize state")?;
+    let state = worker.state().await?;
 
     assert_eq!(
         state,
