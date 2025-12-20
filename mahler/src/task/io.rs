@@ -5,9 +5,12 @@ use json_patch::Patch;
 use super::effect::Effect;
 use super::into_result::IntoResult;
 
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::extract::View;
 use crate::serde::Serialize;
+
+/// An opaque type wrapping the outcome of an IO operation
+pub struct Outcome<T, E>(Effect<View<T>, E>);
 
 /// A type representing a lazy I/O operation producing a value of type `T` or an error of type `E`.
 ///
@@ -45,7 +48,7 @@ use crate::serde::Serialize;
 ///     if *counter < target {
 ///         *counter += 1;
 ///     }
-///     
+///
 ///     // Perform async I/O operation
 ///     with_io(counter, |counter| async move {
 ///         // Simulate some async work
@@ -54,7 +57,18 @@ use crate::serde::Serialize;
 ///     })
 /// }
 /// ```
-pub struct IO<T, E = Infallible>(Effect<View<T>, E>);
+pub enum IO<T, E = Infallible> {
+    /// There is an IO result from the task
+    Result(Outcome<T, E>),
+    /// The task ahas
+    Aborted(String),
+}
+
+impl<T, E> IO<T, E> {
+    pub fn abort(msg: impl Into<String>) -> Self {
+        IO::Aborted(msg.into())
+    }
+}
 
 impl<T: Send + 'static, E: 'static> IO<T, E> {
     /// Transform the output returned by the operation
@@ -82,7 +96,11 @@ impl<T: Send + 'static, E: 'static> IO<T, E> {
     where
         F: FnOnce(View<T>) -> View<T> + Clone + Send + 'static,
     {
-        Self(self.0.map(fu))
+        use IO::*;
+        match self {
+            Result(Outcome(eff)) => Result(Outcome(eff.map(fu))),
+            Aborted(..) => self,
+        }
     }
 
     /// Chain a fallible operation that can transform the value or produce an error.
@@ -111,7 +129,11 @@ impl<T: Send + 'static, E: 'static> IO<T, E> {
     where
         F: FnOnce(View<T>) -> Result<View<T>, E> + Clone + Send + 'static,
     {
-        Self(self.0.and_then(fu))
+        use IO::*;
+        match self {
+            Result(Outcome(eff)) => Result(Outcome(eff.and_then(fu))),
+            Aborted(..) => self,
+        }
     }
 
     /// Transform the error type of this IO operation.
@@ -140,8 +162,11 @@ impl<T: Send + 'static, E: 'static> IO<T, E> {
     where
         F: FnOnce(E) -> E1 + Clone + Send + 'static,
     {
-        let eff = self.0.map_err(fe);
-        IO(eff)
+        use IO::*;
+        match self {
+            Result(Outcome(eff)) => Result(Outcome(eff.map_err(fe))),
+            Aborted(msg) => Aborted(msg),
+        }
     }
 }
 
@@ -156,42 +181,13 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     fn from(io: IO<T, E>) -> Self {
-        io.0.map_err(Error::runtime)
-            .and_then(|view| view.into_result())
-    }
-}
-
-/// Convert a [`View<T>`] directly into an IO operation.
-///
-/// This creates an IO operation that immediately succeeds with the given view,
-/// without performing any actual I/O. This is useful for bailing out early in jobs
-/// before creating the effectful computation.
-///
-/// # Examples
-///
-/// ```
-/// # use mahler::{extract::{View, Target}, task::{with_io, IO}};
-/// fn plus_one(mut view: View<u32>, Target(tgt): Target<u32>) -> IO<u32> {
-///     if *view >= tgt {
-///         // exit early if we already reached the target
-///         return view.into();
-///     }
-///
-///     with_io(view, |view| async {
-///         // do some async work
-///         Ok(view)
-///     })
-///     // increase the target after the IO operation
-///     // terminates (at runtime)
-///     .map(|mut counter| {
-///         *counter = *counter + 1;
-///         counter
-///     })
-/// }
-/// ```
-impl<T, E> From<View<T>> for IO<T, E> {
-    fn from(view: View<T>) -> Self {
-        IO(Effect::from_result(Ok(view)))
+        use IO::*;
+        match io {
+            Result(Outcome(eff)) => eff
+                .map_err(Error::runtime)
+                .and_then(|view| view.into_result()),
+            Aborted(msg) => Effect::from_error(Error::new(ErrorKind::ConditionNotMet, msg)),
+        }
     }
 }
 
@@ -247,5 +243,43 @@ where
     F: FnOnce(View<T>) -> Res + Send + 'static,
     Res: Future<Output = Result<View<T>, E>> + Send,
 {
-    IO(Effect::of(pure).with_io(io))
+    IO::Result(Outcome(Effect::of(pure).with_io(io)))
+}
+
+/// Enforces a condition and returns early with an aborted IO if the condition is false.
+///
+/// This macro is similar to `assert!` but instead of panicking, it returns an
+/// [`IO::Aborted`] with a formatted error message.
+///
+/// # Examples
+///
+/// ```
+/// # use mahler::{extract::{View, Target}, task::{with_io, IO, enforce}};
+/// fn increment_if_below_limit(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
+///     // With a custom message
+///     enforce!(*counter < tgt, "counter {} exceeds limit {}", *counter, tgt);
+///
+///     *counter += 1;
+///     with_io(counter, |counter| async move { Ok(counter) })
+/// }
+///
+/// fn another_example(mut value: View<i32>) -> IO<i32> {
+///     // Without a message - uses default
+///     enforce!(*value >= 0);
+///
+///     with_io(value, |value| async move { Ok(value) })
+/// }
+/// ```
+#[macro_export]
+macro_rules! enforce {
+    ($cond:expr) => {
+        if !($cond) {
+            return $crate::task::IO::abort("condition failed");
+        }
+    };
+    ($cond:expr, $($arg:tt)+) => {
+        if !($cond) {
+            return $crate::task::IO::abort(format!($($arg)+));
+        }
+    };
 }

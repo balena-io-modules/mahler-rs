@@ -37,11 +37,6 @@ impl<O, E> Effect<O, E> {
         Effect::Pure(Ok(o))
     }
 
-    /// Create a pure `Effect` from a `Result`
-    pub(crate) fn from_result(res: Result<O, E>) -> Effect<O, E> {
-        Effect::Pure(res)
-    }
-
     /// Convert the effect to an effectful computation
     ///
     /// Allows providing an computation to apply to the input value that performs side-effects on the
@@ -212,11 +207,10 @@ mod tests {
 
     #[test]
     fn it_allows_errors_in_sync_executions() {
-        let effect =
-            Effect::from_result(Err("ERROR") as Result<i32, &str>).with_io(|x| async move {
-                sleep(Duration::from_millis(10)).await;
-                Ok(x + 1)
-            });
+        let effect = Effect::from_error("ERROR").with_io(|x| async move {
+            sleep(Duration::from_millis(10)).await;
+            Ok(x + 1) as Result<i32, &str>
+        });
 
         assert_eq!(effect.pure(), Err("ERROR"))
     }

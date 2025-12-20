@@ -25,11 +25,15 @@ pub use handler::*;
 pub use id::*;
 pub use io::*;
 
+// Re-export the enforce macro
+pub use crate::enforce;
+
 pub mod prelude {
     //! Core types and traits for setting up tasks
     pub use super::handler::*;
     pub use super::io::*;
     pub use super::Task;
+    pub use crate::enforce;
 }
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
