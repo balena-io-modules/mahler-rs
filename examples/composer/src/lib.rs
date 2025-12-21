@@ -274,7 +274,7 @@ pub struct RemoveImageError(#[from] anyhow::Error);
 /// Effect: remove the image from the state
 /// Action: remove the image from the engine
 fn remove_image(
-    img_ptr: View<Option<Image>>,
+    img_ptr: View<Image>,
     Args(image_name): Args<String>,
     System(project): System<Project>,
     docker: Res<Docker>,
@@ -285,6 +285,8 @@ fn remove_image(
         "image {image_name} is in use by a service"
     );
 
+    // delete the state from the view
+    let img_ptr = img_ptr.delete();
     with_io(img_ptr, |img_ptr| async move {
         docker
             .as_ref()
@@ -294,11 +296,6 @@ fn remove_image(
             .with_context(|| format!("failed to remove image {image_name}"))?;
 
         Ok(img_ptr)
-    })
-    .map(|mut img| {
-        // delete the image pointer
-        img.take();
-        img
     })
 }
 

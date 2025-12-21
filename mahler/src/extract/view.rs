@@ -90,6 +90,19 @@ impl<T> View<T> {
             path,
         }
     }
+
+    /// Delete the value at the path pointed by the view.
+    ///
+    /// Takes ownership of the view and returns a View<Option<T>>
+    /// as result
+    pub fn delete(self) -> View<Option<T>> {
+        let Self { initial, path, .. } = self;
+        View {
+            initial,
+            state: None,
+            path,
+        }
+    }
 }
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
