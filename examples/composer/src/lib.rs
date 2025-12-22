@@ -10,8 +10,9 @@ use bollard::image::CreateImageOptions;
 use bollard::Docker;
 
 use mahler::extract::{Args, Res, System, Target, View};
+use mahler::job::{any, create, delete, none, update};
 use mahler::state::{List, Map, State};
-use mahler::task::prelude::*;
+use mahler::task::{enforce, with_io, Handler, Task, IO};
 
 #[derive(State, Debug, PartialEq, Eq, Clone, Default)]
 pub enum ServiceStatus {
@@ -273,16 +274,19 @@ pub struct RemoveImageError(#[from] anyhow::Error);
 /// Effect: remove the image from the state
 /// Action: remove the image from the engine
 fn remove_image(
-    img_ptr: View<Option<Image>>,
+    img_ptr: View<Image>,
     Args(image_name): Args<String>,
     System(project): System<Project>,
     docker: Res<Docker>,
 ) -> IO<Option<Image>, RemoveImageError> {
     // only remove the image if it not being used by any service
-    if project.services.values().any(|s| s.image == image_name) {
-        return img_ptr.into();
-    }
+    enforce!(
+        project.services.values().all(|s| s.image != image_name),
+        "image {image_name} is in use by a service"
+    );
 
+    // delete the state from the view
+    let img_ptr = img_ptr.delete();
     with_io(img_ptr, |img_ptr| async move {
         docker
             .as_ref()
@@ -292,11 +296,6 @@ fn remove_image(
             .with_context(|| format!("failed to remove image {image_name}"))?;
 
         Ok(img_ptr)
-    })
-    .map(|mut img| {
-        // delete the image pointer
-        img.take();
-        img
     })
 }
 
@@ -533,13 +532,13 @@ fn uninstall_service(
     Args(service_name): Args<String>,
     docker: Res<Docker>,
 ) -> IO<Option<Service>, StartServiceError> {
-    if svc_ptr
-        .as_ref()
-        .is_none_or(|svc| matches!(svc.status, ServiceStatus::Running))
-    {
-        // do nothing if the service is still running
-        return svc_ptr.into();
-    }
+    // do nothing if the service is still running
+    enforce!(
+        svc_ptr
+            .as_ref()
+            .is_some_and(|svc| !matches!(svc.status, ServiceStatus::Running)),
+        "service {service_name} is still running"
+    );
 
     with_io(svc_ptr, |svc_ptr| async move {
         let docker = docker
@@ -644,8 +643,8 @@ pub fn create_worker() -> Worker<Project, Uninitialized> {
                 }),
                 // give this method higher priority than stop and uninstall
                 // service (default is 0)
-                delete(purge_service).with_priority(8),
-                delete(stop_and_uninstall_service),
+                delete(purge_service),
+                none(stop_and_uninstall_service),
                 update(update_service),
             ],
         )
@@ -657,8 +656,8 @@ mod tests {
     use std::collections::HashMap;
 
     use bollard::container::{ListContainersOptions, RemoveContainerOptions};
+    use mahler::dag::{dag, seq, Dag};
     use mahler::worker::SeekStatus;
-    use mahler::workflow::{dag, seq, Dag};
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use tracing_subscriber::fmt::{self, format::FmtSpan};

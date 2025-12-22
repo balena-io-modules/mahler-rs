@@ -1,12 +1,13 @@
-use anyhow::{Context, Result};
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 use mahler::extract::{Args, Target, View};
+use mahler::job::update;
+use mahler::result::Result;
 use mahler::state::{Map, State};
-use mahler::task::prelude::*;
+use mahler::task::{with_io, Handler, Task, IO};
 use mahler::worker::Worker;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -82,8 +83,7 @@ async fn main() -> Result<()> {
         .initial_state(Counters(Map::from([
             ("a".to_string(), 0),
             ("b".to_string(), 0),
-        ])))
-        .with_context(|| "failed to serialize initial state")?;
+        ])))?;
 
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
@@ -92,16 +92,12 @@ async fn main() -> Result<()> {
             ("a".to_string(), 1),
             ("b".to_string(), 2),
         ])))
-        .await
-        .with_context(|| "failed to reach target state")?;
+        .await?;
 
     // Get the internal state from the Worker. The worker
     // is idle but the state may not be static so we need
     // to use an await to get the current state.
-    let state = worker
-        .state()
-        .await
-        .with_context(|| "failed to deserialize state")?;
+    let state = worker.state().await?;
 
     assert_eq!(
         state,

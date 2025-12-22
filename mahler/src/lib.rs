@@ -7,12 +7,13 @@
 //!
 //! # Features
 //!
-//! - Simple API. Jobs can be targeted to specific paths and operations within the state model for targeted operations.
-//! - Declaratively access System state and resources using extractors.
-//! - Intelligent planner. Automatically discover a workflow to transition from the current system state to a given target state.
-//! - Concurrent execution of jobs. The planner automatically detects when operations can be performed concurrently and adjusts the execution graph accorddingly.
-//! - Observable runtime. Monitor the evolving state of the system from the Worker API. For more detailed logging, the library uses the [tracing crate](https://crates.io/crates/tracing).
-//! - Easy to debug. Agent observable state and known goals allow easy replicability when issues occur.
+//! - Simple API - system state is defined as Rust structs with the help of the provided [derive](https://crates.io/crates/mahler-derive) crate.
+//!   Allowed tasks are defined as pure Rust functions acting on a part or the whole system state.
+//! - State engine with integrated planner - tasks are configured as jobs in a `Worker` domain. On a new target state, the worker will look for necessary changes to reach the target and look for a workflow that allows to reach the target from the current state.
+//! - Concurrent execution - the internal planner detects when tasks can run concurrently based on state paths
+//! - Automatic re-planning - re-computes workflow when runtime conditions change
+//! - Observable runtime - monitor the evolving state of the system from the Worker API. For more detailed logging, the library uses the [tracing crate](https://crates.io/crates/tracing).
+//! - Easy to debug - worker observable state and known goals allow easy replicability when issues occur.
 //!
 //! # Worker
 //!
@@ -30,7 +31,7 @@
 //! ```rust,no_run
 //! use mahler::state::State;
 //! use mahler::worker::Worker;
-//! use mahler::task::prelude::*;
+//! use mahler::job::{create, update};
 //!
 //! #[derive(State)]
 //! struct MySystem;
@@ -69,39 +70,46 @@
 //!
 //! Jobs may be applicable to operations `create` (add), `update` (replace), `delete` (remove), `any` and `none`,
 //! meaning they may be selected when a new property is created/updated or removed from the system
-//! state. A job assigned to `none` is never selected by the planner, but may be used as part of
-//! [compound jobs](#compound-jobs). All potentially runnable jobs need to be linked to the worker, hence the
+//! state. A task assigned to `none` is never selected by the planner, but may be used as part of
+//! [compound tasks](#compound-tasks). All potentially runnable jobs need to be linked to the worker, hence the
 //! need for `none` jobs.
 //!
-//! See [Operation](`task::Operation`) for more information.
+//! See [Operation](`crate::json::Operation`) for more information.
 //!
 //! ## State
 //!
-//! The library relies on [JSON values](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) for internal state
+//! The library relies internally on [JSON values](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) for state
 //! representation. Parts of the state can be referenced using [JSON pointers](https://docs.rs/jsonptr/latest/jsonptr/)
 //! (see [RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901)) and state differences are calculated using
 //! [JSON patch](https://crates.io/crates/json_patch) (see [RFC 6902](https://datatracker.ietf.org/doc/html/rfc6902)).
 //!
-//! For this reason, the system state can only be modelled using [serializable data structures](https://serde.rs). Moreover,
-//! non-serializable fields (annotated with [skip_serializing](https://serde.rs/attr-skip-serializing.html) will be
-//! lost when passing data to the jobs.
+//! For this reason, the system state can only be modelled using [serializable data structures](https://serde.rs).
+//!
+//! The worker and planner make distinction between the **internal** state of the system, and what
+//! can be used as target state. For instance, the start date of a process is good for reference
+//! information, but it doesn't make a good target. When modelling state, internal state can be
+//! annotated using `#[mahler(internal)]` which means these properties will not be used in the
+//! comparison of with the target state.
 //!
 //! ```rust
-//! use mahler::state::State;
+//! use std::time::SystemTime;
+//! use mahler::state::{State, List};
 //!
+//! // the `State` macro implements `Serialize` and `Deserialize` for
+//! // the struct and creates an associated type `ServiceTarget` without
+//! // any internal properties
 //! #[derive(State)]
-//! struct MySystem {
-//!     // can be accessed from jobs
-//!     some_value: String,
+//! struct Service {
+//!     // will be used when planning
+//!     cmd: List<String>,
 //!
-//!     // this will never be passed to jobs
+//!     // will not be used for planning
 //!     #[mahler(internal)]
-//!     other_value: String,
+//!     start_time: SystemTime,
 //! }
 //! ```
 //!
-//! Mahler provides another mechanism for accessing read-only, non-serializable resources from
-//! jobs.
+//! For accessing read-only, non-serializable resources from tasks, Mahler provides a separate mechanism.
 //!
 //! ## Shared resources
 //!
@@ -111,28 +119,39 @@
 //!
 //! ```rust,no_run
 //! use mahler::state::State;
+//! use mahler::extract::Res;
+//! use mahler::job::update;
 //! use mahler::worker::Worker;
 //!
+//! // the system state
 //! #[derive(State)]
 //! struct MySystem;
 //!
 //! // MyConnection represents a shared resource
 //! struct MyConnection;
+//!
+//! // Tasks can make use of resources via the `Res` extractor
+//! fn some_task(conn: Res<MyConnection>) {}
+//!
 //! let conn = MyConnection {/* .. */};
 //!
 //! let worker = Worker::new()
 //!         .resource::<MyConnection>(conn)
+//!         .job("/", update(some_task))
 //!         .initial_state(MySystem {/* .. */})
 //!         .unwrap();
 //! ```
 //!
 //! Note that only one resource of each type can be provided to the worker.
 //!
-//! # Jobs and Tasks
+//! # Tasks and Jobs
 //!
-//! A [Job](`task::Job`) in Mahler is a repeatable operation defined as a Rust handler that operates on the
-//! system state and may or may not perform IO operations. A Job describes a generic operation and
-//! can be converted to a concrete [Task](`task::Task`) by assigning a context. The context is composed of
+//! A [Task](`task::Task`) in Mahler is an operation on a part of the system state that may chose
+//! to make changes to the state given some target. It is defined as a pure Rust handler  and it may
+//! or may not perform IO. A [Job](`job::Job`) is the configuration of a task to an operation on
+//! the system state.
+//!
+//! A task is defined via a [Handler](`task::Handler`) and is applied to a specific [Context](`runtime::Context`), which is composed of
 //! an application path (a [JSON pointer](https://www.rfc-editor.org/rfc/rfc6901) to a part of the
 //! system state), an optional target and zero or more path arguments.
 //!
@@ -142,7 +161,7 @@
 //!
 //! ## Extractors
 //!
-//! An extractor is a type that implements [FromSystem](`task::FromSystem`). Extractors are how
+//! An extractor is a type that implements [FromSystem](`runtime::FromSystem`). Extractors are how
 //! the planning/execution context is passed to the handler.
 //!
 //! ```rust
@@ -154,8 +173,8 @@
 //! #[derive(State)]
 //! struct MySystem;
 //!
-//!  // `View` gives you a view into the relevant part of the
-//! // state for the handler.
+//!  // `View` provides a view into the relevant part of the
+//! // state for the handler and allows making changes to the state.
 //! fn view(state: View<u32>) {}
 //!
 //! // For nullable values, use `View<Option<T>>`  
@@ -177,33 +196,33 @@
 //! fn res(res: Res<MyConnection>) {}
 //! ```
 //!
-//! Because of the way extractors work, an improperly used extractor with fail at runtime
-//! with an [ExtractionError](`errors::ExtractionError`). For instance, using the wrong type may
-//! result in a deserialization error, meaning the task won't be usable by the planner, resulting
+//! For extractors using generics, using a type that cannot be deserialized from the internal worker state will
+//! result in an [Error](`error::ErrorKind::CannotDeserializeArg`). This means the task won't be usable by the planner, resulting
 //! in a warning (or a failure in debug builds).
 //!
 //! ## Modifying the system state
 //!
-//! The [View](`extract::View`) extractor provides a mechanism to modify the system state.
+//! The [View](`extract::View`) extractor provides a mechanism to modify the system state by
+//! returning the modified view.
 //!
 //! ```rust
 //! use mahler::extract::{View, Target};
 //!
-//! // create a Job to update a counter
+//! // create a task to update a counter
 //! fn plus_one(mut counter: View<u32>, Target(tgt): Target<u32>) -> View<u32> {
-//!     // `View` implements Deref and DerefMut to access
-//!     // operate the internal value
+//!     // `View` implements Deref and DerefMut to
+//!     // operate on the internal value
 //!     if *counter < tgt {
 //!         // update the counter if below the target
 //!         *counter += 1;
 //!     }
 //!
-//!     // if the counter has not changed, then the job won't
+//!     // if the counter has not changed, then the task won't
 //!     // be selected by the planner
 //!     counter
 //! }
 //!
-//! // remove the counter (delete type job)
+//! // remove the counter
 //! fn delete_counter(mut view: View<Option<u32>>) -> View<Option<u32>> {
 //!         view.take();
 //!         view
@@ -218,7 +237,7 @@
 //!
 //! ## System Effects (I/O)
 //!
-//! In mahler, the function defined by the job needs to be executed in two different contexts:
+//! In mahler, the task handler needs to be executed in two different contexts:
 //! - At planning, the context for the job is determined (current state, path, target) and the
 //!   corresponding task is tested to simulate the changes it introduces without actually modifying
 //!   the underlying system. The same job may be tested multiple times while planning.
@@ -234,7 +253,7 @@
 //! use mahler::extract::View;
 //! use tokio::time::{sleep, Duration};
 //!
-//! fn increment_job(mut view: View<i32>) -> IO<i32> {
+//! fn plus_one(mut view: View<i32>) -> IO<i32> {
 //!     // Pure modification
 //!     *view += 1;
 //!     
@@ -282,7 +301,7 @@
 //!
 //! <div class="warning">
 //! It is critical that system changes are isolated with `IO`. There is nothing that prevents
-//! a `Job` from performing blocking I/O, but that could potentially be harmful as the job may be
+//! a task from performing blocking I/O, but that could potentially be harmful as the task may be
 //! tried multiple times during planning.
 //! </div>
 //!
@@ -300,7 +319,7 @@
 //!
 //!     Runtime::new().unwrap().block_on(async {
 //!         // This is a footgun as it adds 100ms every time
-//!         // the job is tested by the planner
+//!         // the task is tested by the planner
 //!         sleep(Duration::from_millis(100)).await;
 //!     });
 //!
@@ -308,11 +327,11 @@
 //! }
 //! ```
 //!
-//! ## Compound Jobs
+//! ## Compound tasks
 //!
-//! Sometimes it may be desirable to re-use jobs in different contexts, or combine multiple jobs in
-//! order to guide the planner. This can be achieved by the use of compound jobs, called
-//! [Methods](`task::Method`) in the mahler API.
+//! Sometimes it may be desirable to re-use tasks in different contexts, or combine multiple tasks in
+//! order to guide the planner. This can be achieved by the use of compound tasks, called
+//! [Methods](`task::Method`) in the Mahler API.
 //!
 //! A `Method` [handler](`task::Handler`) is any function that receives zero or more extractors and
 //! returns something that can be converted to a `Vec` of tasks.
@@ -326,10 +345,10 @@
 //! // define a method
 //! fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
 //!     if tgt - *counter > 1 {
-//!         // Return two instances of the `plus_one` job
+//!         // Return two instances of the `plus_one` task
 //!         return vec![
-//!             // Provide a target for the job.
-//!             // `with_target` converts the job into a `Task`
+//!             // Provide a target for the task.
+//!             // `with_target` assigns a target to the task
 //!             plus_one.with_target(tgt),
 //!             plus_one.with_target(tgt)
 //!         ];
@@ -350,29 +369,28 @@
 //! }
 //! ```
 //!
-//! A Job handler may be converted to a task by using the [into_task](`task::Handler::into_task`)
+//! A task [Handler](`task::Handler`) may be converted to a [Task](task::Task) by using the [into_task](`task::Handler::into_task`)
 //! method or using one of the helper methods [with_target](`task::Handler::with_target`) or
 //! [with_arg](`task::Handler::with_arg`).
 //!
 //! <div class="warning">
-//! It is important that all jobs are registered when setting up a Worker. Internally, the Worker
-//! has a database linking jobs and paths and when expanding a method it performs
+//! It is important that all tasks are registered as jobs when setting up a Worker. Internally, the Worker
+//! has a database linking tasks and paths and when expanding a method it performs
 //! a reverse search for the paths corresponding to the tasks returned by the
-//! method. Failing to do this will result in an failure when planning.
+//! method. Failing to do this will result on an error during planning.
 //! </div>
 //!
 //! # Error handling
 //!
-//! When calling [Worker::seek_target](`worker::Worker::seek_target`), there are two types of
-//! errors that may happen.
-//! - A [SeekError](`worker::SeekError`) is an unrecoverable error that occurs if there is some
-//!   [issue serializing](`errors::SerializationError`) the current or target state, there is a problem
-//!   when [initializing extractors](`errors::ExtractionError`), or [expanding a method](`errors::MethodError`)
-//!   or there is an unexpected [internal error](`errors::InternalError`).
-//! - An [IO error](`errors::IOError`) may happen on a task when executing the workflow. In that
-//!   case, the `seek_target` method will return an [Aborted
-//!   status](`worker::SeekStatus::Aborted`), including the list of errors that happened during the
-//!   run.
+//! All possible errors by Mahler operations are defined by the [ErrorKind](`error::ErrorKind`)
+//! type.
+//!
+//! When calling [Worker::seek_target](`worker::Worker::seek_target`), the worker will return an
+//! error if there is a problem with serialization or if an error happens at planning or there is
+//! an internal error. If an error happens at workflow execution, the method will not return an
+//! error but terminate with an [Aborted](`worker::SeekStatus::Aborted`) value, which will include
+//! a [`Vec`] of all I/O errors that happen during the workflow execution with the
+//! [ErrorKind::Runtime](`error::ErrorKind::Runtime`) type.
 //!
 //! # Monitoring system state
 //!
@@ -412,33 +430,49 @@
 //!
 //! When `debug_assertions` is enabled, mahler exposes two testing methods for [Worker](`worker::Worker`).
 //! - [find_workflow](`worker::Worker::find_workflow`) allows to generate a Workflow for a given
-//!   initial and target state. The workflow can be compared with a manually created [DAG](`workflow::Dag`) to
+//!   initial and target state. The workflow can be compared with a manually created [DAG](`dag::Dag`) to
 //!   test against an expected plan.
 //! - [run_task](`worker::Worker::run_task`) allows to run a task in the context of a worker. This
 //!   may be helpful to diagnose any extraction/expansion errors with the task definition or for
 //!   debugging of a specific task.
 //!
 //! It also exposes the following workflow types and macros
-//! - [Dag](`workflow::Dag`) an DAG implementation used internally by mahler.
-//! - [dag](`workflow::dag`) a declarative macro to combine DAGs into branches
-//! - [seq](`workflow::seq`) a declarative macro to create a linear DAG from a list of values
-//! - [par](`workflow::par`) a declarative macro to create a branching DAG with single value
+//! - [Dag](`struct@dag::Dag`) an DAG implementation used internally by mahler.
+//! - [dag](`dag::dag!`) a declarative macro to combine DAGs into branches
+//! - [seq](`dag::seq`) a declarative macro to create a linear DAG from a list of values
+//! - [par](`dag::par`) a declarative macro to create a branching DAG with single value
 //!   branches
 //!   
 //! These utils can be used for testing and comparing generated workflows with specific DAGs. See
 //! [find_workflow](`worker::Worker::find_workflow`) for more info.
-pub use mahler_core::errors;
-pub use mahler_core::extract;
-pub use mahler_core::task;
-pub use mahler_core::worker;
+pub use mahler_core::error;
+pub use mahler_core::json;
+pub use mahler_core::result;
+pub use mahler_core::serde;
 
-pub mod workflow {
-    pub use mahler_core::workflow::Interrupt;
+use mahler_core::runtime;
 
-    #[cfg(debug_assertions)]
-    pub use mahler_core::workflow::{Dag, Workflow};
+mod system_ext;
 
-    #[cfg(debug_assertions)]
+pub mod exception;
+pub mod extract;
+pub mod job;
+pub mod task;
+pub mod worker;
+
+pub mod sync {
+    //! State synchronization and runtime control
+
+    // Only expose Interrupt publicly
+    pub use mahler_core::sync::Interrupt;
+
+    pub(crate) use mahler_core::sync::{channel, RwLock, Sender};
+}
+
+#[cfg(debug_assertions)]
+pub mod dag {
+    //! Directed Acyclic Graph implementation and methods
+    pub use mahler_core::dag::*;
     pub use mahler_core::{dag, par, seq};
 }
 
@@ -449,6 +483,8 @@ pub mod state {
     //! and deserialized in a standardized way, including the halted state.
 
     pub use mahler_core::state::*;
+
+    // Expose collection macros under the state module
     pub use mahler_core::{list, map, set};
 
     #[cfg(feature = "derive")]

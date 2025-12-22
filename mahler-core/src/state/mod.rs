@@ -3,8 +3,9 @@
 //! This module provides the State trait which defines how types are serialized
 //! and deserialized in a standardized way, including the halted state.
 
-use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
+
+use crate::serde::{self, Deserialize, Serialize};
 
 mod collections;
 
@@ -43,49 +44,6 @@ pub trait State: Serialize + for<'de> Deserialize<'de> {
     /// For primitive types and collections, Target = Self.
     /// For structs, a separate Target type is generated excluding internal fields.
     type Target: Serialize + for<'de> Deserialize<'de>;
-
-    /// Returns whether this state is halted and doesn't admit changes.
-    ///
-    /// When a state is halted, the planner will skip it during planning.
-    ///
-    /// The default implementation returns false (not halted).
-    fn is_halted(&self) -> bool {
-        false
-    }
-
-    /// Serialize using State's standardized serialization.
-    ///
-    /// If State is derived using the procedural macro, the internal state
-    /// will include information about the `halted` state.
-    ///
-    /// This is used internally by Mahler and is not meant be called directly by users.
-    ///
-    /// The default implementation delegates to serde's Serialize, which works for
-    /// primitives and types that implement Serialize.
-    fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        Serialize::serialize(self, serializer)
-    }
-}
-
-/// Wrapper for serializing State using its standardized serialization.
-///
-/// This wrapper is used internally by Mahler to serialize State types
-/// using their `as_internal` method instead of the regular Serialize trait.
-///
-/// Users should not need to use this directly.
-#[doc(hidden)]
-pub struct AsInternal<'a, T: State>(pub &'a T);
-
-impl<'a, T: State> Serialize for AsInternal<'a, T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.as_internal(serializer)
-    }
 }
 
 /// Helper for deserializing State values using DeserializeSeed.
@@ -127,27 +85,10 @@ impl_state_for_primitive!(
 
 impl<T: State> State for Option<T> {
     type Target = Option<T::Target>;
-
-    fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            Some(value) => serializer.serialize_some(&AsInternal(value)),
-            None => serializer.serialize_none(),
-        }
-    }
 }
 
 // Box<T> implementation
 
 impl<T: State> State for Box<T> {
     type Target = Box<T::Target>;
-
-    fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        AsInternal(self.as_ref()).serialize(serializer)
-    }
 }

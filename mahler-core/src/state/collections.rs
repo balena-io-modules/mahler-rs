@@ -10,7 +10,9 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
-use super::{AsInternal, State, StateDeserializer};
+use crate::serde;
+
+use super::{State, StateDeserializer};
 
 /// A list of State values (newtype over Vec).
 ///
@@ -154,18 +156,6 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for List<T> {
 
 impl<T: State> State for List<T> {
     type Target = List<T::Target>;
-
-    fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeSeq;
-        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-        for item in &self.0 {
-            seq.serialize_element(&AsInternal(item))?;
-        }
-        seq.end()
-    }
 }
 
 struct ListVisitor<T>(PhantomData<T>);
@@ -196,7 +186,6 @@ impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for ListVisitor<T>
 /// # Example
 /// ```
 /// use mahler::state::{set, Set, State};
-/// use serde::{Deserialize, Serialize};
 ///
 /// #[derive(State)]
 /// struct MyState {
@@ -312,18 +301,6 @@ where
     T::Target: Ord,
 {
     type Target = Set<T::Target>;
-
-    fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeSeq;
-        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-        for item in &self.0 {
-            seq.serialize_element(&AsInternal(item))?;
-        }
-        seq.end()
-    }
 }
 
 struct SetVisitor<T>(PhantomData<T>);
@@ -497,18 +474,6 @@ where
     K::Target: Ord,
 {
     type Target = Map<K::Target, V::Target>;
-
-    fn as_internal<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(self.0.len()))?;
-        for (k, v) in &self.0 {
-            map.serialize_entry(&AsInternal(k), &AsInternal(v))?;
-        }
-        map.end()
-    }
 }
 
 struct MapVisitor<K, V>(PhantomData<(K, V)>);
