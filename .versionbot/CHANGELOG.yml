@@ -1,4 +1,217 @@
 - commits:
+    - subject: Add `View::delete` method
+      hash: 796d1f2aba77ead3035f05a29adce3e8dd690a5b
+      body: |
+        This allows to delete the value pointed at by a view, avoiding the need
+        to receive a `View<Option<T>>` for tasks on delete operations.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Modify IO to terminate a task without any changes
+      hash: dcf43cee5d113b801cbd3fb11cc0d990d42b5d1e
+      body: |
+        The `enforce` macro can now be used to check on a condition or exit the
+        task early. This will result internally in an
+        ErrorKind::ConditionNotMet, that will tell the planner to skip the task
+        or the workflow execution to exit early.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Add the concept of exceptions for partial planning
+      hash: 4fded8326824b02989565ed608e047ad3f0d0b33
+      body: |
+        This also removes the concept of halted states which were not enough to
+        provide fully featured partial plans.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Abort Worker methods if the writer task closes
+      hash: 1b605cc3855080debee386f7878a0b205fab9e50
+      body: |
+        Previously a Worker with a closed writer task (due to an internal patch
+        error) could still receive `seek_with_interrupt` and `run_workflow`
+        requests. This is dangerous as the worker could be acting on an
+        inconsistent state and thus calculating an incorrect workflow.
+
+        This bug is a left-over from a previous version of the worker that would
+        consume the worker when seeking a target state.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Add Worker functionality to independently find/run workflows
+      hash: fbbf991bc69e8275ad16fe0cba96489e76e4b800
+      body: |
+        This provides more control to users of the library. Workflows generated
+        by the new `find_workflow_to_target` function contain metadata about the
+        operations/changes that prompted the workflow generation and any ignored
+        paths. These workflows can be executed with `run_workflow`. A workflow
+        is only executable while another workflow has not been executed by the
+        same worker.
+
+        This is a backwards compatible change, with `seek_with_interrupt`
+        maintaining its functionality.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Re-export serde_core modules from mahler and mahler_crate
+      hash: d6998eba4f299cf7ce48bc2c447f0780103a120e
+      body: |
+        This avoids the need of users of mahler to have Serde as dependency when
+        using derive macros
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Refactor sync::channel to hide implementation details
+      hash: e80059279d15389e51008a14d7a89e04dfcf6a05
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Refactor `runtime::System` to not expose dependencies
+      hash: 1cf7c8dd9e02ee932b8c75de545fa17513ff4ec7
+      body: |
+        The type implemented a `patch` method receiving a `json_patch::Patch`,
+        this is now moved to an internal `SystemExt` trait on the `mahler` crate
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Remove `Planner` type
+      hash: 9b0132d72632c139070e7164fba923f0ee95c3e0
+      body: |
+        The planner module now exposes functions `find_workflow_for_task` and
+        `find_workflow_for_target` which allow to convert a task into a workflow
+        if the necessary conditions are met.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Create task::Id type and refactor code to use it
+      hash: 3bcec77005e0c157eab1c898a590e60673b62704
+      body: |
+        Also remove the arbitrary restriction for assigning the same task to
+        multiple operations.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Move path arg decoding operation to PathArgs
+      hash: dcba6008bf11c6e2d9d4a0f83c1b5d5d8cf25e12
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Move Job into separate module
+      hash: e4bc9239a5ffcaa840a11eb474b261ba0e946fe6
+      body: |
+        A Job is a specific configuration of a task for a purpose, eventually
+        we may have different types of jobs. It makes sense to use a different
+        module for configuring jobs.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Refactor Operation matching
+      hash: 6c3c8ee5f23f31a4437064f0f4acaad2d11db85b
+      body: >
+        Create the `json::OperationMatcher` type to match on any/none and a
+        specific
+
+        operation. Remove the `Operation` newtype under distance and use the
+
+        `json::Operation type`
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Remove Job priority
+      hash: 5ec07fe2c9edd713fadaf5befc844c761741aa64
+      body: |
+        Since removing backtracking during planning. Job priority no longer
+        makes sense. It is up to the user to determine via their handlers what
+        is the right job to apply in a certain context.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Re-structure crate organization
+      hash: ec584d8cc07a69696ea71fb1571542418ce83d25
+      body: |
+        - Moves task and worker to mahler crate
+        - Split dag from workflow module
+        - Create sync module for task synchronization primitives
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Move planner module inside worker
+      hash: b1512650bdab1033eedafd33460b1cdfdb06dde5
+      body: |
+        The planner is not publicly available so it doesn't need to be defined
+        at the top level.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Add list of changes to Workflow and planner::SearchError
+      hash: eb2f8680f7746cbd1b41d3f2b3855eda86b626b5
+      body: |
+        This avoids the need for the worker to calculate differences for
+        debugging but will also be able to used by library users when we update
+        the worker API to return workflows
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Move Path and PathArgs to json module
+      hash: a60ebbde71150ed980a42ef2527dbf83935ab17b
+      body: |
+        This module contains json utility types.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Refactor error handling
+      hash: da86b70bc04e52fe957d372c243d1fb63b582845
+      body: |
+        Creates new error types Error and ErrorKind in `mahler_core::error` to
+        tabulate all types of errors that are possible while evaluating Jobs for
+        planning or runtime.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+  version: 0.23.0
+  title: ""
+  date: 2025-12-22T14:50:29.619Z
+- commits:
     - subject: Deserialize defaults for state collections
       hash: 6782525689cd40408dff16272ae7121b3f8f8cac
       body: ""
