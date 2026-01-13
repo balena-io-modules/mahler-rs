@@ -1,7 +1,6 @@
 //! Types and utilities to generate and execute task Workflows
 
 use async_trait::async_trait;
-use json_patch::{Patch, PatchOperation};
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
@@ -10,7 +9,7 @@ use tracing::{info, instrument};
 
 use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
 use crate::error::{AggregateError, Error, ErrorKind};
-use crate::json::{Operation, Path, Value};
+use crate::json::{Operation, Patch, PatchOperation, Path, Value};
 use crate::runtime::System;
 use crate::sync::{Interrupt, RwLock, Sender};
 use crate::task::{Action, Id};

@@ -1,12 +1,11 @@
 use std::{convert::Infallible, future::Future};
 
-use json_patch::Patch;
-
 use super::effect::Effect;
 use super::into_result::IntoResult;
 
 use crate::error::{Error, ErrorKind};
 use crate::extract::View;
+use crate::json::Patch;
 use crate::serde::Serialize;
 
 /// An opaque type wrapping the outcome of an IO operation

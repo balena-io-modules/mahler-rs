@@ -1,6 +1,5 @@
 //! Automated planning and execution of task workflows
 
-use json_patch::Patch;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -21,7 +20,7 @@ mod testing;
 use crate::error::{AggregateError, Error, ErrorKind};
 use crate::exception::Exception;
 use crate::job::Job;
-use crate::json::Value;
+use crate::json::{Patch, Value};
 use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::serde::de::DeserializeOwned;
@@ -734,6 +733,7 @@ impl<O: State> Worker<O, Ready> {
         interrupt: Interrupt,
     ) -> Result<SeekStatus> {
         let Ready {
+            resources,
             system_rwlock,
             patch_tx,
             worker_id,
@@ -771,6 +771,12 @@ impl<O: State> Worker<O, Ready> {
                     workflow.generation,
                 ),
             ));
+        }
+
+        // Update system properties
+        {
+            let mut system = self.inner.system_rwlock.write().await;
+            system.set_resources(resources.clone());
         }
 
         let mut writer_closed_rx = writer_closed_rx.clone();
@@ -862,7 +868,7 @@ impl<O: State> Worker<O, Ready> {
             ));
         }
 
-        // Update system resources
+        // Update system properties
         {
             let mut system = self.inner.system_rwlock.write().await;
             system.set_resources(resources);
@@ -1051,7 +1057,6 @@ impl<O: State> Worker<O, Ready> {
             Ok(Err(e)) => Err(e),
             Err(e) => Err(Error::runtime(e))?,
         }?;
-
         Ok(status)
     }
 

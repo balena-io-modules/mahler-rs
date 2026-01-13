@@ -1,7 +1,7 @@
-use json_patch::{AddOperation, PatchOperation, RemoveOperation, ReplaceOperation};
 use std::cmp::Ordering;
 use std::fmt;
 
+use super::patch::{AddOperation, PatchOperation, RemoveOperation, ReplaceOperation};
 use super::path::Path;
 use super::value::Value;
 

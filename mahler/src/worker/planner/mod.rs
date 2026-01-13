@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use json_patch::{Patch, PatchOperation};
+use json_patch::diff;
 use jsonptr::PointerBuf;
 use tracing::{field, instrument, trace, trace_span, warn, Span};
 
 use crate::dag::Dag;
 use crate::error::{Error, ErrorKind};
-use crate::json::{self, OperationMatcher, Path, Value};
+use crate::json::{Operation, OperationMatcher, Patch, PatchOperation, Path, Value};
 use crate::runtime::{Context, System};
 use crate::state::State;
 use crate::system_ext::SystemExt;
@@ -164,7 +164,7 @@ pub enum PlanningError {
     /// Search was interrupted early due to an error in one of the job definitions
     Aborted(Error),
     /// No combination of jobs was found for the give set of changes
-    NotFound(Vec<json::Operation>),
+    NotFound(Vec<Operation>),
 }
 
 impl fmt::Display for PlanningError {
@@ -368,8 +368,8 @@ where
     let ini = system
         .state::<T::Target>()
         .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
-    let Patch(changes) = json_patch::diff(&ini, tgt);
-    let changes: Vec<json::Operation> = changes.into_iter().map(json::Operation::from).collect();
+    let Patch(changes) = diff(&ini, tgt);
+    let changes: Vec<Operation> = changes.into_iter().map(Operation::from).collect();
 
     // The search stack stores (current_state, current_plan, depth)
     let mut stack = vec![(system.clone(), Dag::default(), 0)];

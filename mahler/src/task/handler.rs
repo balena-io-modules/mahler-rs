@@ -1,10 +1,9 @@
-use json_patch::Patch;
-
 use super::effect::Effect;
 use super::id::Id;
 use super::{Action, Method, Task};
 
 use crate::error::Error;
+use crate::json::Patch;
 use crate::runtime::{Context, FromSystem, System};
 use crate::serde::Serialize;
 

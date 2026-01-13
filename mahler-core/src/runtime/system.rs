@@ -7,10 +7,11 @@ use crate::result::Result;
 
 use super::resources::Resources;
 
-/// The underlying system state and associated resources
+/// A snapshot of the system state and associated resources
 ///
 /// This is used by the Worker to keep track of the system state while
-/// executing tasks
+/// executing tasks. It is also used by the planner to keep track of the accumulated results of
+/// different operations in the tentative plan.
 #[derive(Clone)]
 pub struct System {
     state: Value,
@@ -59,6 +60,7 @@ impl System {
     }
 
     /// Try to deserialize the inner system state into the desired type
+    /// The deep clone makes
     pub fn state<S>(&self) -> Result<S>
     where
         S: DeserializeOwned,

@@ -311,6 +311,10 @@ pub struct Dag<T> {
 }
 
 impl<T: Clone> Clone for Dag<T> {
+    /// Implements a deep clone of the DAG
+    ///
+    /// It creates full copy of the DAG structure and nodes, where each node is a clone of
+    /// the corresponding copy of the original DAG
     fn clone(&self) -> Self {
         fn deep_clone<T: Clone>(head: Link<T>) -> (Link<T>, Link<T>) {
             if let Some(node_rc) = head {

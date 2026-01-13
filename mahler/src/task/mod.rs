@@ -6,14 +6,13 @@ mod id;
 mod into_result;
 mod io;
 
-use json_patch::Patch;
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::json::Path;
+use crate::json::{Patch, Path};
 use crate::result::Result;
 use crate::runtime::{Context, System};
 use crate::serde::Serialize;
