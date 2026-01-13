@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::runtime::{Context, FromSystem, System};
+use crate::runtime::{Channel, Context, FromSystem, System};
 
 /// Trait for functions that can be used to define planning exceptions
 ///
@@ -23,7 +23,7 @@ macro_rules! impl_exception {
         {
             fn call(&self, system: &System, context: &Context) -> Result<bool, Error> {
                 $(
-                    let $ty = match $ty::from_system(system, context) {
+                    let $ty = match $ty::from_system(system, context, &Channel::detached()) {
                         Ok(value) => value,
                         Err(failure) => {
                             return Err(failure.into())

@@ -2,7 +2,7 @@
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 use tokio::select;
 use tokio::sync::watch;
@@ -598,7 +598,7 @@ impl<T> Stream for WorkerStream<T> {
 /// The stream is best effort, meaning updates may be missed if the receiver lags behind.
 fn follow_worker<T>(
     channel: watch::Sender<()>,
-    system_rwlock: Arc<RwLock<System>>,
+    sys_reader: Weak<RwLock<System>>,
 ) -> impl Stream<Item = T>
 where
     T: DeserializeOwned,
@@ -607,11 +607,15 @@ where
     WorkerStream::new(
         WatchStream::from_changes(rx)
             .then(move |_| {
-                let sys_reader = Arc::clone(&system_rwlock);
+                let sys_reader = sys_reader.clone();
                 async move {
-                    // Read the system state
-                    let system = sys_reader.read().await;
-                    system.state::<T>().ok()
+                    if let Some(sys_reader) = sys_reader.upgrade() {
+                        // Read the system state
+                        let system = sys_reader.read().await;
+                        system.state::<T>().ok()
+                    } else {
+                        None
+                    }
                 }
             })
             .filter_map(|opt| opt),
@@ -677,7 +681,7 @@ impl<O: State> Worker<O, Ready> {
     {
         follow_worker(
             self.inner.update_event_channel.clone(),
-            Arc::clone(&self.inner.system_rwlock),
+            Arc::downgrade(&self.inner.system_rwlock),
         )
     }
 
@@ -1057,6 +1061,7 @@ impl<O: State> Worker<O, Ready> {
             Ok(Err(e)) => Err(e),
             Err(e) => Err(Error::runtime(e))?,
         }?;
+
         Ok(status)
     }
 

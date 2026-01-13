@@ -10,7 +10,7 @@ use tracing::{info, instrument};
 use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
 use crate::error::{AggregateError, Error, ErrorKind};
 use crate::json::{Operation, Patch, PatchOperation, Path, Value};
-use crate::runtime::System;
+use crate::runtime::{Channel, System};
 use crate::sync::{Interrupt, RwLock, Sender};
 use crate::task::{Action, Id};
 
@@ -91,7 +91,7 @@ impl Task for WorkUnit {
     type Error = Error;
 
     #[instrument(name = "run_task", skip_all, fields(task=%self.action), err)]
-    async fn run(&self, system: &System) -> Result<Patch, Self::Error> {
+    async fn run(&self, system: &System, sender: &Sender<Patch>) -> Result<Patch, Self::Error> {
         info!("starting");
         // dry-run the task to test that conditions hold
         // before executing the action should not really fail at this point
@@ -108,7 +108,9 @@ impl Task for WorkUnit {
             ));
         }
 
-        self.action.run(system).await
+        self.action
+            .run(system, &Channel::from(sender.clone()))
+            .await
     }
 }
 

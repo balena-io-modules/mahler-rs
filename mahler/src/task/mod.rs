@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::json::{Patch, Path};
 use crate::result::Result;
-use crate::runtime::{Context, System};
+use crate::runtime::{Channel, Context, System};
 use crate::serde::Serialize;
 
 pub(crate) use into_result::*;
@@ -37,7 +37,7 @@ pub mod prelude {
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
 type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
-type Run = Arc<dyn Fn(&System, &Context) -> ActionOutput + Send + Sync>;
+type Run = Arc<dyn Fn(&System, &Context, &Channel) -> ActionOutput + Send + Sync>;
 type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>> + Send + Sync>;
 type Describe = Arc<dyn Fn(&Context) -> Result<String> + Send + Sync>;
 
@@ -87,14 +87,16 @@ impl Action {
             scoped,
             context,
             dry_run: Arc::new(move |system: &System, context: &Context| {
-                let effect = handler_clone.call(system, context);
+                let effect = handler_clone.call(system, context, &Channel::detached());
                 effect.pure()
             }),
-            run: Arc::new(move |system: &System, context: &Context| {
-                let effect = action.call(system, context);
+            run: Arc::new(
+                move |system: &System, context: &Context, channel: &Channel| {
+                    let effect = action.call(system, context, channel);
 
-                Box::pin(async { effect.run().await })
-            }),
+                    Box::pin(async { effect.run().await })
+                },
+            ),
             describe: Arc::new(move |context: &Context| Ok(default_description(id, context))),
         }
     }
@@ -123,9 +125,9 @@ impl Action {
     }
 
     /// Run the task on the system and return a list of changes
-    pub(crate) async fn run(&self, system: &System) -> Result<Patch> {
+    pub(crate) async fn run(&self, system: &System, channel: &Channel) -> Result<Patch> {
         let Action { context, run, .. } = self;
-        (run)(system, context).await
+        (run)(system, context, channel).await
     }
 
     /// Simulate the effect of the task on the system
@@ -174,7 +176,7 @@ impl Method {
             id,
             context,
             expand: Arc::new(move |system: &System, context: &Context| {
-                method.call(system, context).pure()
+                method.call(system, context, &Channel::detached()).pure()
             }),
             describe: Arc::new(move |context: &Context| Ok(default_description(id, context))),
         }
@@ -493,7 +495,7 @@ mod tests {
 
         if let Task::Action(action) = task {
             // Run the action
-            let changes = action.run(&system).await.unwrap();
+            let changes = action.run(&system, &Channel::detached()).await.unwrap();
 
             // The referenced value was modified
             assert_eq!(
@@ -515,7 +517,7 @@ mod tests {
 
         if let Task::Action(action) = task {
             // Run the action
-            let changes = action.run(&system).await.unwrap();
+            let changes = action.run(&system, &Channel::detached()).await.unwrap();
 
             // The referenced value was modified
             assert_eq!(
@@ -536,7 +538,7 @@ mod tests {
         let task = plus_one_async_with_error.with_target(1);
 
         if let Task::Action(action) = task {
-            let res = action.run(&system).await;
+            let res = action.run(&system, &Channel::detached()).await;
             assert!(res.is_err());
             assert_eq!(res.unwrap_err().to_string(), "some error happened");
         } else {
@@ -631,7 +633,7 @@ mod tests {
 
         if let Task::Action(action) = task {
             // Run the action
-            let changes = action.run(&system).await.unwrap();
+            let changes = action.run(&system, &Channel::detached()).await.unwrap();
 
             // Only the referenced value was modified
             assert_eq!(

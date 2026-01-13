@@ -10,7 +10,7 @@ use std::ops::{Deref, DerefMut};
 use crate::error::{Error, ErrorKind};
 use crate::json::Path;
 use crate::result::Result;
-use crate::runtime::{Context, FromSystem, System};
+use crate::runtime::{Channel, Context, FromSystem, System};
 use crate::serde::{de::DeserializeOwned, Serialize};
 use crate::task::IntoResult;
 
@@ -106,7 +106,7 @@ impl<T> View<T> {
 }
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
-    fn from_system(system: &System, context: &Context) -> Result<Self> {
+    fn from_system(system: &System, context: &Context, _: &Channel) -> Result<Self> {
         let pointer = context.path.as_ref();
         let root = system.inner_state();
 
@@ -283,8 +283,12 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        let mut view: View<Option<i32>> =
-            View::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
+        let mut view: View<Option<i32>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/one"),
+            &Channel::detached(),
+        )
+        .unwrap();
 
         assert_eq!(view.as_ref(), Some(&1));
 
@@ -316,12 +320,15 @@ mod tests {
         assert!(View::<Option<i32>>::from_system(
             &system,
             &Context::new().with_path("/numbers/one/two"),
+            &Channel::detached()
         )
         .is_err());
-        assert!(
-            View::<Option<i32>>::from_system(&system, &Context::new().with_path("/none/two"),)
-                .is_err()
-        );
+        assert!(View::<Option<i32>>::from_system(
+            &system,
+            &Context::new().with_path("/none/two"),
+            &Channel::detached(),
+        )
+        .is_err());
     }
 
     #[test]
@@ -334,8 +341,12 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        let mut view: View<Option<i32>> =
-            View::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
+        let mut view: View<Option<i32>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/three"),
+            &Channel::detached(),
+        )
+        .unwrap();
 
         assert_eq!(view.as_ref(), None);
 
@@ -362,8 +373,12 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        let mut view: View<i32> =
-            View::from_system(&system, &Context::new().with_path("/numbers/two")).unwrap();
+        let mut view: View<i32> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/two"),
+            &Channel::detached(),
+        )
+        .unwrap();
         *view = 3;
 
         // Get the list changes to the view
@@ -387,12 +402,18 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        assert!(
-            View::<i32>::from_system(&system, &Context::new().with_path("/numbers/three")).is_err()
-        );
-        assert!(
-            View::<i32>::from_system(&system, &Context::new().with_path("/none/three")).is_err()
-        );
+        assert!(View::<i32>::from_system(
+            &system,
+            &Context::new().with_path("/numbers/three"),
+            &Channel::detached(),
+        )
+        .is_err());
+        assert!(View::<i32>::from_system(
+            &system,
+            &Context::new().with_path("/none/three"),
+            &Channel::detached(),
+        )
+        .is_err());
     }
 
     #[test]
@@ -405,8 +426,12 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        let mut view: View<Option<i32>> =
-            View::from_system(&system, &Context::new().with_path("/numbers/three")).unwrap();
+        let mut view: View<Option<i32>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/three"),
+            &Channel::detached(),
+        )
+        .unwrap();
 
         assert_eq!(view.as_ref(), None);
 
@@ -434,8 +459,12 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        let mut view: View<Option<i32>> =
-            View::from_system(&system, &Context::new().with_path("/numbers/one")).unwrap();
+        let mut view: View<Option<i32>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/one"),
+            &Channel::detached(),
+        )
+        .unwrap();
 
         // Delete the value
         view.take();
@@ -459,8 +488,12 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        let mut view: View<Option<String>> =
-            View::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
+        let mut view: View<Option<String>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/1"),
+            &Channel::detached(),
+        )
+        .unwrap();
 
         assert_eq!(view.as_ref(), Some(&"two".to_string()));
 
@@ -486,8 +519,12 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        let mut view: View<Option<String>> =
-            View::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
+        let mut view: View<Option<String>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/2"),
+            &Channel::detached(),
+        )
+        .unwrap();
 
         assert_eq!(view.as_ref(), None);
         view.replace("three".into());
@@ -511,8 +548,12 @@ mod tests {
 
         let mut system = System::try_from(state).unwrap();
 
-        let mut view: View<Option<String>> =
-            View::from_system(&system, &Context::new().with_path("/numbers/1")).unwrap();
+        let mut view: View<Option<String>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/1"),
+            &Channel::detached(),
+        )
+        .unwrap();
 
         // Remove the second element
         view.take();
@@ -543,8 +584,12 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        let mut view: View<Option<String>> =
-            View::from_system(&system, &Context::new().with_path("/numbers/2")).unwrap();
+        let mut view: View<Option<String>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/2"),
+            &Channel::detached(),
+        )
+        .unwrap();
 
         // Remove the third element
         view.take();

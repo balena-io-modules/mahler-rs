@@ -2,7 +2,7 @@ use std::ops::Deref;
 
 use crate::error::{Error, ErrorKind};
 use crate::result::Result;
-use crate::runtime::{Context, FromContext, FromSystem, System};
+use crate::runtime::{Channel, Context, FromContext, FromSystem, System};
 use crate::serde::de::DeserializeOwned;
 
 mod de;
@@ -55,7 +55,7 @@ impl<T: DeserializeOwned + Send> FromContext for Args<T> {
 }
 
 impl<T: DeserializeOwned + Send> FromSystem for Args<T> {
-    fn from_system(_: &System, context: &Context) -> Result<Self> {
+    fn from_system(_: &System, context: &Context, _: &Channel) -> Result<Self> {
         Self::from_context(context)
     }
 }
@@ -95,8 +95,12 @@ mod tests {
 
         let system = System::try_from(state).unwrap();
 
-        let Args(name): Args<String> =
-            Args::from_system(&system, &Context::new().with_arg("name", "one")).unwrap();
+        let Args(name): Args<String> = Args::from_system(
+            &system,
+            &Context::new().with_arg("name", "one"),
+            &Channel::detached(),
+        )
+        .unwrap();
 
         assert_eq!(name, "one");
     }
@@ -116,6 +120,7 @@ mod tests {
             &Context::new()
                 .with_arg("first", "one")
                 .with_arg("second", "two"),
+            &Channel::detached(),
         )
         .unwrap();
 
@@ -138,6 +143,7 @@ mod tests {
             &Context::new()
                 .with_arg("first", "one")
                 .with_arg("second", "two"),
+            &Channel::detached(),
         )
         .unwrap();
 

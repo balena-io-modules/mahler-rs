@@ -2,7 +2,7 @@ use std::ops::Deref;
 
 use crate::error::{Error, ErrorKind};
 use crate::result::Result;
-use crate::runtime::{Context, FromContext, FromSystem, System};
+use crate::runtime::{Channel, Context, FromContext, FromSystem, System};
 use crate::serde::de::DeserializeOwned;
 use crate::state::State;
 
@@ -111,7 +111,7 @@ impl<T: State> FromContext for Target<T> {
 }
 
 impl<T: State> FromSystem for Target<T> {
-    fn from_system(_: &System, context: &Context) -> Result<Self> {
+    fn from_system(_: &System, context: &Context, _: &Channel) -> Result<Self> {
         Self::from_context(context)
     }
 }
@@ -174,7 +174,7 @@ impl<T: DeserializeOwned> FromContext for RawTarget<T> {
 }
 
 impl<T: DeserializeOwned> FromSystem for RawTarget<T> {
-    fn from_system(_: &System, context: &Context) -> Result<Self> {
+    fn from_system(_: &System, context: &Context, _: &Channel) -> Result<Self> {
         Self::from_context(context)
     }
 }
