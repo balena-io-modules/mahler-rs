@@ -14,6 +14,52 @@ use crate::runtime::{Channel, Context, FromSystem, System};
 use crate::serde::{de::DeserializeOwned, Serialize};
 use crate::task::IntoResult;
 
+/// Prepend the given pointer to every operation in the Patch
+fn prepend_path(pointer: PointerBuf, patch: Patch) -> Patch {
+    let Patch(changes) = patch;
+    let changes = changes
+        .into_iter()
+        .map(|op| match op {
+            PatchOperation::Replace(ReplaceOperation { path, value }) => {
+                PatchOperation::Replace(ReplaceOperation {
+                    path: pointer.concat(&path),
+                    value,
+                })
+            }
+            PatchOperation::Remove(RemoveOperation { path }) => {
+                PatchOperation::Remove(RemoveOperation {
+                    path: pointer.concat(&path),
+                })
+            }
+            PatchOperation::Add(AddOperation { path, value }) => {
+                PatchOperation::Add(AddOperation {
+                    path: pointer.concat(&path),
+                    value,
+                })
+            }
+            PatchOperation::Move(MoveOperation { from, path }) => {
+                PatchOperation::Move(MoveOperation {
+                    from,
+                    path: pointer.concat(&path),
+                })
+            }
+            PatchOperation::Copy(CopyOperation { from, path }) => {
+                PatchOperation::Copy(CopyOperation {
+                    from,
+                    path: pointer.concat(&path),
+                })
+            }
+            PatchOperation::Test(TestOperation { path, value }) => {
+                PatchOperation::Test(TestOperation {
+                    path: pointer.concat(&path),
+                    value,
+                })
+            }
+        })
+        .collect::<Vec<PatchOperation>>();
+    Patch(changes)
+}
+
 /// Extracts a view to a sub-element of the global state indicated
 /// by the path.
 ///
@@ -78,17 +124,103 @@ pub struct View<T> {
     initial: Value,
     state: T,
     path: Path,
+    channel: Channel,
 }
 
 impl<T> View<T> {
     // The only way to create a pointer is via the
     // from_system method
-    fn new(initial: Value, state: T, path: Path) -> Self {
+    fn new(initial: Value, state: T, path: Path, channel: Channel) -> Self {
         Self {
             initial,
             state,
             path,
+            channel,
         }
+    }
+
+    fn create_patch(&self, after: Value) -> Patch
+    where
+        T: Serialize,
+    {
+        let path: PointerBuf = self.path.clone().into();
+        let before = &self.initial;
+
+        match (before, after) {
+            (&Value::Null, Value::Null) => Patch(vec![]),
+            (&Value::Null, after) => Patch(vec![PatchOperation::Add(AddOperation {
+                path,
+                value: after,
+            })]),
+            (_, Value::Null) => Patch(vec![PatchOperation::Remove(RemoveOperation { path })]),
+            (before, after) => prepend_path(path, diff(before, &after)),
+        }
+    }
+
+    /// Flush the changes to the view back to the worker
+    ///
+    /// This will communicate any changes to the view back to the worker to update the runtime
+    /// state immediately, allowing followers to observe intermediate progress during long-running tasks.
+    ///
+    /// Note that flushed changes can still be rolled back if the task fails after flushing.
+    ///
+    /// # Errors
+    ///
+    /// Flush will fail if the type `<T>` [cannot be serialized into JSON](https://docs.rs/serde_json/latest/serde_json/fn.to_value.html#errors).
+    /// It will also fail if the channel to the worker has closed, which should not happen unless
+    /// there is a bug with Mahler (please report).
+    ///
+    /// Either error will also occur when processing the result of the handler, so it should be
+    /// safe to ignore if you want the operation to finish.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use mahler::{
+    ///     error::Error,
+    ///     extract::View,
+    ///     task::{with_io, IO},
+    ///     job::update,
+    ///     worker::Worker,
+    /// };
+    ///
+    /// fn process_items(mut view: View<Vec<String>>) -> IO<Vec<String>> {
+    ///     with_io(view, |mut view| async move {
+    ///         // Process items one at a time, flushing after each
+    ///         for i in 0..10 {
+    ///             view.push(format!("item_{}", i));
+    ///
+    ///             // Flush intermediate progress so followers can see it
+    ///             let _ = view.flush().await;
+    ///
+    ///             // Do some work
+    ///             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    ///         }
+    ///         Ok(view)
+    ///     })
+    /// }
+    /// ```
+    pub async fn flush(&mut self) -> Result<()>
+    where
+        T: Serialize,
+    {
+        // Update the view only if the channel is connected
+        if !self.channel.is_detached() {
+            // An error should be rare
+            // https://docs.rs/serde_json/latest/serde_json/fn.to_value.html#errors
+            let after = serde_json::to_value(&self.state)?;
+
+            // Create a patch from the initial state
+            let changes = self.create_patch(after.clone());
+
+            // Send the changes and wait for acknowledgement
+            self.channel.send(changes).await?;
+
+            // Update initial to match the current state
+            self.initial = after;
+        }
+
+        Ok(())
     }
 
     /// Delete the value at the path pointed by the view.
@@ -96,17 +228,23 @@ impl<T> View<T> {
     /// Takes ownership of the view and returns a View<Option<T>>
     /// as result
     pub fn delete(self) -> View<Option<T>> {
-        let Self { initial, path, .. } = self;
+        let Self {
+            initial,
+            path,
+            channel,
+            ..
+        } = self;
         View {
             initial,
             state: None,
             path,
+            channel,
         }
     }
 }
 
 impl<T: DeserializeOwned> FromSystem for View<T> {
-    fn from_system(system: &System, context: &Context, _: &Channel) -> Result<Self> {
+    fn from_system(system: &System, context: &Context, channel: &Channel) -> Result<Self> {
         let pointer = context.path.as_ref();
         let root = system.inner_state();
 
@@ -156,7 +294,12 @@ impl<T: DeserializeOwned> FromSystem for View<T> {
             },
         };
 
-        Ok(View::new(initial, state, context.path.clone()))
+        Ok(View::new(
+            initial,
+            state,
+            context.path.clone(),
+            channel.clone(),
+        ))
     }
 }
 
@@ -174,69 +317,11 @@ impl<T> DerefMut for View<T> {
     }
 }
 
-fn prepend_path(pointer: PointerBuf, patch: Patch) -> Patch {
-    let Patch(changes) = patch;
-    let changes = changes
-        .into_iter()
-        .map(|op| match op {
-            PatchOperation::Replace(ReplaceOperation { path, value }) => {
-                PatchOperation::Replace(ReplaceOperation {
-                    path: pointer.concat(&path),
-                    value,
-                })
-            }
-            PatchOperation::Remove(RemoveOperation { path }) => {
-                PatchOperation::Remove(RemoveOperation {
-                    path: pointer.concat(&path),
-                })
-            }
-            PatchOperation::Add(AddOperation { path, value }) => {
-                PatchOperation::Add(AddOperation {
-                    path: pointer.concat(&path),
-                    value,
-                })
-            }
-            PatchOperation::Move(MoveOperation { from, path }) => {
-                PatchOperation::Move(MoveOperation {
-                    from,
-                    path: pointer.concat(&path),
-                })
-            }
-            PatchOperation::Copy(CopyOperation { from, path }) => {
-                PatchOperation::Copy(CopyOperation {
-                    from,
-                    path: pointer.concat(&path),
-                })
-            }
-            PatchOperation::Test(TestOperation { path, value }) => {
-                PatchOperation::Test(TestOperation {
-                    path: pointer.concat(&path),
-                    value,
-                })
-            }
-        })
-        .collect::<Vec<PatchOperation>>();
-    Patch(changes)
-}
-
 impl<T: Serialize> IntoResult<Patch> for View<T> {
     fn into_result(self) -> Result<Patch> {
-        let before = self.initial;
-
-        // An error should not happen here unless there is a bug
-        let after = serde_json::to_value(self.state).map_err(Error::internal)?;
-
-        let patch = match (before, after) {
-            (Value::Null, Value::Null) => Patch(vec![]),
-            (Value::Null, after) => Patch(vec![PatchOperation::Add(AddOperation {
-                path: self.path.into(),
-                value: after,
-            })]),
-            (_, Value::Null) => Patch(vec![PatchOperation::Remove(RemoveOperation {
-                path: self.path.into(),
-            })]),
-            (before, after) => prepend_path(self.path.into(), diff(&before, &after)),
-        };
+        // An error here should be rare
+        let after = serde_json::to_value(&self.state).map_err(Error::internal)?;
+        let patch = self.create_patch(after);
 
         Ok(patch)
     }
@@ -603,5 +688,285 @@ mod tests {
             ]))
             .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn it_flush_is_noop_with_detached_channel() {
+        let mut numbers = HashMap::new();
+        numbers.insert("one".to_string(), 1);
+
+        let state = MyState { numbers };
+        let system = System::try_from(state).unwrap();
+
+        let mut view: View<i32> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/one"),
+            &Channel::detached(),
+        )
+        .unwrap();
+
+        *view = 10;
+
+        // Commit should return Ok with detached channel
+        view.flush().await.unwrap();
+
+        // Initial state should not be updated
+        *view = 20;
+
+        // The final patch should contain all changes from the original state
+        let changes = view.into_result().unwrap();
+        assert_eq!(
+            changes,
+            serde_json::from_value::<Patch>(json!([
+              { "op": "replace", "path": "/numbers/one", "value": 20 },
+            ]))
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn it_flushes_view_changes_with_attached_channel() {
+        use crate::sync;
+        use std::sync::Arc;
+
+        let mut numbers = HashMap::new();
+        numbers.insert("one".to_string(), 1);
+        numbers.insert("two".to_string(), 2);
+
+        let state = MyState { numbers };
+        let system = System::try_from(state).unwrap();
+
+        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let channel = Channel::from(tx);
+
+        // Spawn a task to receive and acknowledge messages
+        let received_patches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_patches_clone = received_patches.clone();
+        let ack_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                received_patches_clone.lock().await.push(msg.data.clone());
+                msg.ack();
+            }
+        });
+
+        let mut view: View<i32> =
+            View::from_system(&system, &Context::new().with_path("/numbers/one"), &channel)
+                .unwrap();
+
+        // Modify the value
+        *view = 10;
+
+        // Commit the changes
+        view.flush().await.unwrap();
+
+        // Wait for the message to be received
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Check that the patch was received
+        let patches = received_patches.lock().await;
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0],
+            serde_json::from_value::<Patch>(json!([
+              { "op": "replace", "path": "/numbers/one", "value": 10 },
+            ]))
+            .unwrap()
+        );
+        drop(patches);
+
+        // Modify again
+        *view = 20;
+
+        // The final patch should only contain changes after the last flush
+        let changes = view.into_result().unwrap();
+        assert_eq!(
+            changes,
+            serde_json::from_value::<Patch>(json!([
+              { "op": "replace", "path": "/numbers/one", "value": 20 },
+            ]))
+            .unwrap()
+        );
+
+        drop(channel);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn it_flushes_multiple_times() {
+        use crate::sync;
+        use std::sync::Arc;
+
+        let mut numbers = HashMap::new();
+        numbers.insert("counter".to_string(), 0);
+
+        let state = MyState { numbers };
+        let system = System::try_from(state).unwrap();
+
+        let (tx, mut rx) = sync::channel::<Patch>(10);
+        let channel = Channel::from(tx);
+
+        // Spawn a task to receive and acknowledge messages
+        let received_patches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_patches_clone = received_patches.clone();
+        let ack_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                received_patches_clone.lock().await.push(msg.data.clone());
+                msg.ack();
+            }
+        });
+
+        let mut view: View<i32> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/counter"),
+            &channel,
+        )
+        .unwrap();
+
+        // Simulate multiple increments with flushes
+        for i in 1..=5 {
+            *view = i;
+            view.flush().await.unwrap();
+        }
+
+        // Wait for all messages to be received
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Verify all patches were received
+        let patches = received_patches.lock().await;
+        assert_eq!(patches.len(), 5);
+        for (idx, patch) in patches.iter().enumerate() {
+            let i = idx + 1;
+            assert_eq!(
+                *patch,
+                serde_json::from_value::<Patch>(json!([
+                  { "op": "replace", "path": "/numbers/counter", "value": i },
+                ]))
+                .unwrap()
+            );
+        }
+        drop(patches);
+
+        // After all flushes, no more changes
+        let changes = view.into_result().unwrap();
+        assert_eq!(changes, Patch(vec![]));
+
+        drop(channel);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn it_flushes_optional_view_creation() {
+        use crate::sync;
+        use std::sync::Arc;
+
+        let state = MyState {
+            numbers: HashMap::new(),
+        };
+        let system = System::try_from(state).unwrap();
+
+        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let channel = Channel::from(tx);
+
+        // Spawn a task to receive and acknowledge messages
+        let received_patches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_patches_clone = received_patches.clone();
+        let ack_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                received_patches_clone.lock().await.push(msg.data.clone());
+                msg.ack();
+            }
+        });
+
+        let mut view: View<Option<i32>> =
+            View::from_system(&system, &Context::new().with_path("/numbers/new"), &channel)
+                .unwrap();
+
+        // Create a new value
+        view.replace(42);
+
+        // Commit the creation
+        view.flush().await.unwrap();
+
+        // Wait for the message to be received
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Check that the add patch was sent
+        let patches = received_patches.lock().await;
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0],
+            serde_json::from_value::<Patch>(json!([
+              { "op": "add", "path": "/numbers/new", "value": 42 },
+            ]))
+            .unwrap()
+        );
+        drop(patches);
+
+        // No more changes after flush
+        let changes = view.into_result().unwrap();
+        assert_eq!(changes, Patch(vec![]));
+
+        drop(channel);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn it_flushes_optional_view_deletion() {
+        use crate::sync;
+        use std::sync::Arc;
+
+        let mut numbers = HashMap::new();
+        numbers.insert("to_delete".to_string(), 99);
+
+        let state = MyState { numbers };
+        let system = System::try_from(state).unwrap();
+
+        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let channel = Channel::from(tx);
+
+        // Spawn a task to receive and acknowledge messages
+        let received_patches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_patches_clone = received_patches.clone();
+        let ack_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                received_patches_clone.lock().await.push(msg.data.clone());
+                msg.ack();
+            }
+        });
+
+        let mut view: View<Option<i32>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/to_delete"),
+            &channel,
+        )
+        .unwrap();
+
+        // Delete the value
+        view.take();
+
+        // Commit the deletion
+        view.flush().await.unwrap();
+
+        // Wait for the message to be received
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Check that the remove patch was sent
+        let patches = received_patches.lock().await;
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0],
+            serde_json::from_value::<Patch>(json!([
+              { "op": "remove", "path": "/numbers/to_delete" },
+            ]))
+            .unwrap()
+        );
+        drop(patches);
+
+        // No more changes after flush
+        let changes = view.into_result().unwrap();
+        assert_eq!(changes, Patch(vec![]));
+
+        drop(channel);
+        ack_task.abort();
     }
 }

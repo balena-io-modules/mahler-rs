@@ -1488,4 +1488,149 @@ mod tests {
         assert_eq!(*results2, expected);
         assert_eq!(*results3, expected);
     }
+
+    #[tokio::test]
+    async fn test_view_flush_propagates_to_followers() {
+        init();
+
+        // Create a job that flushes intermediate changes
+        fn plus_four(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32, Error> {
+            let initial = *counter;
+            if tgt - *counter >= 4 {
+                *counter += 4;
+            }
+
+            with_io(counter, move |mut counter| async move {
+                // reset counter
+                *counter = initial;
+
+                // Simulate a long-running task with multiple flushes
+                for _ in 0..3 {
+                    *counter += 1;
+                    counter.flush().await?;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                // one more change after progress reports:w
+                *counter += 1;
+                Ok(counter)
+            })
+        }
+
+        let mut worker = Worker::new()
+            .job("", update(plus_four))
+            .initial_state(0)
+            .unwrap();
+
+        // Follow the worker state
+        let mut updates = worker.follow();
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                while let Some(update) = updates.next().await {
+                    res.push(update);
+                }
+            });
+        }
+
+        // Execute the worker - target 4 because: 0 + 1 (planning) + 3 (flushes) = 4
+        let status = worker.seek_target(4).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
+
+        // Stop the worker to ensure all updates are received
+        worker.stop();
+
+        // Give some time for updates to be processed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let results = results.read().await;
+
+        // We should see intermediate states from flushes
+        assert!(
+            results.len() >= 4,
+            "Expected at least 4 updates, got {}: {:?}",
+            results.len(),
+            &results
+        );
+
+        // The final state should be 4
+        assert_eq!(results[0], 1);
+        assert_eq!(results[1], 2);
+        assert_eq!(results[2], 3);
+        assert_eq!(results[3], 4);
+    }
+
+    #[tokio::test]
+    async fn test_flushed_changes_rollback_on_error() {
+        init();
+
+        // Create a job that flushes changes then fails
+        fn failing_after_flush(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32, Error> {
+            let initial = *counter;
+            if tgt - *counter >= 4 {
+                *counter += 4;
+            }
+
+            with_io(counter, move |mut counter| async move {
+                // reset counter
+                *counter = initial;
+
+                // Simulate a long-running task with multiple flushes
+                for _ in 0..3 {
+                    *counter += 1;
+                    counter.flush().await?;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+
+                // Return an error before the final flush
+                Err(Error::runtime("simulated error"))
+            })
+        }
+
+        let mut worker = Worker::new()
+            .job("", update(failing_after_flush))
+            .initial_state(0)
+            .unwrap();
+
+        // Follow the worker state
+        let mut updates = worker.follow();
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                while let Some(update) = updates.next().await {
+                    res.push(update);
+                }
+            });
+        }
+
+        // Execute the worker - should fail
+        let status = worker.seek_target(4).await.unwrap();
+        assert!(matches!(status, SeekStatus::Aborted(_)));
+
+        // Stop the worker
+        worker.stop();
+
+        // Give some time for updates to be processed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let results = results.read().await;
+
+        assert!(
+            results.len() >= 4,
+            "Expected at least 4 updates, got {}: {:?}",
+            results.len(),
+            &results
+        );
+
+        // We should see the intermediate results before the roll-back
+        assert_eq!(results[0], 1);
+        assert_eq!(results[1], 2);
+        assert_eq!(results[2], 3);
+        assert_eq!(results[3], 0);
+    }
 }

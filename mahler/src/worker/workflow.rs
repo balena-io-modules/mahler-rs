@@ -9,7 +9,9 @@ use tracing::{info, instrument};
 
 use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
 use crate::error::{AggregateError, Error, ErrorKind};
-use crate::json::{Operation, Patch, PatchOperation, Path, Value};
+use crate::json::{
+    Operation, Patch, PatchOperation, Path, RemoveOperation, ReplaceOperation, Value,
+};
 use crate::runtime::{Channel, System};
 use crate::sync::{Interrupt, RwLock, Sender};
 use crate::task::{Action, Id};
@@ -108,9 +110,43 @@ impl Task for WorkUnit {
             ));
         }
 
-        self.action
+        // Take snapshot of the path before execution
+        let path = self.action.context().path.clone();
+        let initial_state = system
+            .inner_state()
+            .pointer(path.as_str())
+            .unwrap_or(&Value::Null);
+
+        match self
+            .action
             .run(system, &Channel::from(sender.clone()))
             .await
+        {
+            Ok(patch) => {
+                // Task succeeded, return the patch as normal
+                Ok(patch)
+            }
+            Err(e) => {
+                // Task failed, create rollback patch
+                let rollback_patch = if initial_state == &Value::Null {
+                    // Path didn't exist before, remove it
+                    Patch(vec![PatchOperation::Remove(RemoveOperation {
+                        path: path.into(),
+                    })])
+                } else {
+                    // Path existed, restore to initial value
+                    Patch(vec![PatchOperation::Replace(ReplaceOperation {
+                        path: path.into(),
+                        value: initial_state.clone(),
+                    })])
+                };
+
+                // Apply rollback patch immediately
+                sender.send(rollback_patch).await.map_err(Error::internal)?;
+
+                Err(e)
+            }
+        }
     }
 }
 
