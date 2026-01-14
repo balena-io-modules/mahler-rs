@@ -195,6 +195,7 @@ impl From<Error> for PlanningError {
 /// * `db` - a reference to the worker [`Domain`]
 /// * `task` - the task to convert to a workflow
 /// * `cur_state` - the state of the system before running the task
+#[cfg(debug_assertions)]
 pub fn find_workflow_for_task(
     mut task: Task,
     db: &Domain,

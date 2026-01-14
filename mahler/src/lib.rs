@@ -469,7 +469,6 @@ pub mod sync {
     pub(crate) use mahler_core::sync::{channel, RwLock, Sender};
 }
 
-#[cfg(debug_assertions)]
 pub mod dag {
     //! Directed Acyclic Graph implementation and methods
     pub use mahler_core::dag::*;

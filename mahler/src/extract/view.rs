@@ -225,7 +225,7 @@ impl<T> View<T> {
 
     /// Delete the value at the path pointed by the view.
     ///
-    /// Takes ownership of the view and returns a View<Option<T>>
+    /// Takes ownership of the view and returns a `View<Option<T>>`
     /// as result
     pub fn delete(self) -> View<Option<T>> {
         let Self {

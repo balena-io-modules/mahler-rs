@@ -60,7 +60,6 @@ impl System {
     }
 
     /// Try to deserialize the inner system state into the desired type
-    /// The deep clone makes
     pub fn state<S>(&self) -> Result<S>
     where
         S: DeserializeOwned,

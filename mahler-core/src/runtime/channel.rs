@@ -6,27 +6,8 @@ use crate::sync::Sender;
 /// A channel to communicate state changes at runtime
 ///
 /// The `Channel` allows tasks to send state changes back to the worker during execution,
-/// enabling real-time progress updates. This is used by extractors like `View` to propagate
-/// changes made via [`View::flush`](crate::extract::View::flush).
-///
-/// # Channel States
-///
-/// - **Attached**: Created from a `Sender`, allows sending patches to the worker
-/// - **Detached**: No underlying sender
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use mahler_core::runtime::Channel;
-/// use mahler_core::json::Patch;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // Detached channel (no-op sends)
-/// let channel = Channel::detached();
-/// channel.send(Patch(vec![])).await.unwrap();
-/// assert_eq!(sent, false);
-/// # Ok(())
-/// # }
+/// enabling real-time progress updates. This can be used by extractors to propagate changes
+/// during operation.
 /// ```
 #[derive(Clone)]
 pub struct Channel(Option<Sender<Patch>>);
@@ -52,7 +33,7 @@ impl Channel {
         self.0.is_none()
     }
 
-    /// Create a detached channel
+    /// Create a detached channel. A detached channel is not connected to a worker
     pub fn detached() -> Self {
         Self(None)
     }

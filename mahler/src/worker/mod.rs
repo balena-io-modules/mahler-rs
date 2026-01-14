@@ -34,8 +34,8 @@ mod planner;
 mod workflow;
 use auto_interrupt::AutoInterrupt;
 use domain::Domain;
-use planner::PlanningError;
 
+pub use planner::PlanningError;
 pub use workflow::*;
 
 #[derive(Debug)]
@@ -439,7 +439,7 @@ impl<O> Worker<O, Uninitialized> {
         self
     }
 
-    /// Add an [Exception](`crate::job::Exception`) to the worker domain
+    /// Add an [Exception](`crate::exception::Exception`) to the worker domain
     pub fn exception(mut self, route: &'static str, exception: Exception) -> Self {
         self.inner.domain = self.inner.domain.exception(route, exception);
         self
@@ -692,7 +692,7 @@ impl<O: State> Worker<O, Ready> {
     ///
     /// # Errors
     /// Returns [`PlanningError::NotFound`] if no workflow can be found
-    /// Returns [`PlanningError::Aborted`] on internal errors
+    /// Returns [`PlanningError::Aborted`] on internal or serialization errors
     pub async fn find_workflow_to_target(
         &self,
         tgt: O::Target,
@@ -726,8 +726,8 @@ impl<O: State> Worker<O, Ready> {
     /// - No other workflows have been executed since the workflow was created (generation matches)
     ///
     /// # Errors
-    /// - [`ErrorKind::WorkflowWorkerMismatch`] if workflow was created by different worker
-    /// - [`ErrorKind::WorkflowStale`] if workflow generation doesn't match current generation
+    /// - [`ErrorKind::`InvalidInput] if workflow was created by different worker or the workflow
+    /// generation does not match the current generation
     /// - [`ErrorKind::ConditionNotMet`] if workflow conditions changed at runtime (caller should re-plan)
     /// - Returns [`SeekStatus::Aborted`] if workflow execution fails with runtime errors
     #[instrument(skip_all)]
@@ -1510,7 +1510,7 @@ mod tests {
                     counter.flush().await?;
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                // one more change after progress reports:w
+                // one more change after progress reports
                 *counter += 1;
                 Ok(counter)
             })
