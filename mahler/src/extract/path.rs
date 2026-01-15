@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use crate::result::Result;
-use crate::runtime::{Context, FromContext, FromSystem, System};
+use crate::runtime::{Channel, Context, FromContext, FromSystem, System};
 
 /// Extracts the full path that the Task is being applied to
 ///
@@ -42,7 +42,7 @@ impl Display for Path {
 }
 
 impl FromSystem for Path {
-    fn from_system(_: &System, context: &Context) -> Result<Self> {
+    fn from_system(_: &System, context: &Context, _: &Channel) -> Result<Self> {
         Self::from_context(context)
     }
 }

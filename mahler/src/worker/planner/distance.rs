@@ -1,10 +1,12 @@
-use json_patch::{diff, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
+use json_patch::diff;
 use jsonptr::Pointer;
 use std::collections::btree_set::Iter;
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::json::{Operation, Path, Value};
+use crate::json::{
+    Operation, Patch, PatchOperation, Path, RemoveOperation, ReplaceOperation, Value,
+};
 
 #[derive(Debug)]
 pub struct Distance {

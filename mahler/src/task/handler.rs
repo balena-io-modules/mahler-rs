@@ -1,11 +1,10 @@
-use json_patch::Patch;
-
 use super::effect::Effect;
 use super::id::Id;
 use super::{Action, Method, Task};
 
 use crate::error::Error;
-use crate::runtime::{Context, FromSystem, System};
+use crate::json::Patch;
+use crate::runtime::{Channel, Context, FromSystem, System};
 use crate::serde::Serialize;
 
 /// Trait for functions that can be converted into tasks
@@ -18,7 +17,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     ///
     /// This is never called directly by the library users but it is used by mahler to simulate or
     /// run the handler on the system in the right context
-    fn call(&self, system: &System, context: &Context) -> Effect<O, Error, I>;
+    fn call(&self, system: &System, context: &Context, channel: &Channel) -> Effect<O, Error, I>;
 
     /// Get the unique identifier of the job handler
     ///
@@ -87,9 +86,9 @@ macro_rules! impl_action_handler {
             I: Send + 'static
         {
 
-            fn call(&self, system: &System, context: &Context) -> Effect<Patch, Error, I>{
+            fn call(&self, system: &System, context: &Context, channel: &Channel) -> Effect<Patch, Error, I>{
                 $(
-                    let $ty = match $ty::from_system(system, context) {
+                    let $ty = match $ty::from_system(system, context, channel) {
                         Ok(value) => value,
                         Err(failure) => {
                             return Effect::from_error(failure.into())
@@ -140,9 +139,9 @@ macro_rules! impl_method_handler {
             $($ty: FromSystem,)*
         {
 
-            fn call(&self, system: &System, context: &Context) -> Effect<Vec<Task>, Error> {
+            fn call(&self, system: &System, context: &Context, channel: &Channel) -> Effect<Vec<Task>, Error> {
                 $(
-                    let $ty = match $ty::from_system(system, context) {
+                    let $ty = match $ty::from_system(system, context, channel) {
                         Ok(value) => value,
                         Err(failure) => {
                             return Effect::from_error(failure.into())

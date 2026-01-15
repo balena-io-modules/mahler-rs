@@ -1,6 +1,5 @@
-use json_patch::Patch;
-
 use crate::error::{Error, ErrorKind};
+use crate::json::Patch;
 use crate::result::Result;
 
 use super::effect::Effect;

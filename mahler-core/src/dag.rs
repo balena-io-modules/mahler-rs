@@ -311,6 +311,10 @@ pub struct Dag<T> {
 }
 
 impl<T: Clone> Clone for Dag<T> {
+    /// Implements a deep clone of the DAG
+    ///
+    /// It creates full copy of the DAG structure and nodes, where each node is a clone of
+    /// the corresponding copy of the original DAG
     fn clone(&self) -> Self {
         fn deep_clone<T: Clone>(head: Link<T>) -> (Link<T>, Link<T>) {
             if let Some(node_rc) = head {
@@ -950,7 +954,11 @@ pub trait Task {
     type Changes;
     type Error;
 
-    async fn run(&self, input: &Self::Input) -> Result<Self::Changes, Self::Error>;
+    async fn run(
+        &self,
+        input: &Self::Input,
+        channel: &Sender<Self::Changes>,
+    ) -> Result<Self::Changes, Self::Error>;
 }
 
 impl<T> Dag<T>
@@ -983,9 +991,10 @@ where
         async fn run_task<T: Task>(
             task: T,
             value: &T::Input,
+            channel: &Sender<T::Changes>,
             interrupt: &Interrupt,
         ) -> Result<T::Changes, InnerError<T::Error>> {
-            let future = task.run(value);
+            let future = task.run(value, channel);
 
             // XXX: this assumes tasks are cancel-safe which might be a source
             // of problems in the future
@@ -1042,7 +1051,7 @@ where
                             guard.clone()
                         };
 
-                        match run_task(task, &value, interrupt).await {
+                        match run_task(task, &value, channel, interrupt).await {
                             Ok(changes) => {
                                 // Send task changes back to the channel, it is the
                                 // receiver responsibility to merge changes back on the shared
@@ -1586,7 +1595,11 @@ mod tests {
             type Changes = ();
             type Error = ();
 
-            async fn run(&self, _input: &Self::Input) -> Result<Self::Changes, Self::Error> {
+            async fn run(
+                &self,
+                _: &Self::Input,
+                _: &Sender<Self::Changes>,
+            ) -> Result<Self::Changes, Self::Error> {
                 Ok(())
             }
         }
@@ -1623,7 +1636,11 @@ mod tests {
         type Changes = &'static str;
         type Error = ();
 
-        async fn run(&self, _input: &Self::Input) -> Result<Self::Changes, Self::Error> {
+        async fn run(
+            &self,
+            _: &Self::Input,
+            _: &Sender<Self::Changes>,
+        ) -> Result<Self::Changes, Self::Error> {
             tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
             Ok(self.name)
         }
@@ -1744,7 +1761,11 @@ mod tests {
         type Input = ();
         type Changes = &'static str;
         type Error = &'static str; // Simple error
-        async fn run(&self, _input: &Self::Input) -> Result<Self::Changes, Self::Error> {
+        async fn run(
+            &self,
+            _: &Self::Input,
+            _: &Sender<Self::Changes>,
+        ) -> Result<Self::Changes, Self::Error> {
             if self.fail {
                 Err("task failed")
             } else {

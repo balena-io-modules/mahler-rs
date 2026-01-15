@@ -18,7 +18,7 @@ jsonptr.workspace = true
 matchit.workspace = true
 serde_core.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = [] }
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 dedent = "0.1.1"
@@ -32,3 +32,4 @@ tracing-subscriber = { version = "0.3.19", default-features = false, features = 
 
 # Used to compile documentation 
 mahler = { path = "../mahler" }
+tokio = { workspace = true, features = ["time", "rt-multi-thread"] }

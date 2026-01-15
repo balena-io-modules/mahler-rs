@@ -1,9 +1,8 @@
 //! Automated planning and execution of task workflows
 
-use json_patch::Patch;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 use tokio::select;
 use tokio::sync::watch;
@@ -21,7 +20,7 @@ mod testing;
 use crate::error::{AggregateError, Error, ErrorKind};
 use crate::exception::Exception;
 use crate::job::Job;
-use crate::json::Value;
+use crate::json::{Patch, Value};
 use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::serde::de::DeserializeOwned;
@@ -35,8 +34,8 @@ mod planner;
 mod workflow;
 use auto_interrupt::AutoInterrupt;
 use domain::Domain;
-use planner::PlanningError;
 
+pub use planner::PlanningError;
 pub use workflow::*;
 
 #[derive(Debug)]
@@ -440,7 +439,7 @@ impl<O> Worker<O, Uninitialized> {
         self
     }
 
-    /// Add an [Exception](`crate::job::Exception`) to the worker domain
+    /// Add an [Exception](`crate::exception::Exception`) to the worker domain
     pub fn exception(mut self, route: &'static str, exception: Exception) -> Self {
         self.inner.domain = self.inner.domain.exception(route, exception);
         self
@@ -599,7 +598,7 @@ impl<T> Stream for WorkerStream<T> {
 /// The stream is best effort, meaning updates may be missed if the receiver lags behind.
 fn follow_worker<T>(
     channel: watch::Sender<()>,
-    system_rwlock: Arc<RwLock<System>>,
+    sys_reader: Weak<RwLock<System>>,
 ) -> impl Stream<Item = T>
 where
     T: DeserializeOwned,
@@ -608,11 +607,15 @@ where
     WorkerStream::new(
         WatchStream::from_changes(rx)
             .then(move |_| {
-                let sys_reader = Arc::clone(&system_rwlock);
+                let sys_reader = sys_reader.clone();
                 async move {
-                    // Read the system state
-                    let system = sys_reader.read().await;
-                    system.state::<T>().ok()
+                    if let Some(sys_reader) = sys_reader.upgrade() {
+                        // Read the system state
+                        let system = sys_reader.read().await;
+                        system.state::<T>().ok()
+                    } else {
+                        None
+                    }
                 }
             })
             .filter_map(|opt| opt),
@@ -678,7 +681,7 @@ impl<O: State> Worker<O, Ready> {
     {
         follow_worker(
             self.inner.update_event_channel.clone(),
-            Arc::clone(&self.inner.system_rwlock),
+            Arc::downgrade(&self.inner.system_rwlock),
         )
     }
 
@@ -689,7 +692,7 @@ impl<O: State> Worker<O, Ready> {
     ///
     /// # Errors
     /// Returns [`PlanningError::NotFound`] if no workflow can be found
-    /// Returns [`PlanningError::Aborted`] on internal errors
+    /// Returns [`PlanningError::Aborted`] on internal or serialization errors
     pub async fn find_workflow_to_target(
         &self,
         tgt: O::Target,
@@ -723,8 +726,8 @@ impl<O: State> Worker<O, Ready> {
     /// - No other workflows have been executed since the workflow was created (generation matches)
     ///
     /// # Errors
-    /// - [`ErrorKind::WorkflowWorkerMismatch`] if workflow was created by different worker
-    /// - [`ErrorKind::WorkflowStale`] if workflow generation doesn't match current generation
+    /// - [`ErrorKind::`InvalidInput] if workflow was created by different worker or the workflow
+    /// generation does not match the current generation
     /// - [`ErrorKind::ConditionNotMet`] if workflow conditions changed at runtime (caller should re-plan)
     /// - Returns [`SeekStatus::Aborted`] if workflow execution fails with runtime errors
     #[instrument(skip_all)]
@@ -734,6 +737,7 @@ impl<O: State> Worker<O, Ready> {
         interrupt: Interrupt,
     ) -> Result<SeekStatus> {
         let Ready {
+            resources,
             system_rwlock,
             patch_tx,
             worker_id,
@@ -771,6 +775,12 @@ impl<O: State> Worker<O, Ready> {
                     workflow.generation,
                 ),
             ));
+        }
+
+        // Update system properties
+        {
+            let mut system = self.inner.system_rwlock.write().await;
+            system.set_resources(resources.clone());
         }
 
         let mut writer_closed_rx = writer_closed_rx.clone();
@@ -862,7 +872,7 @@ impl<O: State> Worker<O, Ready> {
             ));
         }
 
-        // Update system resources
+        // Update system properties
         {
             let mut system = self.inner.system_rwlock.write().await;
             system.set_resources(resources);
@@ -1477,5 +1487,150 @@ mod tests {
         assert_eq!(*results1, expected);
         assert_eq!(*results2, expected);
         assert_eq!(*results3, expected);
+    }
+
+    #[tokio::test]
+    async fn test_view_flush_propagates_to_followers() {
+        init();
+
+        // Create a job that flushes intermediate changes
+        fn plus_four(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32, Error> {
+            let initial = *counter;
+            if tgt - *counter >= 4 {
+                *counter += 4;
+            }
+
+            with_io(counter, move |mut counter| async move {
+                // reset counter
+                *counter = initial;
+
+                // Simulate a long-running task with multiple flushes
+                for _ in 0..3 {
+                    *counter += 1;
+                    counter.flush().await?;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                // one more change after progress reports
+                *counter += 1;
+                Ok(counter)
+            })
+        }
+
+        let mut worker = Worker::new()
+            .job("", update(plus_four))
+            .initial_state(0)
+            .unwrap();
+
+        // Follow the worker state
+        let mut updates = worker.follow();
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                while let Some(update) = updates.next().await {
+                    res.push(update);
+                }
+            });
+        }
+
+        // Execute the worker - target 4 because: 0 + 1 (planning) + 3 (flushes) = 4
+        let status = worker.seek_target(4).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
+
+        // Stop the worker to ensure all updates are received
+        worker.stop();
+
+        // Give some time for updates to be processed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let results = results.read().await;
+
+        // We should see intermediate states from flushes
+        assert!(
+            results.len() >= 4,
+            "Expected at least 4 updates, got {}: {:?}",
+            results.len(),
+            &results
+        );
+
+        // The final state should be 4
+        assert_eq!(results[0], 1);
+        assert_eq!(results[1], 2);
+        assert_eq!(results[2], 3);
+        assert_eq!(results[3], 4);
+    }
+
+    #[tokio::test]
+    async fn test_flushed_changes_rollback_on_error() {
+        init();
+
+        // Create a job that flushes changes then fails
+        fn failing_after_flush(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32, Error> {
+            let initial = *counter;
+            if tgt - *counter >= 4 {
+                *counter += 4;
+            }
+
+            with_io(counter, move |mut counter| async move {
+                // reset counter
+                *counter = initial;
+
+                // Simulate a long-running task with multiple flushes
+                for _ in 0..3 {
+                    *counter += 1;
+                    counter.flush().await?;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+
+                // Return an error before the final flush
+                Err(Error::runtime("simulated error"))
+            })
+        }
+
+        let mut worker = Worker::new()
+            .job("", update(failing_after_flush))
+            .initial_state(0)
+            .unwrap();
+
+        // Follow the worker state
+        let mut updates = worker.follow();
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                while let Some(update) = updates.next().await {
+                    res.push(update);
+                }
+            });
+        }
+
+        // Execute the worker - should fail
+        let status = worker.seek_target(4).await.unwrap();
+        assert!(matches!(status, SeekStatus::Aborted(_)));
+
+        // Stop the worker
+        worker.stop();
+
+        // Give some time for updates to be processed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let results = results.read().await;
+
+        assert!(
+            results.len() >= 4,
+            "Expected at least 4 updates, got {}: {:?}",
+            results.len(),
+            &results
+        );
+
+        // We should see the intermediate results before the roll-back
+        assert_eq!(results[0], 1);
+        assert_eq!(results[1], 2);
+        assert_eq!(results[2], 3);
+        assert_eq!(results[3], 0);
     }
 }

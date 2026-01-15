@@ -1,7 +1,6 @@
 //! Types and utilities to generate and execute task Workflows
 
 use async_trait::async_trait;
-use json_patch::{Patch, PatchOperation};
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
@@ -10,8 +9,10 @@ use tracing::{info, instrument};
 
 use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
 use crate::error::{AggregateError, Error, ErrorKind};
-use crate::json::{Operation, Path, Value};
-use crate::runtime::System;
+use crate::json::{
+    Operation, Patch, PatchOperation, Path, RemoveOperation, ReplaceOperation, Value,
+};
+use crate::runtime::{Channel, System};
 use crate::sync::{Interrupt, RwLock, Sender};
 use crate::task::{Action, Id};
 
@@ -92,7 +93,7 @@ impl Task for WorkUnit {
     type Error = Error;
 
     #[instrument(name = "run_task", skip_all, fields(task=%self.action), err)]
-    async fn run(&self, system: &System) -> Result<Patch, Self::Error> {
+    async fn run(&self, system: &System, sender: &Sender<Patch>) -> Result<Patch, Self::Error> {
         info!("starting");
         // dry-run the task to test that conditions hold
         // before executing the action should not really fail at this point
@@ -109,7 +110,43 @@ impl Task for WorkUnit {
             ));
         }
 
-        self.action.run(system).await
+        // Take snapshot of the path before execution
+        let path = self.action.context().path.clone();
+        let initial_state = system
+            .inner_state()
+            .pointer(path.as_str())
+            .unwrap_or(&Value::Null);
+
+        match self
+            .action
+            .run(system, &Channel::from(sender.clone()))
+            .await
+        {
+            Ok(patch) => {
+                // Task succeeded, return the patch as normal
+                Ok(patch)
+            }
+            Err(e) => {
+                // Task failed, create rollback patch
+                let rollback_patch = if initial_state == &Value::Null {
+                    // Path didn't exist before, remove it
+                    Patch(vec![PatchOperation::Remove(RemoveOperation {
+                        path: path.into(),
+                    })])
+                } else {
+                    // Path existed, restore to initial value
+                    Patch(vec![PatchOperation::Replace(ReplaceOperation {
+                        path: path.into(),
+                        value: initial_state.clone(),
+                    })])
+                };
+
+                // Apply rollback patch immediately
+                sender.send(rollback_patch).await.map_err(Error::internal)?;
+
+                Err(e)
+            }
+        }
     }
 }
 

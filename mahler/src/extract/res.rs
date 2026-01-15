@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::result::Result;
-use crate::runtime::{Context, FromSystem, System};
+use crate::runtime::{Channel, Context, FromSystem, System};
 
 /// Extracts a shared system resource
 ///
@@ -110,7 +110,7 @@ impl<R> Res<R> {
 }
 
 impl<R: Send + Sync + 'static> FromSystem for Res<R> {
-    fn from_system(system: &System, _: &Context) -> Result<Self> {
+    fn from_system(system: &System, _: &Context, _: &Channel) -> Result<Self> {
         let arc = system.resource::<R>();
         Ok(Res(arc))
     }

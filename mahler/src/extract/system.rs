@@ -1,6 +1,6 @@
 use crate::error::{Error, ErrorKind};
 use crate::result::Result;
-use crate::runtime::{Context, FromSystem, System as SystemState};
+use crate::runtime::{Channel, Context, FromSystem, System as SystemState};
 use crate::serde::de::DeserializeOwned;
 
 /// Extracts the global system state managed by the [Worker](`crate::worker::Worker`)
@@ -40,7 +40,7 @@ use crate::serde::de::DeserializeOwned;
 pub struct System<S>(pub S);
 
 impl<S: DeserializeOwned> FromSystem for System<S> {
-    fn from_system(system: &SystemState, _: &Context) -> Result<Self> {
+    fn from_system(system: &SystemState, _: &Context, _: &Channel) -> Result<Self> {
         // This will fail if the value cannot be deserialized into the target type
         let state = serde_json::from_value::<S>(system.inner_state().clone())
             .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
