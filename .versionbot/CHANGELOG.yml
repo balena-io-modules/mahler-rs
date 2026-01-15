@@ -1,4 +1,38 @@
 - commits:
+    - subject: Add View::flush method
+      hash: daf9bd74369a0671f7ed6b49d0d14fb887633dd6
+      body: |
+        The flush method allows to sync progress from the View back to the
+        worker and its followers. This can be used by long running tasks to
+        communicate task progress back to the user via the worker.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Add runtime channel to communicate changes back to worker
+      hash: f452bd61dd3174b046c3c413a9358e8283f97d4f
+      body: |
+        The channel is now a new argument to the FromSystem::from_system call,
+        allowing handlers to get access to the runtime channel for communicating
+        changes.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Re-export json::Patch types from mahler_core
+      hash: 6797be93c898536c74aeb93f0e09774bb95d911d
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.24.0
+  title: ""
+  date: 2026-01-15T19:11:04.412Z
+- commits:
     - subject: Add `View::delete` method
       hash: 796d1f2aba77ead3035f05a29adce3e8dd690a5b
       body: |
