@@ -201,14 +201,14 @@ pub struct FetchImageError(#[from] anyhow::Error);
 /// Effect: add the image to the list of images
 /// Action: pull the image from the registry and add it to the images local registry
 fn fetch_image(
-    mut image: View<Option<Image>>,
+    image: View<Option<Image>>,
     Args(image_name): Args<String>,
     docker: Res<Docker>,
-) -> IO<Option<Image>, FetchImageError> {
+) -> IO<Image, FetchImageError> {
+    enforce!(image.is_none());
+
     // Initialize the image if it doesn't exist
-    if image.is_none() {
-        image.get_or_insert_default();
-    }
+    let image = image.create(Image::default());
 
     with_io(image, |mut image| async move {
         let docker = docker
@@ -221,7 +221,7 @@ fn fetch_image(
                 if let Some(id) = img_info.id {
                     // If the image exists and has an id, skip
                     // download
-                    image.replace(Image { id: Some(id) });
+                    image.id = Some(id);
                     return Ok(image);
                 }
             }
@@ -252,13 +252,13 @@ fn fetch_image(
             let _ = progress.with_context(|| format!("failed to download image {image_name}"))?;
         }
 
-        // Check that the image
+        // Check that the image exists
         let img_info = docker
             .inspect_image(&image_name)
             .await
             .with_context(|| format!("failed to read information for image {image_name}"))?;
 
-        image.replace(Image { id: img_info.id });
+        image.id = img_info.id;
 
         Ok(image)
     })
@@ -324,25 +324,26 @@ pub struct InstallServiceError(#[from] anyhow::Error);
 /// Effect: add the service to the `services` object, with a `status` of `created`
 /// Action: create a new container using the docker API and set the `containerId` property of the service in the `services` object
 fn install_service(
-    mut svc_ptr: View<Option<Service>>,
+    svc_ptr: View<Option<Service>>,
     Args(service_name): Args<String>,
     System(project): System<Project>,
     Target(tgt): Target<Service>,
     docker: Res<Docker>,
-) -> IO<Option<Service>, InstallServiceError> {
-    let tgt_img = tgt.image.clone();
-    let local_img = project.images.get(&tgt_img);
+) -> IO<Service, InstallServiceError> {
+    enforce!(
+        project.images.contains_key(&tgt.image),
+        "service image {} not found",
+        tgt.image
+    );
 
     // If the image has already been downloaded then
     // simulate the service install
-    if local_img.is_some() {
-        svc_ptr.replace(Service {
-            // The status should be 'Created' after install
-            status: ServiceStatus::Created,
-            // The rest of the fields should be the same
-            ..tgt.clone().into()
-        });
-    }
+    let svc_ptr = svc_ptr.create(Service {
+        // The status should be 'Created' after install
+        status: ServiceStatus::Created,
+        // The rest of the fields should be the same
+        ..tgt.clone().into()
+    });
 
     with_io(svc_ptr, |mut svc_ptr| async move {
         let container_name = format!("{}_{}", project.name, service_name);
@@ -356,10 +357,10 @@ fn install_service(
                 // If the existing service has the same image id as the
                 // locally stored image, then we replace it with the target img
                 // name
-                if image_matches_with_target(docker, &tgt_img, &svc.image).await {
-                    svc.image = tgt_img;
+                if image_matches_with_target(docker, &tgt.image, &svc.image).await {
+                    svc.image = tgt.image;
                 }
-                svc_ptr.replace(svc);
+                *svc_ptr = svc;
 
                 return Ok(svc_ptr);
             }
@@ -385,6 +386,7 @@ fn install_service(
             platform: None,
         });
 
+        let tgt_img = tgt.image.clone();
         docker
             .create_container(options, tgt.into())
             .await
@@ -404,7 +406,7 @@ fn install_service(
         }
 
         // Assign the pointer to the new service info
-        svc_ptr.replace(svc);
+        *svc_ptr = svc;
 
         Ok(svc_ptr)
     })
@@ -536,7 +538,7 @@ fn uninstall_service(
     enforce!(
         svc_ptr
             .as_ref()
-            .is_some_and(|svc| !matches!(svc.status, ServiceStatus::Running)),
+            .is_some_and(|svc| svc.status != ServiceStatus::Running),
         "service {service_name} is still running"
     );
 
