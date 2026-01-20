@@ -1,4 +1,18 @@
 - commits:
+    - subject: Add View::create method for View<Option<T>>
+      hash: 3bd2b521fa8febfde3e5c22e5f12ec40cf78961f
+      body: |
+        The method should allow for easier operation with View objects in create
+        type tasks.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.24.1
+  title: ""
+  date: 2026-01-20T08:30:50.503Z
+- commits:
     - subject: Add View::flush method
       hash: daf9bd74369a0671f7ed6b49d0d14fb887633dd6
       body: |
