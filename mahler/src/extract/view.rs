@@ -243,6 +243,28 @@ impl<T> View<T> {
     }
 }
 
+impl<T> View<Option<T>> {
+    /// Initialize the value a the path pointed by the View
+    ///
+    /// Takes ownership of the View and returns a `View<T>`. If the existing view already
+    /// contained a value, that value is dropped.
+    pub fn create(self, value: T) -> View<T> {
+        let Self {
+            initial,
+            path,
+            channel,
+            ..
+        } = self;
+
+        View {
+            initial,
+            state: value,
+            path,
+            channel,
+        }
+    }
+}
+
 impl<T: DeserializeOwned> FromSystem for View<T> {
     fn from_system(system: &System, context: &Context, channel: &Channel) -> Result<Self> {
         let pointer = context.path.as_ref();
@@ -522,6 +544,40 @@ mod tests {
 
         let value = view.get_or_insert(0);
         *value = 3;
+
+        // Get the list changes to the view
+        let changes = view.into_result().unwrap();
+        assert_eq!(
+            changes,
+            serde_json::from_value::<Patch>(json!([
+              { "op": "add", "path": "/numbers/three", "value": 3 },
+            ]))
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn it_initializes_optional_view_with_create() {
+        let mut numbers = HashMap::new();
+        numbers.insert("one".to_string(), 1);
+        numbers.insert("two".to_string(), 2);
+
+        let state = MyState { numbers };
+
+        let system = System::try_from(state).unwrap();
+
+        let view: View<Option<i32>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers/three"),
+            &Channel::detached(),
+        )
+        .unwrap();
+
+        assert_eq!(view.as_ref(), None);
+
+        // Initialize the view via a `create` call
+        let mut view = view.create(0);
+        *view = 3;
 
         // Get the list changes to the view
         let changes = view.into_result().unwrap();
