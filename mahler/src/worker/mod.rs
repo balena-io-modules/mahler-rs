@@ -2,7 +2,7 @@
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::select;
 use tokio::sync::watch;
@@ -25,7 +25,7 @@ use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::serde::de::DeserializeOwned;
 use crate::state::State;
-use crate::sync::{channel, Interrupt, RwLock, Sender};
+use crate::sync::{channel, rw_lock, Interrupt, Reader, Sender};
 use crate::system_ext::SystemExt;
 
 mod auto_interrupt;
@@ -85,7 +85,7 @@ pub struct Uninitialized {
 pub struct Ready {
     domain: Domain,
     resources: Resources,
-    system_rwlock: Arc<RwLock<System>>,
+    system_reader: Reader<System>,
     update_event_channel: watch::Sender<()>,
     patch_tx: Sender<Patch>,
     writer_closed_rx: watch::Receiver<()>,
@@ -493,7 +493,7 @@ impl<O> Worker<O, Uninitialized> {
         let system = System::try_from(state)?;
 
         // Shared system protected by RwLock
-        let system_rwlock = Arc::new(RwLock::new(system));
+        let (system_reader, mut system_writer) = rw_lock(system);
 
         // Create the state changes synchronization channel
         // XXX: should the channel size configurable? Or should we make it unbounded at risk of running
@@ -513,7 +513,6 @@ impl<O> Worker<O, Uninitialized> {
 
         // Spawn system writer task
         {
-            let system_writer = Arc::clone(&system_rwlock);
             let update_event_tx = update_event_channel.clone();
             tokio::spawn(
                 async move {
@@ -551,7 +550,7 @@ impl<O> Worker<O, Uninitialized> {
         Ok(Worker::from_inner(Ready {
             domain,
             resources,
-            system_rwlock,
+            system_reader,
             update_event_channel,
             patch_tx,
             writer_closed_rx,
@@ -598,7 +597,7 @@ impl<T> Stream for WorkerStream<T> {
 /// The stream is best effort, meaning updates may be missed if the receiver lags behind.
 fn follow_worker<T>(
     channel: watch::Sender<()>,
-    sys_reader: Weak<RwLock<System>>,
+    system_reader: Reader<System>,
 ) -> impl Stream<Item = T>
 where
     T: DeserializeOwned,
@@ -607,15 +606,11 @@ where
     WorkerStream::new(
         WatchStream::from_changes(rx)
             .then(move |_| {
-                let sys_reader = sys_reader.clone();
+                let sys_reader = system_reader.clone();
                 async move {
-                    if let Some(sys_reader) = sys_reader.upgrade() {
-                        // Read the system state
-                        let system = sys_reader.read().await;
-                        system.state::<T>().ok()
-                    } else {
-                        None
-                    }
+                    // Read the system state
+                    let system = sys_reader.read().await;
+                    system.state::<T>().ok()
                 }
             })
             .filter_map(|opt| opt),
@@ -636,7 +631,7 @@ impl<O: State> Worker<O, Ready> {
     where
         O: DeserializeOwned,
     {
-        let system = self.inner.system_rwlock.read().await;
+        let system = self.inner.system_reader.read().await;
         let state = system.state()?;
         Ok(state)
     }
@@ -681,7 +676,7 @@ impl<O: State> Worker<O, Ready> {
     {
         follow_worker(
             self.inner.update_event_channel.clone(),
-            Arc::downgrade(&self.inner.system_rwlock),
+            self.inner.system_reader.clone(),
         )
     }
 
@@ -701,7 +696,7 @@ impl<O: State> Worker<O, Ready> {
 
         let Ready {
             domain,
-            system_rwlock,
+            system_reader: system_rwlock,
             worker_id,
             generation,
             ..
@@ -737,8 +732,7 @@ impl<O: State> Worker<O, Ready> {
         interrupt: Interrupt,
     ) -> Result<SeekStatus> {
         let Ready {
-            resources,
-            system_rwlock,
+            system_reader,
             patch_tx,
             worker_id,
             generation,
@@ -777,11 +771,9 @@ impl<O: State> Worker<O, Ready> {
             ));
         }
 
-        // Update system properties
-        {
-            let mut system = self.inner.system_rwlock.write().await;
-            system.set_resources(resources.clone());
-        }
+        // TODO: Update system resources
+        // let mut system = { self.inner.system_reader.read().await.clone() };
+        // system.set_resources(resources.clone());
 
         let mut writer_closed_rx = writer_closed_rx.clone();
         let res = select! {
@@ -789,7 +781,7 @@ impl<O: State> Worker<O, Ready> {
             _ = writer_closed_rx.changed() => {
                 return Err(Error::internal("state patch failed, worker state possibly tainted"));
             }
-            res = workflow.execute(system_rwlock, patch_tx.clone(), interrupt) => res
+            res = workflow.execute(system_reader, patch_tx.clone(), interrupt) => res
         };
 
         // Increment generation after every workflow execution as
@@ -854,9 +846,8 @@ impl<O: State> Worker<O, Ready> {
         let tgt = serde_json::to_value(tgt)?;
 
         let Ready {
-            resources,
             domain,
-            system_rwlock,
+            system_reader: system_rwlock,
             writer_closed_rx,
             patch_tx,
             generation,
@@ -872,11 +863,11 @@ impl<O: State> Worker<O, Ready> {
             ));
         }
 
-        // Update system properties
-        {
-            let mut system = self.inner.system_rwlock.write().await;
-            system.set_resources(resources);
-        }
+        // TODO: Update system properties
+        // {
+        //     let mut system = self.inner.system_reader.write().await;
+        //     system.set_resources(resources);
+        // }
 
         enum InnerSeekResult {
             TargetReached,
@@ -891,7 +882,7 @@ impl<O: State> Worker<O, Ready> {
 
         async fn find_and_run_workflow<T: State>(
             domain: &Domain,
-            sys_reader: &Arc<RwLock<System>>,
+            sys_reader: &Reader<System>,
             tgt: &Value,
             patch_tx: &Sender<Patch>,
             sigint: &Interrupt,

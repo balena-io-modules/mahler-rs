@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use super::domain::Domain;
 use super::planner::{self, PlanningError};
 use super::workflow::Workflow;
@@ -132,23 +130,19 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
         // look for a workflow for the task
         let workflow = planner::find_workflow_for_task(task, self.inner.as_ref(), &system)?;
 
-        // Since we don't want to
-        let sys_reader = Arc::new(sync::RwLock::new(system));
+        let (sys_reader, mut sys_writer) = sync::rw_lock(system);
         let (tx, mut rx) = sync::channel(10);
         let interrupt = sync::Interrupt::new();
 
-        // Await for changes
-        {
-            let sys_writer = sys_reader.clone();
-            tokio::spawn(async move {
-                while let Some(mut msg) = rx.recv().await {
-                    let changes = std::mem::take(&mut msg.data);
-                    let mut system = sys_writer.write().await;
-                    system.patch(changes).unwrap();
-                    msg.ack();
-                }
-            });
-        }
+        // Spawn task to handle state patches
+        tokio::spawn(async move {
+            while let Some(mut msg) = rx.recv().await {
+                let changes = std::mem::take(&mut msg.data);
+                let mut system = sys_writer.write().await;
+                system.patch(changes).unwrap();
+                msg.ack();
+            }
+        });
 
         // Run the workflow
         workflow

@@ -466,7 +466,7 @@ pub mod sync {
     // Only expose Interrupt publicly
     pub use mahler_core::sync::Interrupt;
 
-    pub(crate) use mahler_core::sync::{channel, RwLock, Sender};
+    pub(crate) use mahler_core::sync::{channel, rw_lock, Reader, Sender};
 }
 
 pub mod dag {
