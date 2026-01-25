@@ -5,14 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::select;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::field::display;
-use tracing::{
-    debug, error, field, info, info_span, instrument, span, trace, warn, Instrument, Level, Span,
-};
+use tracing::{debug, field, info, info_span, instrument, warn, Instrument, Span};
 
 #[cfg(debug_assertions)]
 mod testing;
@@ -25,13 +22,14 @@ use crate::result::Result;
 use crate::runtime::{Resources, System};
 use crate::serde::de::DeserializeOwned;
 use crate::state::State;
-use crate::sync::{channel, rw_lock, Interrupt, Reader, Sender};
-use crate::system_ext::SystemExt;
+use crate::sync::{Interrupt, Sender};
 
 mod auto_interrupt;
 mod domain;
 mod planner;
+mod runtime;
 mod workflow;
+
 use auto_interrupt::AutoInterrupt;
 use domain::Domain;
 
@@ -85,10 +83,8 @@ pub struct Uninitialized {
 pub struct Ready {
     domain: Domain,
     resources: Resources,
-    system_reader: Reader<System>,
-    update_event_channel: watch::Sender<()>,
+    runtime: Arc<runtime::Handle>,
     patch_tx: Sender<Patch>,
-    writer_closed_rx: watch::Receiver<()>,
     worker_id: u64,
     generation: Arc<AtomicU64>,
 }
@@ -489,71 +485,23 @@ impl<O> Worker<O, Uninitialized> {
             domain, resources, ..
         } = self.inner;
 
-        // Create a new system with an initial state
-        let system = System::try_from(state)?;
+        // Create a new system with an initial state and resources
+        let mut system = System::try_from(state)?;
+        system.set_resources(resources.clone());
 
-        // Shared system protected by RwLock
-        let (system_reader, mut system_writer) = rw_lock(system);
+        // Spawn the runtime
+        let (runtime, patch_tx) = runtime::spawn(system);
 
-        // Create the state changes synchronization channel
-        // XXX: should the channel size configurable? Or should we make it unbounded at risk of running
-        // out of memory
-        let (patch_tx, mut patch_rx) = channel::<Patch>(100);
-
-        // Patch error signal (notify)
-        let (writer_closed_tx, writer_closed_rx) = watch::channel(());
-
-        // Broadcast channel for state updates
-        let (update_event_channel, _) = watch::channel(());
-
-        // Generate unique worker ID using random hash
+        // Generate unique worker ID
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hasher};
         let worker_id = RandomState::new().build_hasher().finish();
 
-        // Spawn system writer task
-        {
-            let update_event_tx = update_event_channel.clone();
-            tokio::spawn(
-                async move {
-                    // If the worker is dropped, then patch_tx will get dropped and
-                    // this task will terminate, causing update_event_tx to get dropped
-                    // and notifying the broadcast channel followers
-                    while let Some(mut msg) = patch_rx.recv().await {
-                        let changes = std::mem::take(&mut msg.data);
-                        trace!(received=%changes);
-
-                        let mut system = system_writer.write().await;
-                        if let Err(e) = system.patch(changes) {
-                            // we need to abort on patch failure a this means the
-                            // internal state may have become inconsistent and we cannot continue
-                            // applying changes
-                            error!("patch failed: {e}");
-
-                            // We drop the channel to let receivers know the writer task has closed
-                            drop(writer_closed_tx);
-                            break;
-                        }
-                        trace!("patch successful");
-
-                        // Notify worker followers, ignore errors if no receivers exist
-                        let _ = update_event_tx.send(());
-
-                        // yield back to the workflow
-                        msg.ack();
-                    }
-                }
-                .instrument(span!(Level::TRACE, "worker_writer", worker_id=%worker_id)),
-            );
-        }
-
         Ok(Worker::from_inner(Ready {
             domain,
             resources,
-            system_reader,
-            update_event_channel,
+            runtime: Arc::new(runtime),
             patch_tx,
-            writer_closed_rx,
             worker_id,
             generation: Arc::new(AtomicU64::new(0)),
         }))
@@ -595,20 +543,17 @@ impl<T> Stream for WorkerStream<T> {
 /// Returns a stream of updated states after each system change.
 ///
 /// The stream is best effort, meaning updates may be missed if the receiver lags behind.
-fn follow_worker<T>(
-    channel: watch::Sender<()>,
-    system_reader: Reader<System>,
-) -> impl Stream<Item = T>
+fn follow_worker<T>(runtime: &runtime::Handle) -> impl Stream<Item = T>
 where
     T: DeserializeOwned,
 {
-    let rx = channel.subscribe();
+    let rx = runtime.on_change();
+    let reader = runtime.reader().clone();
     WorkerStream::new(
         WatchStream::from_changes(rx)
             .then(move |_| {
-                let sys_reader = system_reader.clone();
+                let sys_reader = reader.clone();
                 async move {
-                    // Read the system state
                     let system = sys_reader.read().await;
                     system.state::<T>().ok()
                 }
@@ -631,7 +576,7 @@ impl<O: State> Worker<O, Ready> {
     where
         O: DeserializeOwned,
     {
-        let system = self.inner.system_reader.read().await;
+        let system = self.inner.runtime.reader().read().await;
         let state = system.state()?;
         Ok(state)
     }
@@ -674,10 +619,7 @@ impl<O: State> Worker<O, Ready> {
     where
         O: DeserializeOwned,
     {
-        follow_worker(
-            self.inner.update_event_channel.clone(),
-            self.inner.system_reader.clone(),
-        )
+        follow_worker(&self.inner.runtime)
     }
 
     /// Find a workflow to reach a target state
@@ -696,13 +638,13 @@ impl<O: State> Worker<O, Ready> {
 
         let Ready {
             domain,
-            system_reader: system_rwlock,
+            runtime,
             worker_id,
             generation,
             ..
         } = &self.inner;
 
-        let system = system_rwlock.read().await;
+        let system = runtime.reader().read().await;
         let current_generation = generation.load(Ordering::Acquire);
 
         let mut workflow = planner::find_workflow_to_target::<O>(domain, &system, &tgt)?;
@@ -732,20 +674,19 @@ impl<O: State> Worker<O, Ready> {
         interrupt: Interrupt,
     ) -> Result<SeekStatus> {
         let Ready {
-            system_reader,
+            resources,
+            runtime,
             patch_tx,
             worker_id,
             generation,
-            writer_closed_rx,
             ..
         } = &self.inner;
 
-        // do not execute the workflow if the writer task has closed
-        if writer_closed_rx.has_changed().is_err() {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                format!("worker ({worker_id}) is in an inconsistent state",),
-            ));
+        // Do not execute the workflow if the runtime has closed
+        if !runtime.is_running() {
+            return Err(Error::internal(format!(
+                "worker ({worker_id}) runtime is not running"
+            )));
         }
 
         // Validate workflow belongs to this worker
@@ -771,17 +712,21 @@ impl<O: State> Worker<O, Ready> {
             ));
         }
 
-        // TODO: Update system resources
-        // let mut system = { self.inner.system_reader.read().await.clone() };
-        // system.set_resources(resources.clone());
+        // Sync resources to runtime before execution
+        runtime.set_resources(resources.clone()).await;
 
-        let mut writer_closed_rx = writer_closed_rx.clone();
         let res = select! {
             biased;
-            _ = writer_closed_rx.changed() => {
-                return Err(Error::internal("state patch failed, worker state possibly tainted"));
+            reason = runtime.closed() => {
+                let err = if let Some(e) = reason {
+                    Error::internal(format!("runtime closed with error: {e}"))
+                }
+                else {
+                    Error::internal("runtime closed unexpectedly")
+                };
+                return Err(err);
             }
-            res = workflow.execute(system_reader, patch_tx.clone(), interrupt) => res
+            res = workflow.execute(runtime.reader(), patch_tx.clone(), interrupt) => res
         };
 
         // Increment generation after every workflow execution as
@@ -847,27 +792,24 @@ impl<O: State> Worker<O, Ready> {
 
         let Ready {
             domain,
-            system_reader: system_rwlock,
-            writer_closed_rx,
+            resources,
+            runtime,
             patch_tx,
             generation,
             worker_id,
             ..
         } = self.inner.clone();
 
-        // abort if the writer has closed
-        if writer_closed_rx.has_changed().is_err() {
+        // Abort if the runtime has closed
+        if !runtime.is_running() {
             return Err(Error::new(
                 ErrorKind::Internal,
-                format!("worker ({worker_id}) is in an inconsistent state",),
+                format!("worker {worker_id} is not running"),
             ));
         }
 
-        // TODO: Update system properties
-        // {
-        //     let mut system = self.inner.system_reader.write().await;
-        //     system.set_resources(resources);
-        // }
+        // Sync resources to runtime
+        runtime.set_resources(resources).await;
 
         enum InnerSeekResult {
             TargetReached,
@@ -882,7 +824,7 @@ impl<O: State> Worker<O, Ready> {
 
         async fn find_and_run_workflow<T: State>(
             domain: &Domain,
-            sys_reader: &Reader<System>,
+            runtime: &runtime::Handle,
             tgt: &Value,
             patch_tx: &Sender<Patch>,
             sigint: &Interrupt,
@@ -892,7 +834,7 @@ impl<O: State> Worker<O, Ready> {
             let now = Instant::now();
 
             let workflow = {
-                let system = sys_reader.read().await;
+                let system = runtime.reader().read().await;
                 let res = planner::find_workflow_to_target::<T>(domain, &system, tgt);
 
                 // Show pending changes at debug level
@@ -942,7 +884,7 @@ impl<O: State> Worker<O, Ready> {
             let now = Instant::now();
             info!("executing workflow");
             let res = workflow
-                .execute(sys_reader, patch_tx.clone(), sigint.clone())
+                .execute(runtime.reader(), patch_tx.clone(), sigint.clone())
                 .await
                 .map_err(InnerSeekError::Runtime);
 
@@ -966,11 +908,7 @@ impl<O: State> Worker<O, Ready> {
 
         // Main seek_with_interrupt planning and execution loop
         let handle: JoinHandle<Result<SeekStatus>> = {
-            let mut err_rx = writer_closed_rx;
             let interrupt = drop_interrupt.clone();
-            // No writing allowed on this copy of the system lock
-            let sys_reader = system_rwlock;
-            let patch_tx = patch_tx;
 
             // We spawn a task rather than looping directly so we can catch panics happening
             // within the loop
@@ -981,10 +919,16 @@ impl<O: State> Worker<O, Ready> {
                     loop {
                         let res = select! {
                             biased;
-                            _ = err_rx.changed() => {
-                                return Err(Error::internal("state patch failed, worker state possibly tainted"));
+                            reason = runtime.closed() => {
+                                let err = if let Some(e) = reason {
+                                    Error::internal(format!("runtime closed with error: {e}"))
+                                }
+                                else {
+                                        Error::internal("runtime closed unexpectedly")
+                                };
+                                return Err(err);
                             }
-                            res = find_and_run_workflow::<O>(&domain, &sys_reader, &tgt, &patch_tx, &interrupt, &generation) => res
+                            res = find_and_run_workflow::<O>(&domain, &runtime, &tgt, &patch_tx, &interrupt, &generation) => res
                         };
 
                         match res {
