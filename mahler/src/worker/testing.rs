@@ -139,7 +139,7 @@ impl<O: State, S: WorkerState + AsRef<Resources> + AsRef<Domain>> Worker<O, S> {
             while let Some(mut msg) = rx.recv().await {
                 let changes = std::mem::take(&mut msg.data);
                 let mut system = sys_writer.write().await;
-                system.patch(changes).unwrap();
+                system.patch(&changes).unwrap();
                 msg.ack();
             }
         });
