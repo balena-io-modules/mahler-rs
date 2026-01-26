@@ -457,6 +457,7 @@ mod system_ext;
 pub mod exception;
 pub mod extract;
 pub mod job;
+pub mod sensor;
 pub mod task;
 pub mod worker;
 
@@ -466,7 +467,7 @@ pub mod sync {
     // Only expose Interrupt publicly
     pub use mahler_core::sync::Interrupt;
 
-    pub(crate) use mahler_core::sync::{channel, rw_lock, Reader, Sender};
+    pub(crate) use mahler_core::sync::{channel, rw_lock, Reader, Sender, WithAck};
 }
 
 pub mod dag {

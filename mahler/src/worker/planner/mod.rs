@@ -332,7 +332,7 @@ fn try_task_into_workflow(
                     };
 
                 // Apply the task changes
-                cur_state.patch(Patch(task_changes.to_vec()))?;
+                cur_state.patch(&Patch(task_changes.to_vec()))?;
 
                 // Add the new dag to the list of branches and update the cummulative domain
                 plan_branches.push(partial_plan);
@@ -586,7 +586,7 @@ where
         } in candidates.into_iter().rev()
         {
             let mut new_state = cur_state.clone();
-            new_state.patch(Patch(changes))?;
+            new_state.patch(&Patch(changes))?;
 
             // Ignore the candidate if it takes us to a state the planner has visited before,
             // this avoids the planner just trying tasks in a different order or potentially

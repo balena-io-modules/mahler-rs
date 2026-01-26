@@ -20,7 +20,8 @@ use crate::job::Job;
 use crate::json::{Patch, Value};
 use crate::result::Result;
 use crate::runtime::{Resources, System};
-use crate::serde::de::DeserializeOwned;
+use crate::sensor::{Sensor, SensorHandler, SensorRouter};
+use crate::serde::{de::DeserializeOwned, Serialize};
 use crate::state::State;
 use crate::sync::{Interrupt, Sender};
 
@@ -71,6 +72,7 @@ pub trait WorkerState {}
 /// assigned to the Worker
 pub struct Uninitialized {
     domain: Domain,
+    sensors: SensorRouter,
     resources: Resources,
 }
 
@@ -83,7 +85,7 @@ pub struct Uninitialized {
 pub struct Ready {
     domain: Domain,
     resources: Resources,
-    runtime: Arc<runtime::Handle>,
+    runtime: runtime::Handle,
     patch_tx: Sender<Patch>,
     worker_id: u64,
     generation: Arc<AtomicU64>,
@@ -325,6 +327,7 @@ impl<O> Worker<O, Uninitialized> {
         Worker::from_inner(Uninitialized {
             domain: Domain::new(),
             resources: Resources::new(),
+            sensors: SensorRouter::new(),
         })
     }
 }
@@ -441,6 +444,43 @@ impl<O> Worker<O, Uninitialized> {
         self
     }
 
+    /// Configure a new [Sensor](`crate::sensor::Sensor`) to be set up by the
+    /// worker runtime whenever a state matching the sensor path is created in the system.
+    ///
+    /// # Example
+    ///
+    /// ```rust, no_run
+    /// use mahler::extract::Args;
+    /// use mahler::state::State;
+    /// use mahler::worker::{Worker, Uninitialized};
+    /// use tokio_stream::Stream;
+    ///
+    /// #[derive(State)]
+    /// struct HomeHeating;
+    ///
+    /// fn temperature_monitor(Args(room): Args<String>) -> impl Stream<Item = i32> {
+    ///     tokio_stream::iter(vec![20, 21, 22])
+    /// }
+    ///
+    /// let worker: Worker<HomeHeating, Uninitialized> = Worker::new()
+    ///         // add a temperature sensor to any new configured room in the home heating system
+    ///         .sensor("/rooms/{room}/temperature", temperature_monitor);
+    /// ```
+    pub fn sensor<H, T, U>(mut self, route: &'static str, sensor: H) -> Self
+    where
+        H: SensorHandler<T, U>,
+        U: Serialize + 'static,
+    {
+        let Uninitialized {
+            ref mut sensors, ..
+        } = self.inner;
+
+        // insert the sensor replacing the route
+        sensors.insert(route, Sensor::new(sensor));
+
+        self
+    }
+
     /// Add a list if jobs linked to the same route on the worker domain
     ///
     /// This is a convenience method to simplify the configuration of multiple jobs
@@ -482,7 +522,9 @@ impl<O> Worker<O, Uninitialized> {
         O: State,
     {
         let Uninitialized {
-            domain, resources, ..
+            domain,
+            resources,
+            sensors,
         } = self.inner;
 
         // Create a new system with an initial state and resources
@@ -490,7 +532,7 @@ impl<O> Worker<O, Uninitialized> {
         system.set_resources(resources.clone());
 
         // Spawn the runtime
-        let (runtime, patch_tx) = runtime::spawn(system);
+        let (runtime, patch_tx) = runtime::spawn(system, sensors);
 
         // Generate unique worker ID
         use std::collections::hash_map::RandomState;
@@ -500,7 +542,7 @@ impl<O> Worker<O, Uninitialized> {
         Ok(Worker::from_inner(Ready {
             domain,
             resources,
-            runtime: Arc::new(runtime),
+            runtime,
             patch_tx,
             worker_id,
             generation: Arc::new(AtomicU64::new(0)),
@@ -719,7 +761,7 @@ impl<O: State> Worker<O, Ready> {
             biased;
             reason = runtime.closed() => {
                 let err = if let Some(e) = reason {
-                    Error::internal(format!("runtime closed with error: {e}"))
+                    Error::internal(format!("runtime failed: {e}"))
                 }
                 else {
                     Error::internal("runtime closed unexpectedly")
@@ -921,10 +963,10 @@ impl<O: State> Worker<O, Ready> {
                             biased;
                             reason = runtime.closed() => {
                                 let err = if let Some(e) = reason {
-                                    Error::internal(format!("runtime closed with error: {e}"))
+                                    Error::internal(format!("runtime failed: {e}"))
                                 }
                                 else {
-                                        Error::internal("runtime closed unexpectedly")
+                                    Error::internal("runtime closed unexpectedly")
                                 };
                                 return Err(err);
                             }
@@ -1034,7 +1076,7 @@ mod tests {
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct Counters(HashMap<String, i32>);
 
     impl State for Counters {
@@ -1567,5 +1609,244 @@ mod tests {
         assert_eq!(results[1], 2);
         assert_eq!(results[2], 3);
         assert_eq!(results[3], 0);
+    }
+
+    // ==================== Sensor Tests ====================
+    #[tokio::test]
+    async fn test_sensor_updates_state_via_follow() {
+        init();
+
+        // Simple state with just temperature
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct TempState {
+            temperature: i32,
+        }
+
+        impl State for TempState {
+            type Target = Self;
+        }
+
+        let worker: Worker<TempState, _> = Worker::new()
+            .sensor("/temperature", || {
+                async_stream::stream! {
+                    for temp in [25, 26, 27] {
+                        yield temp;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            })
+            .initial_state(TempState { temperature: 20 })
+            .unwrap();
+
+        // Follow state updates
+        let mut updates = worker.follow();
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                // Collect updates until we get the expected values or timeout
+                while let Some(state) = updates.next().await {
+                    res.push(state.temperature);
+                    if res.len() >= 3 {
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Wait for sensor updates to be processed
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let results = results.read().await;
+        assert!(
+            results.len() >= 3,
+            "Expected at least 3 sensor updates, got {}: {:?}",
+            results.len(),
+            &results
+        );
+
+        // Verify we got the sensor values
+        assert_eq!(results[0], 25);
+        assert_eq!(results[1], 26);
+        assert_eq!(results[2], 27);
+    }
+
+    #[tokio::test]
+    async fn test_sensor_subscription_created_on_state_change() {
+        init();
+
+        // State where sensor matches a nested path using HashMap of simple values
+        // Job to create/update a counter
+        fn set_counter(counter: View<Option<i32>>, Target(tgt): Target<i32>) -> View<i32> {
+            counter.create(tgt)
+        }
+
+        let worker: Worker<Counters, _> = Worker::new()
+            .job("/{name}", create(set_counter))
+            .sensor("/{name}", || {
+                async_stream::stream! {
+                    // Emit updated values - sensor starts after path is created
+                    for val in [100, 101, 102] {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        yield val;
+                    }
+                }
+            })
+            .initial_state(Counters(HashMap::new()))
+            .unwrap();
+
+        // Follow state updates
+        let mut updates = worker.follow();
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                while let Some(state) = updates.next().await {
+                    res.push(state.clone());
+                    // Stop after we see sensor updates reach 102
+                    if state.0.get("newkey") == Some(&102) {
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Create a new counter which should trigger sensor subscription
+        let mut worker = worker;
+        let status = worker
+            .seek_target(Counters(HashMap::from([("newkey".to_string(), 50)])))
+            .await
+            .unwrap();
+
+        assert_eq!(status, SeekStatus::Success);
+
+        // Wait for sensor updates
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let results = results.read().await;
+
+        // We should see: initial creation (50), then sensor updates (100, 101, 102)
+        assert!(
+            results.len() >= 2,
+            "Expected at least 2 updates (creation + sensor), got {}: {:?}",
+            results.len(),
+            &results
+        );
+
+        // The sensor should have updated the value
+        let last = results.last().unwrap();
+        assert!(
+            last.0.get("newkey").copied().unwrap_or(0) >= 100,
+            "Expected sensor to update value, got: {:?}",
+            last
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sensor_updates_ignored_for_nonexistent_paths() {
+        init();
+
+        // This tests that sensor updates for paths that no longer exist are ignored
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct SimpleState {
+            value: i32,
+        }
+
+        impl State for SimpleState {
+            type Target = Self;
+        }
+
+        // Sensor that emits values
+        let sensor_fn = || {
+            async_stream::stream! {
+                for v in [100, 200, 300] {
+                    yield v;
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+            }
+        };
+
+        let worker: Worker<SimpleState, _> = Worker::new()
+            .sensor("/value", sensor_fn)
+            .initial_state(SimpleState { value: 0 })
+            .unwrap();
+
+        // Follow updates
+        let mut updates = worker.follow();
+
+        // Collect first update
+        let first = timeout(Duration::from_millis(100), updates.next())
+            .await
+            .expect("timeout waiting for first update");
+
+        assert!(first.is_some());
+        assert_eq!(first.unwrap().value, 100);
+    }
+
+    #[tokio::test]
+    async fn test_sensor_initial_subscription_for_existing_state() {
+        init();
+
+        // Tests that sensors are created for paths that exist at startup
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct InitialState {
+            temperature: i32,
+            humidity: i32,
+        }
+
+        impl State for InitialState {
+            type Target = Self;
+        }
+
+        // Track which sensors were created
+        let created = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+        let created_temp = Arc::clone(&created);
+        let temp_sensor = move || {
+            let created = Arc::clone(&created_temp);
+            async_stream::stream! {
+                {
+                    let mut c = created.write().await;
+                    c.push("temperature".to_string());
+                }
+                yield 25;
+            }
+        };
+
+        let created_humid = Arc::clone(&created);
+        let humidity_sensor = move || {
+            let created = Arc::clone(&created_humid);
+            async_stream::stream! {
+                {
+                    let mut c = created.write().await;
+                    c.push("humidity".to_string());
+                }
+                yield 60;
+            }
+        };
+
+        let _worker: Worker<InitialState, _> = Worker::new()
+            .sensor("/temperature", temp_sensor)
+            .sensor("/humidity", humidity_sensor)
+            .initial_state(InitialState {
+                temperature: 20,
+                humidity: 50,
+            })
+            .unwrap();
+
+        // Wait for sensors to initialize
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let created = created.read().await;
+        assert!(
+            created.contains(&"temperature".to_string()),
+            "temperature sensor not created"
+        );
+        assert!(
+            created.contains(&"humidity".to_string()),
+            "humidity sensor not created"
+        );
     }
 }
