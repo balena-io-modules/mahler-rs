@@ -20,15 +20,15 @@ pub enum ErrorKind {
     /// A condition was not met to run this Job
     ConditionNotMet,
     /// The Job referenced by method could no be found in the worker domain.
-    NotFound,
+    UnregisteredJob,
     /// An argument required for the job is missing in method invocation
     MissingArgs,
+    /// Max search depth exceeded during. Usually caused by an underspecified job
+    PlanningOverflow,
     /// An I/O error happened with the job at runtime
     Runtime,
     /// An internal error happened, this is probably a bug in mahler or one of its dependencies
     Internal,
-    /// An input to the worker is not valid
-    InvalidInput,
 }
 
 impl ErrorKind {
@@ -39,11 +39,11 @@ impl ErrorKind {
             InvalidRoute => "invalid route",
             CannotDeserializeArg => "argument cannot be deserialized into target type",
             ConditionNotMet => "condition failed",
-            NotFound => "job not found",
+            UnregisteredJob => "job not found",
             MissingArgs => "missing arguments",
+            PlanningOverflow => "max search depth reached during planning",
             Runtime => "runtime error",
             Internal => "internal error",
-            InvalidInput => "invalid input",
         }
     }
 }

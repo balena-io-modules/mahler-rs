@@ -28,7 +28,7 @@ impl<'a, T> Deref for ReadGuard<'a, T> {
 pub struct Reader<T>(Arc<RwLock<T>>);
 
 impl<T> Reader<T> {
-    /// Locks the RwLock with shared read access, causing the current task to yield utnil the lock
+    /// Locks the RwLock with shared read access, causing the current task to yield until the lock
     /// has been acquired.
     ///
     /// The calling task will yield until there are no writers which hold the lock.

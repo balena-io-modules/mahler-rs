@@ -130,9 +130,11 @@ impl<T> Iterator for Iter<T> {
 /// }
 ///
 /// // Setup the worker domain and resources
-/// let worker: Worker<i32> = Worker::new()
-///                 .job("", update(plus_one).with_description(|| "+1"));
-/// let workflow = worker.find_workflow(0, 2).unwrap();
+/// let worker = Worker::new()
+///                 .job("", update(plus_one).with_description(|| "+1"))
+///                 .initial_state(0)
+///                 .unwrap();
+/// let workflow = worker.find_workflow(2).unwrap().unwrap();
 ///
 /// // We expect a linear DAG with two tasks
 /// let expected: Dag<&str> = seq!("+1", "+1");

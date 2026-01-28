@@ -1,4 +1,63 @@
-//! Sensor handler trait and implementations
+//! Types for defining sensors to monitor the system state
+//!
+//! Sensors provide a way to monitor the system state before, during and after a workflow is being
+//! executed. They allow users to get notified of system changes and take action if needed.
+//!
+//! A sensor is a function that accepts zero or more extractors and returns a stream of values. The
+//! values returned by the sensor will be used to update the system state at the location defined
+//! by the sensor.
+//!
+//! # Example
+//!
+//! ```rust
+//! use std::time::Duration;
+//! use std::pin::pin;
+//!
+//! use mahler::state::{State, Map, List, map};
+//! use mahler::extract::{Args};
+//! use mahler::worker::Worker;
+//!
+//! use tokio_stream::{Stream, StreamExt};
+//!
+//! #[derive(State, Debug)]
+//! struct ClimateControl {
+//!     /// A mapping of room and their temperature
+//!     rooms: Map<String, i32>,
+//! }
+//!
+//! async fn temperature(room_name: String) -> i32 {
+//!     todo!("read temperature for {room_name}")
+//! }
+//!
+//! fn monitor_room(Args(room_name): Args<String>) -> impl Stream<Item = i32> {
+//!     async_stream::stream! {
+//!         // yield the room temperature every second
+//!         yield temperature(room_name).await;
+//!         tokio::time::sleep(Duration::from_millis(1000)).await;
+//!     }
+//! }
+//!
+//!
+//! # async fn test_sensor_example() -> Result<(), Box<dyn std::error::Error>> {
+//! let worker = Worker::new()
+//!         // add a generic sensor to monitor any room
+//!         .sensor("/rooms/{room_name}", monitor_room)
+//!         .initial_state(ClimateControl {
+//!             rooms: map![
+//!                 "bedroom".to_string() => 10,
+//!                 "kitchen".to_string() => 10,
+//!             ]
+//!         })?;
+//!
+//! // listen to temperature changes
+//! let mut listen_stream = pin!(worker.listen());
+//! while let Some(state) = listen_stream.next().await {
+//!     let state = state?;
+//!     println!("new state received: {state:?}");
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use std::fmt;
 use std::pin::Pin;
@@ -18,12 +77,12 @@ pub type SensorStream = Pin<Box<dyn Stream<Item = Result<Value>> + Send + 'stati
 
 /// Trait for functions that can be converted into sensors
 ///
-/// A SensorHandler is any function that accepts zero or more "[system extractors](`FromSystem`)" as
+/// A SensorBuilder is any function that accepts zero or more [extractors](`FromSystem`) as
 /// arguments and returns something that can be converted into a [`Stream`] of values.
 ///
-/// Note that the handler is called when the sensor is initialized, where system extractors
-/// contain the state of the system at that point in time.
-pub trait SensorHandler<T, U>: Clone + Sync + Send + 'static {
+/// Note that the builder is only called when the sensor is initialized, thus system extractors
+/// will only contain the state of the system at that point in time.
+pub trait SensorBuilder<T, U>: Clone + Sync + Send + 'static {
     /// Create the sensor stream from the given context
     ///
     /// This is called when subscribing to a sensor for a specific path.
@@ -74,7 +133,7 @@ macro_rules! impl_sensor_handler {
         $($ty:ident),*
     ) => {
         #[allow(non_snake_case, unused)]
-        impl<F, $($ty,)* U, S> SensorHandler<($($ty,)*), U> for F
+        impl<F, $($ty,)* U, S> SensorBuilder<($($ty,)*), U> for F
         where
             F: Fn($($ty,)*) -> S + Clone + Send + Sync + 'static,
             S: IntoSensorStream<U>,
@@ -104,7 +163,7 @@ impl_sensor_handler!(T1, T2, T3, T4, T5, T6, T7);
 impl_sensor_handler!(T1, T2, T3, T4, T5, T6, T7, T8);
 
 /// Type alias for the sensor factory function
-type SensorFactory = Arc<dyn Fn(&System, &Context) -> Result<SensorStream> + Send + Sync>;
+type SensorBuilderRef = Arc<dyn Fn(&System, &Context) -> Result<SensorStream> + Send + Sync>;
 
 /// A sensor that monitors external state and pushes updates
 ///
@@ -112,24 +171,24 @@ type SensorFactory = Arc<dyn Fn(&System, &Context) -> Result<SensorStream> + Sen
 #[derive(Clone)]
 pub(crate) struct Sensor {
     pub id: &'static str,
-    factory: SensorFactory,
+    builder: SensorBuilderRef,
 }
 
 impl Sensor {
     /// Create a new sensor from a handler
     pub fn new<H, T, U>(handler: H) -> Self
     where
-        H: SensorHandler<T, U>,
+        H: SensorBuilder<T, U>,
     {
         Sensor {
             id: std::any::type_name::<H>(),
-            factory: Arc::new(move |system, context| handler.call(system, context)),
+            builder: Arc::new(move |system, context| handler.call(system, context)),
         }
     }
 
     /// Create a sensor stream for the given context
     pub fn create_stream(&self, system: &System, context: &Context) -> Result<SensorStream> {
-        (self.factory)(system, context)
+        (self.builder)(system, context)
     }
 }
 

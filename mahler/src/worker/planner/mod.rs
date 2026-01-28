@@ -1,14 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use json_patch::diff;
 use jsonptr::PointerBuf;
 use tracing::{field, instrument, trace, trace_span, warn, Span};
 
 use crate::dag::Dag;
 use crate::error::{Error, ErrorKind};
-use crate::json::{Operation, OperationMatcher, Patch, PatchOperation, Path, Value};
+use crate::json::{OperationMatcher, Patch, PatchOperation, Path, Value};
+use crate::result::Result;
 use crate::runtime::{Context, System};
 use crate::state::State;
 use crate::system_ext::SystemExt;
@@ -154,37 +153,6 @@ impl Ord for Candidate {
     }
 }
 
-/// A planning error
-///
-/// Planning may be interrupted early because of a bug in a job definition or it
-/// may fail because there is no valid combination of jobs in the domain to reach the desired
-/// target.
-#[derive(Debug)]
-pub enum PlanningError {
-    /// Search was interrupted early due to an error in one of the job definitions
-    Aborted(Error),
-    /// No combination of jobs was found for the give set of changes
-    NotFound(Vec<Operation>),
-}
-
-impl fmt::Display for PlanningError {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let PlanningError::Aborted(reason) = self {
-            write!(fmt, "workflow not found: {reason}")
-        } else {
-            write!(fmt, "workflow not found")
-        }
-    }
-}
-
-impl std::error::Error for PlanningError {}
-
-impl From<Error> for PlanningError {
-    fn from(e: Error) -> Self {
-        PlanningError::Aborted(e)
-    }
-}
-
 /// Convert the task into a workflow if possible
 ///
 /// For primitive tasks, the workflow will just contain a single node, however
@@ -195,12 +163,7 @@ impl From<Error> for PlanningError {
 /// * `db` - a reference to the worker [`Domain`]
 /// * `task` - the task to convert to a workflow
 /// * `cur_state` - the state of the system before running the task
-#[cfg(debug_assertions)]
-pub fn find_workflow_for_task(
-    mut task: Task,
-    db: &Domain,
-    cur_state: &System,
-) -> Result<Workflow, Error> {
+pub fn find_workflow_for_task(mut task: Task, db: &Domain, cur_state: &System) -> Result<Workflow> {
     // Look-up the task on the domain to find its path
     let task_id = task.id();
     let Context { args, .. } = task.context_mut();
@@ -234,7 +197,7 @@ fn try_task_into_workflow(
     cur_state: &System,
     domain: &mut BTreeSet<Path>,
     changes: &mut Vec<PatchOperation>,
-) -> Result<Dag<WorkUnit>, Error> {
+) -> Result<Dag<WorkUnit>> {
     match task {
         Task::Action(action) => {
             let work_id = WorkUnit::new_id(action, cur_state.inner_state());
@@ -359,18 +322,11 @@ pub fn find_workflow_to_target<T>(
     db: &Domain,
     system: &System,
     tgt: &Value,
-) -> Result<Workflow, PlanningError>
+) -> Result<Option<Workflow>>
 where
     T: State,
 {
     trace!(initial=%system, target=%tgt, "searching for workflow");
-
-    // calculate the distance to the target at the beginning of the search
-    let ini = system
-        .state::<T::Target>()
-        .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
-    let Patch(changes) = diff(&ini, tgt);
-    let changes: Vec<Operation> = changes.into_iter().map(Operation::from).collect();
 
     // The search stack stores (current_state, current_plan, depth)
     let mut stack = vec![(system.clone(), Dag::default(), 0)];
@@ -385,7 +341,7 @@ where
         // Prevent infinite recursion (e.g., from buggy tasks or recursive methods)
         if depth >= 256 {
             warn!(parent: &find_workflow_span, "reached max search depth (256)");
-            return Err(PlanningError::NotFound(changes));
+            return Err(ErrorKind::PlanningOverflow.into());
         }
 
         // Normalize state: deserialize into the target type and re-serialize to remove internal fields
@@ -404,8 +360,7 @@ where
             // we need to reverse the plan before returning
             let mut workflow = Workflow::new(cur_plan.reverse());
             workflow.ignored = skipped_state_paths;
-            workflow.operations = changes;
-            return Ok(workflow);
+            return Ok(Some(workflow));
         }
 
         let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
@@ -484,20 +439,9 @@ where
                             // Skip the task if condition is not met
                             ErrorKind::ConditionNotMet => {}
                             // Critical internal errors terminate the search
-                            ErrorKind::Internal => return Err(e)?,
+                            ErrorKind::Internal => return Err(e),
                             // Other job errors are ignored unless debugging
-                            _ => {
-                                if cfg!(debug_assertions) {
-                                    return Err(e.into());
-                                }
-                                warn!(
-                                    parent: &find_workflow_span,
-                                    "task {} failed: {} ... ignoring",
-                                    task.id(),
-                                    e
-                                );
-                                return Err(e.into());
-                            }
+                            _ => return Err(e),
                         },
 
                         // ignore if changes is empty
@@ -618,7 +562,7 @@ where
     }
 
     // No candidate plan reached the goal state
-    Err(PlanningError::NotFound(changes))?
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -694,7 +638,7 @@ mod tests {
         counter
     }
 
-    pub fn find_plan<T>(db: &Domain, cur: T, tgt: T::Target) -> Result<Workflow, PlanningError>
+    pub fn find_plan<T>(db: &Domain, cur: T, tgt: T::Target) -> Result<Option<Workflow>>
     where
         T: State,
     {
@@ -713,7 +657,7 @@ mod tests {
             .job("", update(plus_one))
             .job("", update(minus_one));
 
-        let workflow = find_plan(&domain, 0, 2).unwrap();
+        let workflow = find_plan(&domain, 0, 2).unwrap().unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -730,7 +674,7 @@ mod tests {
 
         let workflow = find_plan(&domain, 0, 2);
 
-        assert!(matches!(workflow, Err(PlanningError::NotFound(_))));
+        assert!(matches!(workflow, Ok(None)));
     }
 
     #[test]
@@ -750,7 +694,7 @@ mod tests {
             .job("", update(plus_two))
             .job("", none(plus_one));
 
-        let workflow = find_plan(&domain, 0, 2).unwrap();
+        let workflow = find_plan(&domain, 0, 2).unwrap().unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -784,7 +728,7 @@ mod tests {
             .job("/counters/{counter}", update(minus_one))
             .job("/counters/{counter}", update(plus_one));
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect counters to be updated concurrently
         let expected: Dag<&str> = par!(
@@ -821,7 +765,7 @@ mod tests {
             .job("/counters/{counter}", none(plus_one))
             .job("/counters/{counter}", update(plus_two));
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(
@@ -862,7 +806,7 @@ mod tests {
             .job("/counters/{counter}", none(plus_two))
             .job("/counters/{counter}", update(plus_three));
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -891,7 +835,7 @@ mod tests {
             .job("/{counter}", none(plus_one))
             .job("/{counter}", update(plus_other));
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect a parallel dag for this specific target
         let expected: Dag<&str> = par!(
@@ -1030,8 +974,12 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target);
-        assert!(workflow.is_err(), "unexpected plan:\n{}", workflow.unwrap());
+        let workflow = find_plan(&domain, initial, target).unwrap();
+        assert!(
+            workflow.is_none(),
+            "unexpected plan:\n{}",
+            workflow.unwrap()
+        );
     }
 
     #[test]
@@ -1115,7 +1063,7 @@ mod tests {
         )
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         let expected: Dag<&str> = seq!(
             "create image 'ubuntu'",
@@ -1186,7 +1134,7 @@ mod tests {
         )
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         let expected: Dag<&str> = par!("update configurations", "create counter 'one'");
         assert_eq!(expected.to_string(), workflow.to_string());
@@ -1272,7 +1220,7 @@ mod tests {
             ]),
         };
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(seq!("a++", "a++"), seq!("b++", "b++"))
@@ -1362,7 +1310,7 @@ mod tests {
             ]),
         };
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Should run concurrently because different array elements and map keys don't conflict
         let expected: Dag<&str> = par!("mahler::worker::planner::tests::test_array_element_conflicts::update_config(/configs/database)",
@@ -1620,7 +1568,7 @@ mod tests {
             ]),
         };
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
         let expected: Dag<&str> = seq!(
             "unstack block C",
             "put down block C",
@@ -1840,7 +1788,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Service "two" should be skipped because it failed
         let expected: Dag<&str> = par!("start service one", "start service three");
@@ -1925,7 +1873,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // App "foo" should be skipped because it's pinned to 1.0
         let expected: Dag<&str> = par!("update app bar", "update app baz");
@@ -2010,7 +1958,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Resource "a" update should be skipped, but "b" should be updated
         let expected: Dag<&str> = seq!("update resource b");
@@ -2031,7 +1979,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Resource "c" should be created even though value is negative
         let expected: Dag<&str> = seq!("create resource c");
@@ -2156,7 +2104,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Service "web" and config "host" should be skipped
         // Check that both tasks are present (order may vary)
@@ -2235,7 +2183,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Items "protected" and "system" should be skipped
         let expected: Dag<&str> = par!("update item normal", "update item user");
@@ -2337,7 +2285,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // App "api" should be skipped because node:14 image is not available
         let expected: Dag<&str> = par!("update app web", "update app worker");
@@ -2439,7 +2387,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Container "a" and all its nested fields should be skipped
         let expected: Dag<&str> =

@@ -187,7 +187,7 @@ impl Domain {
             Ok(final_route)
         } else {
             Err(Error::new(
-                ErrorKind::NotFound,
+                ErrorKind::UnregisteredJob,
                 format!("{task_id} not in domain"),
             ))
         }

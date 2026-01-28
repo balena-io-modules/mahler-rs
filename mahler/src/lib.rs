@@ -28,7 +28,7 @@
 //! The only way to control the worker and effect changes into the controlled system is to provide
 //! the worker with a target state.
 //!
-//! ```rust,no_run
+//! ```rust
 //! use mahler::state::State;
 //! use mahler::worker::Worker;
 //! use mahler::job::{create, update};
@@ -36,23 +36,23 @@
 //! #[derive(State)]
 //! struct MySystem;
 //!
+//! fn global() {}
+//! fn foo() {}
+//! fn foo_bar() {}
+//!
+//! # async fn test_worker_example_0() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut worker = Worker::new()
 //!         // assign possible jobs to worker
 //!         .job("", update(global))
 //!         .job("/{foo}", update(foo))
 //!         .job("/{foo}/{bar}", create(foo_bar))
 //!         // initialize the worker state
-//!         .initial_state(MySystem {/* .. */})
-//!         .unwrap();
+//!         .initial_state(MySystem {/* .. */})?;
 //!
-//! fn global() {}
-//! fn foo() {}
-//! fn foo_bar() {}
-//!
-//! # tokio_test::block_on(async {
 //! // Control the system by providing a new target state
-//! worker.seek_target(MySystemTarget { /* .. */ }).await.unwrap();
-//! # })
+//! let (state, workflow_status) = worker.seek_target(MySystemTarget { /* .. */ }).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! When comparing the internal state with the target, the Worker's planner will generate a list of
@@ -117,7 +117,7 @@
 //! file descriptor, etc.). These can be provided when creating the worker, with the only
 //! restriction is that these structures must be `Send` and `Sync`.
 //!
-//! ```rust,no_run
+//! ```rust
 //! use mahler::state::State;
 //! use mahler::extract::Res;
 //! use mahler::job::update;
@@ -133,13 +133,15 @@
 //! // Tasks can make use of resources via the `Res` extractor
 //! fn some_task(conn: Res<MyConnection>) {}
 //!
+//! # async fn test_worker_example_0() -> Result<(), Box<dyn std::error::Error>> {
 //! let conn = MyConnection {/* .. */};
 //!
 //! let worker = Worker::new()
 //!         .resource::<MyConnection>(conn)
 //!         .job("/", update(some_task))
-//!         .initial_state(MySystem {/* .. */})
-//!         .unwrap();
+//!         .initial_state(MySystem {/* .. */})?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Note that only one resource of each type can be provided to the worker.
@@ -389,62 +391,72 @@
 //! error if there is a problem with serialization or if an error happens at planning or there is
 //! an internal error. If an error happens at workflow execution, the method will not return an
 //! error but terminate with an [Aborted](`worker::SeekStatus::Aborted`) value, which will include
-//! a [`Vec`] of all I/O errors that happen during the workflow execution with the
-//! [ErrorKind::Runtime](`error::ErrorKind::Runtime`) type.
-//!
-//! # Monitoring system state
-//!
-//! The [Worker](`worker::Worker`) provides a [follow](`worker::Worker::follow`) method, returning a
-//! stream of state updates. A new value will be produced on the stream every time the internal
-//! worker state changes.
+//! a [`Vec`] of all errors that happened during the workflow execution with the either
+//! [ErrorKind::Runtime](`error::ErrorKind::Runtime`) type or the
+//! [ErrorKind:ConditionNotMet](`error::ErrorKind::ConditionNotMet`) type.
 //!
 //! # Observability
 //!
-//! For detailed Worker observability, mahler is instrumented with the [tracing](https://crates.io/crates/tracing)
-//! crate to report on the operation and progress of the Worker planning and workflow execution
-//! stages. These events can be processed using the [tracing_subscriber](https://crates.io/crates/tracing_subscriber) crate
-//! to produce structured or human readable logs.
+//! The [Worker::seek_target](`worker::Worker::seek_target`) method is instrumented using the [tracing](https://crates.io/crates/tracing)
+//! crate to report on the operation and progress of the Worker planning and workflow execution. These events can be processed using the
+//! [tracing_subscriber](https://crates.io/crates/tracing_subscriber) crate to produce structured or human readable logs.
 //!
-//! Key log levels:
-//! - **INFO**: Workflow events, task execution
-//! - **DEBUG**: Detailed planning information, state changes
-//! - **WARN**: Task failures, interruptions
-//! - **ERROR**: Fatal errors
-//! - **TRACE**: Planner and internal worker operation
+//! For additional control and a more granular view of system changes during Worker operation, the [find_workflow](`worker::Worker::find_workflow`) and
+//! [run_workflow](`worker::Worker::run_workflow`) [Worker](`worker::Worker`) methods can be used.
 //!
-//! ```rust,no_run
-//! use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+//! - [find_workflow](`worker::Worker::find_workflow`) looks up a workflow to a given target.
+//! - [run_workflow](`worker::Worker::run_workflow`) consumes the worker and the given workflow and
+//!   return a stream of [events](`worker::WorkerEvent`), indicating a new system state or the
+//!   workflow execution completion. Note that if the worker has [sensors](`sensor`) defined, the
+//!   stream will continue producing values even after workflow completion.
 //!
-//! // Initialize tracing subscriber with recommended formatting
-//! tracing_subscriber::registry()
-//!     .with(EnvFilter::from_default_env())
-//!     .with(
-//!         fmt::layer()
-//!             .with_span_events(fmt::format::FmtSpan::CLOSE)
-//!             .event_format(fmt::format().compact().with_target(false)),
-//!     )
-//!     .init();
-//! ```
+//! Similarly, to only monitor the system and not produce changes, the [Worker](`worker::Worker`)
+//! exposes a [listen](`worker::Worker::listen`) method that produces values from sensors as a
+//! stream (if any).
 //!
 //! # Testing
 //!
-//! When `debug_assertions` is enabled, mahler exposes two testing methods for [Worker](`worker::Worker`).
-//! - [find_workflow](`worker::Worker::find_workflow`) allows to generate a Workflow for a given
-//!   initial and target state. The workflow can be compared with a manually created [DAG](`dag::Dag`) to
-//!   test against an expected plan.
-//! - [run_task](`worker::Worker::run_task`) allows to run a task in the context of a worker. This
-//!   may be helpful to diagnose any extraction/expansion errors with the task definition or for
-//!   debugging of a specific task.
+//! The [find_workflow](`worker::Worker::find_workflow`) and [run_task](`worker::Worker::run_task`)
+//! methods of [Worker](`worker::Worker`) can also be used for respectively testing the configuration of the
+//! workerby comparing the generated plans against some expectations and implementation of tasks.
 //!
-//! It also exposes the following workflow types and macros
+//! The library exposes the following workflow types and macros for this purpose
+//!
 //! - [Dag](`struct@dag::Dag`) an DAG implementation used internally by mahler.
 //! - [dag](`dag::dag!`) a declarative macro to combine DAGs into branches
 //! - [seq](`dag::seq`) a declarative macro to create a linear DAG from a list of values
 //! - [par](`dag::par`) a declarative macro to create a branching DAG with single value
 //!   branches
-//!   
-//! These utils can be used for testing and comparing generated workflows with specific DAGs. See
-//! [find_workflow](`worker::Worker::find_workflow`) for more info.
+//!
+//! ```rust
+//! use mahler::task::{IO, with_io};
+//! use mahler::extract::{View, Target};
+//! use mahler::worker::Worker;
+//! use mahler::dag::{Dag, seq};
+//! use mahler::job::update;
+//!
+//! fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
+//!    if *counter < tgt {
+//!        // Modify the counter if we are below target
+//!        *counter += 1;
+//!    }
+//!
+//!    // Return the updated counter
+//!    with_io(counter, |counter| async {
+//!        Ok(counter)
+//!    })
+//! }
+//!
+//! // Setup the worker domain and resources
+//! let worker = Worker::new()
+//!                 .job("", update(plus_one).with_description(|| "+1"))
+//!                 .initial_state(0).unwrap();
+//! let workflow = worker.find_workflow(2).unwrap().unwrap();
+//!
+//! // We expect a linear DAG with two tasks
+//! let expected: Dag<&str> = seq!("+1", "+1");
+//! assert_eq!(workflow.to_string(), expected.to_string());
+//! ```
 pub use mahler_core::error;
 pub use mahler_core::json;
 pub use mahler_core::result;
@@ -467,7 +479,7 @@ pub mod sync {
     // Only expose Interrupt publicly
     pub use mahler_core::sync::Interrupt;
 
-    pub(crate) use mahler_core::sync::{channel, rw_lock, Reader, Sender, WithAck};
+    pub(crate) use mahler_core::sync::{channel, rw_lock, Reader, Sender, WithAck, Writer};
 }
 
 pub mod dag {

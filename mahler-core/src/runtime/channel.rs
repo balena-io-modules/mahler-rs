@@ -8,7 +8,6 @@ use crate::sync::Sender;
 /// The `Channel` allows tasks to send state changes back to the worker during execution,
 /// enabling real-time progress updates. This can be used by extractors to propagate changes
 /// during operation.
-/// ```
 #[derive(Clone)]
 pub struct Channel(Option<Sender<Patch>>);
 

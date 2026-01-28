@@ -8,7 +8,7 @@ use mahler::job::update;
 use mahler::result::Result;
 use mahler::state::{Map, State};
 use mahler::task::{with_io, Handler, Task, IO};
-use mahler::worker::Worker;
+use mahler::worker::{SeekStatus, Worker};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 // The state model needs to be Serializable and Deserializable
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mut worker = Worker::new()
+    let worker = Worker::new()
         // The jobs are applicable to `UPDATE` operations
         // on individual counters
         .job(
@@ -87,18 +87,14 @@ async fn main() -> Result<()> {
 
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
-    let _status = worker
+    let (state, status) = worker
         .seek_target(CountersTarget(Map::from([
             ("a".to_string(), 1),
             ("b".to_string(), 2),
         ])))
         .await?;
 
-    // Get the internal state from the Worker. The worker
-    // is idle but the state may not be static so we need
-    // to use an await to get the current state.
-    let state = worker.state().await?;
-
+    assert_eq!(status, SeekStatus::Success);
     assert_eq!(
         state,
         Counters(Map::from([("a".to_string(), 1), ("b".to_string(), 2),]))
