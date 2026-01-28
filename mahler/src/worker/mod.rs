@@ -2,17 +2,14 @@
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::select;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::field::display;
-use tracing::{
-    debug, error, field, info, info_span, instrument, span, trace, warn, Instrument, Level, Span,
-};
+use tracing::{debug, field, info, info_span, instrument, warn, Instrument, Span};
 
 #[cfg(debug_assertions)]
 mod testing;
@@ -23,15 +20,17 @@ use crate::job::Job;
 use crate::json::{Patch, Value};
 use crate::result::Result;
 use crate::runtime::{Resources, System};
-use crate::serde::de::DeserializeOwned;
+use crate::sensor::{Sensor, SensorHandler, SensorRouter};
+use crate::serde::{de::DeserializeOwned, Serialize};
 use crate::state::State;
-use crate::sync::{channel, Interrupt, RwLock, Sender};
-use crate::system_ext::SystemExt;
+use crate::sync::{Interrupt, Sender};
 
 mod auto_interrupt;
 mod domain;
 mod planner;
+mod runtime;
 mod workflow;
+
 use auto_interrupt::AutoInterrupt;
 use domain::Domain;
 
@@ -73,6 +72,7 @@ pub trait WorkerState {}
 /// assigned to the Worker
 pub struct Uninitialized {
     domain: Domain,
+    sensors: SensorRouter,
     resources: Resources,
 }
 
@@ -85,10 +85,8 @@ pub struct Uninitialized {
 pub struct Ready {
     domain: Domain,
     resources: Resources,
-    system_rwlock: Arc<RwLock<System>>,
-    update_event_channel: watch::Sender<()>,
+    runtime: runtime::Handle,
     patch_tx: Sender<Patch>,
-    writer_closed_rx: watch::Receiver<()>,
     worker_id: u64,
     generation: Arc<AtomicU64>,
 }
@@ -329,6 +327,7 @@ impl<O> Worker<O, Uninitialized> {
         Worker::from_inner(Uninitialized {
             domain: Domain::new(),
             resources: Resources::new(),
+            sensors: SensorRouter::new(),
         })
     }
 }
@@ -445,6 +444,43 @@ impl<O> Worker<O, Uninitialized> {
         self
     }
 
+    /// Configure a new [Sensor](`crate::sensor::Sensor`) to be set up by the
+    /// worker runtime whenever a state matching the sensor path is created in the system.
+    ///
+    /// # Example
+    ///
+    /// ```rust, no_run
+    /// use mahler::extract::Args;
+    /// use mahler::state::State;
+    /// use mahler::worker::{Worker, Uninitialized};
+    /// use tokio_stream::Stream;
+    ///
+    /// #[derive(State)]
+    /// struct HomeHeating;
+    ///
+    /// fn temperature_monitor(Args(room): Args<String>) -> impl Stream<Item = i32> {
+    ///     tokio_stream::iter(vec![20, 21, 22])
+    /// }
+    ///
+    /// let worker: Worker<HomeHeating, Uninitialized> = Worker::new()
+    ///         // add a temperature sensor to any new configured room in the home heating system
+    ///         .sensor("/rooms/{room}/temperature", temperature_monitor);
+    /// ```
+    pub fn sensor<H, T, U>(mut self, route: &'static str, sensor: H) -> Self
+    where
+        H: SensorHandler<T, U>,
+        U: Serialize + 'static,
+    {
+        let Uninitialized {
+            ref mut sensors, ..
+        } = self.inner;
+
+        // insert the sensor replacing the route
+        sensors.insert(route, Sensor::new(sensor));
+
+        self
+    }
+
     /// Add a list if jobs linked to the same route on the worker domain
     ///
     /// This is a convenience method to simplify the configuration of multiple jobs
@@ -486,75 +522,28 @@ impl<O> Worker<O, Uninitialized> {
         O: State,
     {
         let Uninitialized {
-            domain, resources, ..
+            domain,
+            resources,
+            sensors,
         } = self.inner;
 
-        // Create a new system with an initial state
-        let system = System::try_from(state)?;
+        // Create a new system with an initial state and resources
+        let mut system = System::try_from(state)?;
+        system.set_resources(resources.clone());
 
-        // Shared system protected by RwLock
-        let system_rwlock = Arc::new(RwLock::new(system));
+        // Spawn the runtime
+        let (runtime, patch_tx) = runtime::spawn(system, sensors);
 
-        // Create the state changes synchronization channel
-        // XXX: should the channel size configurable? Or should we make it unbounded at risk of running
-        // out of memory
-        let (patch_tx, mut patch_rx) = channel::<Patch>(100);
-
-        // Patch error signal (notify)
-        let (writer_closed_tx, writer_closed_rx) = watch::channel(());
-
-        // Broadcast channel for state updates
-        let (update_event_channel, _) = watch::channel(());
-
-        // Generate unique worker ID using random hash
+        // Generate unique worker ID
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hasher};
         let worker_id = RandomState::new().build_hasher().finish();
 
-        // Spawn system writer task
-        {
-            let system_writer = Arc::clone(&system_rwlock);
-            let update_event_tx = update_event_channel.clone();
-            tokio::spawn(
-                async move {
-                    // If the worker is dropped, then patch_tx will get dropped and
-                    // this task will terminate, causing update_event_tx to get dropped
-                    // and notifying the broadcast channel followers
-                    while let Some(mut msg) = patch_rx.recv().await {
-                        let changes = std::mem::take(&mut msg.data);
-                        trace!(received=%changes);
-
-                        let mut system = system_writer.write().await;
-                        if let Err(e) = system.patch(changes) {
-                            // we need to abort on patch failure a this means the
-                            // internal state may have become inconsistent and we cannot continue
-                            // applying changes
-                            error!("patch failed: {e}");
-
-                            // We drop the channel to let receivers know the writer task has closed
-                            drop(writer_closed_tx);
-                            break;
-                        }
-                        trace!("patch successful");
-
-                        // Notify worker followers, ignore errors if no receivers exist
-                        let _ = update_event_tx.send(());
-
-                        // yield back to the workflow
-                        msg.ack();
-                    }
-                }
-                .instrument(span!(Level::TRACE, "worker_writer", worker_id=%worker_id)),
-            );
-        }
-
         Ok(Worker::from_inner(Ready {
             domain,
             resources,
-            system_rwlock,
-            update_event_channel,
+            runtime,
             patch_tx,
-            writer_closed_rx,
             worker_id,
             generation: Arc::new(AtomicU64::new(0)),
         }))
@@ -596,26 +585,19 @@ impl<T> Stream for WorkerStream<T> {
 /// Returns a stream of updated states after each system change.
 ///
 /// The stream is best effort, meaning updates may be missed if the receiver lags behind.
-fn follow_worker<T>(
-    channel: watch::Sender<()>,
-    sys_reader: Weak<RwLock<System>>,
-) -> impl Stream<Item = T>
+fn follow_worker<T>(runtime: &runtime::Handle) -> impl Stream<Item = T>
 where
     T: DeserializeOwned,
 {
-    let rx = channel.subscribe();
+    let rx = runtime.on_change();
+    let reader = runtime.reader().clone();
     WorkerStream::new(
         WatchStream::from_changes(rx)
             .then(move |_| {
-                let sys_reader = sys_reader.clone();
+                let sys_reader = reader.clone();
                 async move {
-                    if let Some(sys_reader) = sys_reader.upgrade() {
-                        // Read the system state
-                        let system = sys_reader.read().await;
-                        system.state::<T>().ok()
-                    } else {
-                        None
-                    }
+                    let system = sys_reader.read().await;
+                    system.state::<T>().ok()
                 }
             })
             .filter_map(|opt| opt),
@@ -636,7 +618,7 @@ impl<O: State> Worker<O, Ready> {
     where
         O: DeserializeOwned,
     {
-        let system = self.inner.system_rwlock.read().await;
+        let system = self.inner.runtime.reader().read().await;
         let state = system.state()?;
         Ok(state)
     }
@@ -679,10 +661,7 @@ impl<O: State> Worker<O, Ready> {
     where
         O: DeserializeOwned,
     {
-        follow_worker(
-            self.inner.update_event_channel.clone(),
-            Arc::downgrade(&self.inner.system_rwlock),
-        )
+        follow_worker(&self.inner.runtime)
     }
 
     /// Find a workflow to reach a target state
@@ -701,13 +680,13 @@ impl<O: State> Worker<O, Ready> {
 
         let Ready {
             domain,
-            system_rwlock,
+            runtime,
             worker_id,
             generation,
             ..
         } = &self.inner;
 
-        let system = system_rwlock.read().await;
+        let system = runtime.reader().read().await;
         let current_generation = generation.load(Ordering::Acquire);
 
         let mut workflow = planner::find_workflow_to_target::<O>(domain, &system, &tgt)?;
@@ -738,20 +717,18 @@ impl<O: State> Worker<O, Ready> {
     ) -> Result<SeekStatus> {
         let Ready {
             resources,
-            system_rwlock,
+            runtime,
             patch_tx,
             worker_id,
             generation,
-            writer_closed_rx,
             ..
         } = &self.inner;
 
-        // do not execute the workflow if the writer task has closed
-        if writer_closed_rx.has_changed().is_err() {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                format!("worker ({worker_id}) is in an inconsistent state",),
-            ));
+        // Do not execute the workflow if the runtime has closed
+        if !runtime.is_running() {
+            return Err(Error::internal(format!(
+                "worker ({worker_id}) runtime is not running"
+            )));
         }
 
         // Validate workflow belongs to this worker
@@ -777,19 +754,21 @@ impl<O: State> Worker<O, Ready> {
             ));
         }
 
-        // Update system properties
-        {
-            let mut system = self.inner.system_rwlock.write().await;
-            system.set_resources(resources.clone());
-        }
+        // Sync resources to runtime before execution
+        runtime.set_resources(resources.clone()).await;
 
-        let mut writer_closed_rx = writer_closed_rx.clone();
         let res = select! {
             biased;
-            _ = writer_closed_rx.changed() => {
-                return Err(Error::internal("state patch failed, worker state possibly tainted"));
+            reason = runtime.closed() => {
+                let err = if let Some(e) = reason {
+                    Error::internal(format!("runtime failed: {e}"))
+                }
+                else {
+                    Error::internal("runtime closed unexpectedly")
+                };
+                return Err(err);
             }
-            res = workflow.execute(system_rwlock, patch_tx.clone(), interrupt) => res
+            res = workflow.execute(runtime.reader(), patch_tx.clone(), interrupt) => res
         };
 
         // Increment generation after every workflow execution as
@@ -854,29 +833,25 @@ impl<O: State> Worker<O, Ready> {
         let tgt = serde_json::to_value(tgt)?;
 
         let Ready {
-            resources,
             domain,
-            system_rwlock,
-            writer_closed_rx,
+            resources,
+            runtime,
             patch_tx,
             generation,
             worker_id,
             ..
         } = self.inner.clone();
 
-        // abort if the writer has closed
-        if writer_closed_rx.has_changed().is_err() {
+        // Abort if the runtime has closed
+        if !runtime.is_running() {
             return Err(Error::new(
                 ErrorKind::Internal,
-                format!("worker ({worker_id}) is in an inconsistent state",),
+                format!("worker {worker_id} is not running"),
             ));
         }
 
-        // Update system properties
-        {
-            let mut system = self.inner.system_rwlock.write().await;
-            system.set_resources(resources);
-        }
+        // Sync resources to runtime
+        runtime.set_resources(resources).await;
 
         enum InnerSeekResult {
             TargetReached,
@@ -891,7 +866,7 @@ impl<O: State> Worker<O, Ready> {
 
         async fn find_and_run_workflow<T: State>(
             domain: &Domain,
-            sys_reader: &Arc<RwLock<System>>,
+            runtime: &runtime::Handle,
             tgt: &Value,
             patch_tx: &Sender<Patch>,
             sigint: &Interrupt,
@@ -901,7 +876,7 @@ impl<O: State> Worker<O, Ready> {
             let now = Instant::now();
 
             let workflow = {
-                let system = sys_reader.read().await;
+                let system = runtime.reader().read().await;
                 let res = planner::find_workflow_to_target::<T>(domain, &system, tgt);
 
                 // Show pending changes at debug level
@@ -951,7 +926,7 @@ impl<O: State> Worker<O, Ready> {
             let now = Instant::now();
             info!("executing workflow");
             let res = workflow
-                .execute(sys_reader, patch_tx.clone(), sigint.clone())
+                .execute(runtime.reader(), patch_tx.clone(), sigint.clone())
                 .await
                 .map_err(InnerSeekError::Runtime);
 
@@ -975,11 +950,7 @@ impl<O: State> Worker<O, Ready> {
 
         // Main seek_with_interrupt planning and execution loop
         let handle: JoinHandle<Result<SeekStatus>> = {
-            let mut err_rx = writer_closed_rx;
             let interrupt = drop_interrupt.clone();
-            // No writing allowed on this copy of the system lock
-            let sys_reader = system_rwlock;
-            let patch_tx = patch_tx;
 
             // We spawn a task rather than looping directly so we can catch panics happening
             // within the loop
@@ -990,10 +961,16 @@ impl<O: State> Worker<O, Ready> {
                     loop {
                         let res = select! {
                             biased;
-                            _ = err_rx.changed() => {
-                                return Err(Error::internal("state patch failed, worker state possibly tainted"));
+                            reason = runtime.closed() => {
+                                let err = if let Some(e) = reason {
+                                    Error::internal(format!("runtime failed: {e}"))
+                                }
+                                else {
+                                    Error::internal("runtime closed unexpectedly")
+                                };
+                                return Err(err);
                             }
-                            res = find_and_run_workflow::<O>(&domain, &sys_reader, &tgt, &patch_tx, &interrupt, &generation) => res
+                            res = find_and_run_workflow::<O>(&domain, &runtime, &tgt, &patch_tx, &interrupt, &generation) => res
                         };
 
                         match res {
@@ -1099,7 +1076,7 @@ mod tests {
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct Counters(HashMap<String, i32>);
 
     impl State for Counters {
@@ -1632,5 +1609,244 @@ mod tests {
         assert_eq!(results[1], 2);
         assert_eq!(results[2], 3);
         assert_eq!(results[3], 0);
+    }
+
+    // ==================== Sensor Tests ====================
+    #[tokio::test]
+    async fn test_sensor_updates_state_via_follow() {
+        init();
+
+        // Simple state with just temperature
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct TempState {
+            temperature: i32,
+        }
+
+        impl State for TempState {
+            type Target = Self;
+        }
+
+        let worker: Worker<TempState, _> = Worker::new()
+            .sensor("/temperature", || {
+                async_stream::stream! {
+                    for temp in [25, 26, 27] {
+                        yield temp;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            })
+            .initial_state(TempState { temperature: 20 })
+            .unwrap();
+
+        // Follow state updates
+        let mut updates = worker.follow();
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                // Collect updates until we get the expected values or timeout
+                while let Some(state) = updates.next().await {
+                    res.push(state.temperature);
+                    if res.len() >= 3 {
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Wait for sensor updates to be processed
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let results = results.read().await;
+        assert!(
+            results.len() >= 3,
+            "Expected at least 3 sensor updates, got {}: {:?}",
+            results.len(),
+            &results
+        );
+
+        // Verify we got the sensor values
+        assert_eq!(results[0], 25);
+        assert_eq!(results[1], 26);
+        assert_eq!(results[2], 27);
+    }
+
+    #[tokio::test]
+    async fn test_sensor_subscription_created_on_state_change() {
+        init();
+
+        // State where sensor matches a nested path using HashMap of simple values
+        // Job to create/update a counter
+        fn set_counter(counter: View<Option<i32>>, Target(tgt): Target<i32>) -> View<i32> {
+            counter.create(tgt)
+        }
+
+        let worker: Worker<Counters, _> = Worker::new()
+            .job("/{name}", create(set_counter))
+            .sensor("/{name}", || {
+                async_stream::stream! {
+                    // Emit updated values - sensor starts after path is created
+                    for val in [100, 101, 102] {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        yield val;
+                    }
+                }
+            })
+            .initial_state(Counters(HashMap::new()))
+            .unwrap();
+
+        // Follow state updates
+        let mut updates = worker.follow();
+        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        {
+            let results = Arc::clone(&results);
+            tokio::spawn(async move {
+                let mut res = results.write().await;
+                while let Some(state) = updates.next().await {
+                    res.push(state.clone());
+                    // Stop after we see sensor updates reach 102
+                    if state.0.get("newkey") == Some(&102) {
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Create a new counter which should trigger sensor subscription
+        let mut worker = worker;
+        let status = worker
+            .seek_target(Counters(HashMap::from([("newkey".to_string(), 50)])))
+            .await
+            .unwrap();
+
+        assert_eq!(status, SeekStatus::Success);
+
+        // Wait for sensor updates
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let results = results.read().await;
+
+        // We should see: initial creation (50), then sensor updates (100, 101, 102)
+        assert!(
+            results.len() >= 2,
+            "Expected at least 2 updates (creation + sensor), got {}: {:?}",
+            results.len(),
+            &results
+        );
+
+        // The sensor should have updated the value
+        let last = results.last().unwrap();
+        assert!(
+            last.0.get("newkey").copied().unwrap_or(0) >= 100,
+            "Expected sensor to update value, got: {:?}",
+            last
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sensor_updates_ignored_for_nonexistent_paths() {
+        init();
+
+        // This tests that sensor updates for paths that no longer exist are ignored
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct SimpleState {
+            value: i32,
+        }
+
+        impl State for SimpleState {
+            type Target = Self;
+        }
+
+        // Sensor that emits values
+        let sensor_fn = || {
+            async_stream::stream! {
+                for v in [100, 200, 300] {
+                    yield v;
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+            }
+        };
+
+        let worker: Worker<SimpleState, _> = Worker::new()
+            .sensor("/value", sensor_fn)
+            .initial_state(SimpleState { value: 0 })
+            .unwrap();
+
+        // Follow updates
+        let mut updates = worker.follow();
+
+        // Collect first update
+        let first = timeout(Duration::from_millis(100), updates.next())
+            .await
+            .expect("timeout waiting for first update");
+
+        assert!(first.is_some());
+        assert_eq!(first.unwrap().value, 100);
+    }
+
+    #[tokio::test]
+    async fn test_sensor_initial_subscription_for_existing_state() {
+        init();
+
+        // Tests that sensors are created for paths that exist at startup
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct InitialState {
+            temperature: i32,
+            humidity: i32,
+        }
+
+        impl State for InitialState {
+            type Target = Self;
+        }
+
+        // Track which sensors were created
+        let created = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+        let created_temp = Arc::clone(&created);
+        let temp_sensor = move || {
+            let created = Arc::clone(&created_temp);
+            async_stream::stream! {
+                {
+                    let mut c = created.write().await;
+                    c.push("temperature".to_string());
+                }
+                yield 25;
+            }
+        };
+
+        let created_humid = Arc::clone(&created);
+        let humidity_sensor = move || {
+            let created = Arc::clone(&created_humid);
+            async_stream::stream! {
+                {
+                    let mut c = created.write().await;
+                    c.push("humidity".to_string());
+                }
+                yield 60;
+            }
+        };
+
+        let _worker: Worker<InitialState, _> = Worker::new()
+            .sensor("/temperature", temp_sensor)
+            .sensor("/humidity", humidity_sensor)
+            .initial_state(InitialState {
+                temperature: 20,
+                humidity: 50,
+            })
+            .unwrap();
+
+        // Wait for sensors to initialize
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let created = created.read().await;
+        assert!(
+            created.contains(&"temperature".to_string()),
+            "temperature sensor not created"
+        );
+        assert!(
+            created.contains(&"humidity".to_string()),
+            "humidity sensor not created"
+        );
     }
 }

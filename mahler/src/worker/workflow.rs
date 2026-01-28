@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use tracing::{info, instrument};
 
 use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
@@ -13,7 +12,7 @@ use crate::json::{
     Operation, Patch, PatchOperation, Path, RemoveOperation, ReplaceOperation, Value,
 };
 use crate::runtime::{Channel, System};
-use crate::sync::{Interrupt, RwLock, Sender};
+use crate::sync::{Interrupt, Reader, Sender};
 use crate::task::{Action, Id};
 
 /// Unique representation of a task acting on a specific path and system state.
@@ -243,7 +242,7 @@ impl Workflow {
 
     pub(super) async fn execute(
         self,
-        sys_reader: &Arc<RwLock<System>>,
+        sys_reader: &Reader<System>,
         patch_tx: Sender<Patch>,
         interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<Error>> {

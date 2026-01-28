@@ -6,7 +6,7 @@ use std::ops::Add;
 use std::sync::{Arc, RwLock};
 
 use crate::error::AggregateError;
-use crate::sync::{Interrupt, Sender};
+use crate::sync::{Interrupt, Reader, Sender};
 
 type Link<T> = Option<Arc<RwLock<Node<T>>>>;
 
@@ -942,10 +942,10 @@ pub enum ExecutionStatus {
     Interrupted,
 }
 
-#[async_trait]
 /// Utility trait for executable DAGs
 ///
 /// Workflow items implementing this trait can be executed as part of a DAG (workflow) execution.
+#[async_trait]
 pub trait Task {
     /// The input type for the Task
     type Input;
@@ -973,7 +973,7 @@ where
     /// NOTE: this is not public to avoid exposing external crate types
     pub async fn execute(
         self,
-        input: &Arc<crate::sync::RwLock<T::Input>>,
+        input: &Reader<T::Input>,
         channel: Sender<T::Changes>,
         interrupt: Interrupt,
     ) -> Result<ExecutionStatus, AggregateError<T::Error>> {
@@ -1012,7 +1012,7 @@ where
 
         async fn exec_node<T>(
             node: Link<T>,
-            input: &Arc<crate::sync::RwLock<T::Input>>,
+            input: &Reader<T::Input>,
             channel: &Sender<T::Changes>,
             interrupt: &Interrupt,
         ) -> Result<Link<T>, InnerError<T::Error>>
@@ -1143,7 +1143,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::sync::channel;
+    use crate::sync::{channel, rw_lock};
 
     fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
         if let Node::Item { .. } = &*node.read().unwrap() {
@@ -1605,7 +1605,7 @@ mod tests {
         }
 
         let dag: Dag<DummyTask> = seq!(DummyTask, DummyTask, DummyTask);
-        let reader = Arc::new(tokio::sync::RwLock::new(()));
+        let (reader, _writer) = rw_lock(());
         let (tx, mut rx) = channel(10);
         let sigint = Interrupt::new();
 
@@ -1663,7 +1663,7 @@ mod tests {
 
         let dag: Dag<SleepyTask> = dag!(seq!(task_a), seq!(task_b)) + seq!(task_c);
 
-        let input = Arc::new(tokio::sync::RwLock::new(()));
+        let (input, _writer) = rw_lock(());
         let (tx, mut rx) = channel::<&'static str>(10);
         let sigint = Interrupt::new();
 
@@ -1713,7 +1713,7 @@ mod tests {
             }
         );
 
-        let input = Arc::new(tokio::sync::RwLock::new(()));
+        let (input, _writer) = rw_lock(());
         let (tx, mut rx) = channel::<&'static str>(10);
         let interrupt = Interrupt::new();
 
@@ -1808,7 +1808,7 @@ mod tests {
             fail: false
         });
 
-        let input = Arc::new(tokio::sync::RwLock::new(()));
+        let (input, _writer) = rw_lock(());
         let (tx, mut rx) = channel::<&'static str>(10);
         let interrupt = Interrupt::new();
 
