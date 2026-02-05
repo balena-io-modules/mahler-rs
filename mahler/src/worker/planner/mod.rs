@@ -203,14 +203,7 @@ fn try_task_into_workflow(
             let work_id = WorkUnit::new_id(action, cur_state.inner_state());
 
             // Simulate the task and get the list of changes
-            let patch = action.dry_run(cur_state)?;
-            if patch.is_empty() {
-                // An empty result from the task is equivalent to
-                // the task condition not being met
-                return Err(ErrorKind::ConditionNotMet)?;
-            }
-
-            let Patch(ops) = patch;
+            let Patch(ops) = action.dry_run(cur_state)?;
 
             // Prepend a new node to the workflow, include a copy
             // of the changes for validation during runtime
@@ -445,7 +438,7 @@ where
                         },
 
                         // ignore if changes is empty
-                        _ => {}
+                        _ => trace!(task=%task, "ignored empty task"),
                     }
                 }
             }
@@ -847,12 +840,8 @@ mod tests {
         assert_eq!(workflow.to_string(), expected.to_string(),);
     }
 
-    // This test will fail to find a plan due to a bug in the task definitions,
-    // with backtracking, the planner might find a correct candidated but the planner avoids
-    // backtracking to prevent combinatorial explosion.
-    // ```
     #[test]
-    fn it_fails_to_find_a_plan_for_a_buggy_task() {
+    fn it_allows_empty_tasks_as_part_of_methods() {
         init();
 
         #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -926,7 +915,8 @@ mod tests {
                 return vec![];
             }
 
-            // dummy task is always empty so do_cleanup will never be picked
+            // dummy task is always empty but it should be accepted as part of the
+            // method
             vec![dummy_task.into_task(), complete_cleanup.into_task()]
         }
 
@@ -975,12 +965,15 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
-        assert!(
-            workflow.is_none(),
-            "unexpected plan:\n{}",
-            workflow.unwrap()
-        );
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
+        let expected: Dag<&str> = seq!("ensure cleanup")
+            + par!(
+                "store configuration",
+                "set device name",
+                "prepare app my-app"
+            )
+            + seq!("dummy task", "complete cleanup");
+        assert_eq!(expected.to_string(), workflow.to_string());
     }
 
     #[test]

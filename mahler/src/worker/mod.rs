@@ -152,7 +152,7 @@ impl WorkerState for Ready {}
 /// # use mahler::worker::{Worker, Uninitialized};
 /// # use mahler::job::update;
 /// # #[derive(State, Clone)] struct MyState;
-/// # fn my_job() {}
+/// # fn my_job() {/* .. */}
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Configure the worker once
 /// let base: Worker<MyState, Uninitialized> = Worker::new()
@@ -444,7 +444,7 @@ impl<O> Worker<O, Uninitialized> {
     /// fn bar() {}
     ///
     /// let worker: Worker<StateModel, Uninitialized> = Worker::new()
-    ///
+    ///         // configure multiple jobs for path `/{foo}`
     ///         .jobs("/{foo}", [update(foo), update(bar)]);
     /// ```
     pub fn jobs<const N: usize>(mut self, route: &'static str, list: [Job; N]) -> Self {
@@ -876,25 +876,24 @@ impl<O: State> Worker<O, Ready> {
     /// use tokio::time::sleep;
     ///
     /// use mahler::error::ErrorKind;
-    /// use mahler::task::{Handler, IO, with_io};
+    /// use mahler::task::{Handler, IO, with_io, enforce};
     /// use mahler::extract::{View, Target};
     /// use mahler::worker::{Worker, Ready, WorkflowStatus, RunTask};
     /// use mahler::job::update;
     ///
-    /// fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
-    ///    if *counter < tgt {
-    ///        // Modify the counter if we are below target
-    ///        *counter += 1;
-    ///    }
+    /// fn plus_one(mut counter: View<i32>, Target(target): Target<i32>) -> IO<i32> {
+    ///     // modify the counter only if below the target
+    ///     enforce!(*counter < target);
+    ///     *counter += 1;
     ///
-    ///    // Return the updated counter
-    ///    with_io(counter, |counter| async {
-    ///        sleep(Duration::from_millis(10)).await;
-    ///        Ok(counter)
-    ///    })
+    ///     with_io(counter, |counter| async {
+    ///         sleep(Duration::from_millis(10)).await;
+    ///         Ok(counter)
+    ///     })
     /// }
     ///
-    /// # async fn test_run_task_example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Setup the worker domain and resources
     /// let worker = Worker::new()
     ///     .job("", update(plus_one)).initial_state(0);

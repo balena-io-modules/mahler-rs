@@ -211,30 +211,30 @@
 //! use mahler::extract::{View, Target};
 //!
 //! // create a task to update a counter
-//! fn plus_one(mut counter: View<u32>, Target(tgt): Target<u32>) -> View<u32> {
+//! fn plus_one(mut counter: View<u32>, Target(tgt): Target<u32>) -> Option<View<u32>> {
 //!     // `View` implements Deref and DerefMut to
 //!     // operate on the internal value
-//!     if *counter < tgt {
-//!         // update the counter if below the target
-//!         *counter += 1;
+//!     if *counter >= tgt {
+//!         // condition failed, abort the task
+//!         return None;
 //!     }
 //!
-//!     // if the counter has not changed, then the task won't
-//!     // be selected by the planner
-//!     counter
+//!     *counter += 1;
+//!     Some(counter)
 //! }
 //!
 //! // remove the counter
 //! fn delete_counter(mut view: View<Option<u32>>) -> View<Option<u32>> {
-//!         view.take();
-//!         view
-//!     }
+//!     // if the counter has not changed (is already none), then the task will be ignored
+//!     // by the planner (unless in a method)
+//!     view.take();
+//!     view
+//! }
 //! ```
 //!
 //! Internally, the cumulative changes to the `View` extractors are converted by the planner to a
 //! [Patch](https://docs.rs/json-patch/latest/json_patch/struct.Patch.html) and used to determine
-//! the applicability of the task to a given target (if no changes are performed by the task at planning,
-//! then the task is not applicable). At runtime, the same patch is used first to
+//! the applicability of the task to a given target. At runtime, the same patch is used first to
 //! determine if the task is safe to apply, and later to update the internal worker state.
 //!
 //! ## System Effects (I/O)
@@ -248,45 +248,21 @@
 //!
 //! This 2-in-1 function evaluation is enabled by the introduction of the [IO](`task::IO`)
 //! type. An `IO` combines both a *pure* operation on an input and an effectful or `IO`
-//! operation.
-//!
-//! ```rust
-//! use mahler::task::{with_io, IO};
-//! use mahler::extract::View;
-//! use tokio::time::{sleep, Duration};
-//!
-//! fn plus_one(mut view: View<i32>) -> IO<i32> {
-//!     // Pure modification
-//!     *view += 1;
-//!     
-//!     // Combine with IO operation
-//!     with_io(view, |view| async move {
-//!         // system changes should only be performed
-//!         // within the IO part
-//!         sleep(Duration::from_millis(10)).await;
-//!
-//!         // return the view
-//!         Ok(view)
-//!     })
-//! }
-//!
-//! #
-//! ```
-//!
-//! This type is what can be used in mahler jobs to isolate effects on the underlying system.
+//! operation. This type is what can be used in mahler jobs to isolate effects on the underlying system.
 //!
 //! ```rust
 //! use tokio::time::{sleep, Duration};
 //!
 //! use mahler::extract::{View, Target};
-//! use mahler::task::{with_io, IO};
+//! use mahler::task::{with_io, IO, enforce};
 //!
 //! // create a Job to update a counter
 //! fn plus_one(mut counter: View<u32>, Target(tgt): Target<u32>) -> IO<u32> {
-//!     if *counter < tgt {
-//!         // update the counter if below the target
-//!         *counter += 1;
-//!     }
+//!     // abort the task if the counter is over the target
+//!     enforce!(*counter < tgt);
+//!     
+//!     // update the counter if below the target
+//!     *counter += 1;
 //!
 //!     // return an IO type to isolate system changes
 //!     with_io(counter, |counter| async move {
@@ -342,7 +318,7 @@
 //! use mahler::extract::{View, Target};
 //! use mahler::task::{Task, Handler};
 //!
-//! fn plus_one() {}
+//! fn plus_one() {/* .. */}
 //!
 //! // define a method
 //! fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
@@ -429,22 +405,20 @@
 //!   branches
 //!
 //! ```rust
-//! use mahler::task::{IO, with_io};
+//! use mahler::task::{IO, with_io, enforce};
 //! use mahler::extract::{View, Target};
 //! use mahler::worker::Worker;
 //! use mahler::dag::{Dag, seq};
 //! use mahler::job::update;
 //!
 //! fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
-//!    if *counter < tgt {
-//!        // Modify the counter if we are below target
-//!        *counter += 1;
-//!    }
+//!     enforce!(*counter < tgt);
+//!     *counter += 1;
 //!
-//!    // Return the updated counter
-//!    with_io(counter, |counter| async {
-//!        Ok(counter)
-//!    })
+//!     // Return the updated counter
+//!     with_io(counter, |counter| async {
+//!         Ok(counter)
+//!     })
 //! }
 //!
 //! // Setup the worker domain and resources

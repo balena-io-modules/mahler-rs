@@ -40,7 +40,7 @@ We'll create a system controller for a simple counting system. Let's define a ta
 use std::time::Duration;
 use tokio::time::sleep;
 
-use mahler::task::{IO, with_io};
+use mahler::task::{IO, with_io, enforce};
 use mahler::extract::{Target, View};
 
 // `plus_one` defines a task that updates a counter if it is below some target.
@@ -49,10 +49,11 @@ use mahler::extract::{Target, View};
 // the task can affect the global state
 // - `Target`, providing a read only view to the target being seeked by the planner
 fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
-    if *counter < tgt {
-        // Modify the counter value if we are below the target
-        *counter += 1;
-    }
+    // abort the task if the target has already been reached
+    enforce!(*counter < target);
+
+    // Modify the counter value if we are below the target
+    *counter += 1;
 
     // This task is called at planning and at runtime, the `with_io` function
     // allows us to define what is returned by the function at each context.
@@ -69,7 +70,7 @@ fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
 }
 ```
 
-The task above updates the counter if it is below the target, otherwise it returns the same value that it currently has. When planning, a task that performs no changes on the system state is not selected, which allows us to control when the task is considered applicable.
+The task above updates the counter if it is below the target, or it aborts otherwise, which tells the planner that a task pre-condition has not been met.
 
 The function above defines an atomic task (also called an action), but we can also define compound tasks (also called methods), that allow to bias the planner to certain workflows depending on the conditions. Let's define a task to increase the counter by `two`.
 

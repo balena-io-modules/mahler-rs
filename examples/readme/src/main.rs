@@ -7,7 +7,7 @@ use mahler::extract::{Args, Target, View};
 use mahler::job::update;
 use mahler::result::Result;
 use mahler::state::{Map, State};
-use mahler::task::{with_io, Handler, Task, IO};
+use mahler::task::{enforce, with_io, Handler, Task, IO};
 use mahler::worker::{SeekStatus, Worker};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -23,10 +23,11 @@ struct Counters(Map<String, i32>);
 // the job task can affect the global state
 // - `Target`, providing a read only view to the target being seeked by the planner
 fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
-    if *counter < tgt {
-        // Modify the counter value if we are below the target
-        *counter += 1;
-    }
+    // abort the task if the target has already been reached
+    enforce!(*counter < tgt);
+
+    // Modify the counter value if we are below the target
+    *counter += 1;
 
     // The task is called at planning and at runtime, the `with_io` function
     // allows us to define what is returned by the function at each context.
