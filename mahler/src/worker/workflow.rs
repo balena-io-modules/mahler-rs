@@ -8,7 +8,7 @@ use tracing::{info, instrument};
 
 use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
 use crate::error::{AggregateError, Error, ErrorKind};
-use crate::json::{Patch, PatchOperation, Path, RemoveOperation, ReplaceOperation, Value};
+use crate::json::{Operation, Patch, PatchOperation, RemoveOperation, ReplaceOperation, Value};
 use crate::runtime::{Channel, System};
 use crate::sync::{Interrupt, Reader, Sender};
 use crate::task::{Action, Id};
@@ -172,7 +172,7 @@ pub struct Workflow {
     pub(super) dag: Dag<WorkUnit>,
 
     /// List of skipped paths/operations during planning due to a halted state
-    pub(super) ignored: Vec<Path>,
+    pub(super) ignored: Vec<Operation>,
 
     /// The worker that created this workflow
     pub(super) worker_id: u64,
@@ -205,8 +205,9 @@ impl Workflow {
         }
     }
 
-    /// Return the list of ignored paths during planning due to halted states
-    pub fn ignored(&self) -> Vec<&Path> {
+    /// Return the list of skipped operations during planning
+    /// due to matching exceptions
+    pub fn exceptions(&self) -> Vec<&Operation> {
         self.ignored.iter().collect()
     }
 

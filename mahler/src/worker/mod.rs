@@ -835,9 +835,9 @@ impl<O: State> Worker<O, Ready> {
         }
         info!(time = ?now.elapsed(), "workflow found");
 
-        if tracing::enabled!(tracing::Level::WARN) && !workflow.ignored().is_empty() {
-            warn!("the following paths were ignored during planning");
-            for path in workflow.ignored() {
+        if tracing::enabled!(tracing::Level::WARN) && !workflow.exceptions().is_empty() {
+            warn!("the following operations were ignored during planning");
+            for path in workflow.exceptions() {
                 warn!("{path}");
             }
         }

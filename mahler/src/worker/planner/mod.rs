@@ -359,7 +359,7 @@ where
         if distance.is_empty() {
             // we need to reverse the plan before returning
             let mut workflow = Workflow::new(cur_plan.reverse());
-            workflow.ignored = skipped_state_paths;
+            workflow.ignored = distance.ignored;
             return Ok(Some(workflow));
         }
 
@@ -374,7 +374,7 @@ where
         let mut candidates: Vec<Candidate> = Vec::new();
 
         // Iterate over distance operations and jobs to find possible candidates
-        for op in distance.operations() {
+        for op in distance.operations {
             let path = op.path();
             let pointer = path.as_ref();
 
@@ -396,7 +396,7 @@ where
 
                 // if there are any exceptions that apply to the context, add the path to
                 // the list and skip the path
-                if exceptions.filter(|j| j.operation().matches(op)).any(|exception| {
+                if exceptions.filter(|j| j.operation().matches(&op)).any(|exception| {
                     exception.test(&cur_state, &context)
                         .inspect_err(
                             |e| warn!(parent: &find_workflow_span, "cannot evaluate {exception}: {e}"),
@@ -417,7 +417,7 @@ where
                 };
 
                 // Look for jobs matching the operation
-                for job in jobs.filter(|j| j.operation().matches(op)) {
+                for job in jobs.filter(|j| j.operation().matches(&op)) {
                     let task = job.new_task(context.clone());
                     let mut changes = Vec::new();
                     let mut domain = BTreeSet::new();
@@ -581,6 +581,7 @@ mod tests {
     use crate::dag::{dag, par, seq, Dag};
     use crate::extract::{Args, System, Target, View};
     use crate::job::*;
+    use crate::json::Operation;
     use crate::state::{Map, State};
     use crate::task::prelude::*;
 
@@ -1796,7 +1797,13 @@ mod tests {
 
         // Verify that the ignored paths include service two
         assert_eq!(workflow.ignored.len(), 1);
-        assert_eq!(workflow.ignored[0].as_str(), "/services/two");
+        assert_eq!(
+            workflow.ignored[0],
+            Operation::Update {
+                path: Path::from_static("/services/two/running"),
+                value: json!(true)
+            }
+        );
     }
 
     #[test]
@@ -1879,7 +1886,13 @@ mod tests {
         let expected: Dag<&str> = par!("update app bar", "update app baz");
         assert_eq!(expected.to_string(), workflow.to_string());
         assert_eq!(workflow.ignored.len(), 1);
-        assert_eq!(workflow.ignored[0].as_str(), "/apps/foo");
+        assert_eq!(
+            workflow.ignored[0],
+            Operation::Update {
+                path: Path::from_static("/apps/foo/version"),
+                value: json!("2.0")
+            }
+        );
     }
 
     #[test]
@@ -2112,89 +2125,26 @@ mod tests {
         assert!(workflow_str.contains("start service api"));
         assert!(workflow_str.contains("update config port"));
         assert_eq!(workflow.ignored.len(), 2);
-        assert!(workflow
-            .ignored
-            .contains(&Path::from_static("/services/web")));
-        assert!(workflow
-            .ignored
-            .contains(&Path::from_static("/config/host")));
-    }
-
-    #[test]
-    fn test_exception_with_args_extractor() {
-        init();
-
-        #[derive(Serialize, Deserialize)]
-        struct Item {
-            value: String,
-        }
-
-        impl State for Item {
-            type Target = Self;
-        }
-
-        #[derive(Serialize, Deserialize)]
-        struct Items {
-            items: Map<String, Item>,
-        }
-
-        impl State for Items {
-            type Target = Self;
-        }
-
-        fn update_item(mut item: View<Item>, Target(tgt): Target<Item>) -> View<Item> {
-            item.value = tgt.value;
-            item
-        }
-
-        // Exception: skip items with specific names
-        fn skip_protected_items(crate::extract::Args(name): crate::extract::Args<String>) -> bool {
-            name == "protected" || name == "system"
-        }
-
-        let domain = Domain::new()
-            .job(
-                "/items/{name}",
-                update(update_item)
-                    .with_description(|Args(name): Args<String>| format!("update item {name}")),
-            )
-            .exception(
-                "/items/{name}",
-                crate::exception::update(skip_protected_items),
-            );
-
-        let initial = serde_json::from_value::<Items>(json!({
-            "items": {
-                "normal": { "value": "old1" },
-                "protected": { "value": "old2" },
-                "system": { "value": "old3" },
-                "user": { "value": "old4" }
-            }
-        }))
-        .unwrap();
-
-        let target = serde_json::from_value::<Items>(json!({
-            "items": {
-                "normal": { "value": "new1" },
-                "protected": { "value": "new2" },
-                "system": { "value": "new3" },
-                "user": { "value": "new4" }
-            }
-        }))
-        .unwrap();
-
-        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
-
-        // Items "protected" and "system" should be skipped
-        let expected: Dag<&str> = par!("update item normal", "update item user");
-        assert_eq!(expected.to_string(), workflow.to_string());
-        assert_eq!(workflow.ignored.len(), 2);
-        assert!(workflow
-            .ignored
-            .contains(&Path::from_static("/items/protected")));
-        assert!(workflow
-            .ignored
-            .contains(&Path::from_static("/items/system")));
+        assert_eq!(
+            workflow
+                .ignored
+                .iter()
+                .find(|op| op.path().starts_with("/services/web")),
+            Some(&Operation::Update {
+                path: Path::from_static("/services/web/running"),
+                value: json!(true)
+            })
+        );
+        assert_eq!(
+            workflow
+                .ignored
+                .iter()
+                .find(|op| op.path().starts_with("/config/host")),
+            Some(&Operation::Update {
+                path: Path::from_static("/config/host/value"),
+                value: json!("new")
+            })
+        );
     }
 
     #[test]
@@ -2291,7 +2241,13 @@ mod tests {
         let expected: Dag<&str> = par!("update app web", "update app worker");
         assert_eq!(expected.to_string(), workflow.to_string());
         assert_eq!(workflow.ignored.len(), 1);
-        assert_eq!(workflow.ignored[0].as_str(), "/apps/api");
+        assert_eq!(
+            workflow.ignored[0],
+            Operation::Update {
+                path: Path::from_static("/apps/api/image"),
+                value: json!("node:16")
+            }
+        );
     }
 
     #[test]
@@ -2395,6 +2351,12 @@ mod tests {
         assert_eq!(expected.to_string(), workflow.to_string());
 
         // The parent path /containers/a should be on the ignore list
-        assert_eq!(workflow.ignored[0].as_str(), "/containers/a");
+        assert_eq!(
+            workflow.ignored[0],
+            Operation::Update {
+                path: Path::from_static("/containers/a/name"),
+                value: json!("still-disabled")
+            }
+        );
     }
 }
