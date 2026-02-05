@@ -310,10 +310,12 @@ fn try_task_into_workflow(
 
 /// Find a workflow that takes the system from its current state
 /// to the target state using the tasks in the provided Domain
+///
+/// If found, this will replace the value of system with the final state of the system
 #[instrument(level = "trace", skip_all, err(level = "trace"))]
 pub fn find_workflow_to_target<T>(
     db: &Domain,
-    system: &System,
+    system: &mut System,
     tgt: &Value,
 ) -> Result<Option<Workflow>>
 where
@@ -353,6 +355,9 @@ where
             // we need to reverse the plan before returning
             let mut workflow = Workflow::new(cur_plan.reverse());
             workflow.ignored = distance.ignored;
+
+            // update the system
+            *system = cur_state;
             return Ok(Some(workflow));
         }
 
@@ -638,10 +643,10 @@ mod tests {
     {
         let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
-        let system =
+        let mut system =
             crate::runtime::System::try_from(cur).expect("failed to serialize current state");
 
-        let res = find_workflow_to_target::<T>(db, &system, &tgt)?;
+        let res = find_workflow_to_target::<T>(db, &mut system, &tgt)?;
         Ok(res)
     }
 

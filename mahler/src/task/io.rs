@@ -59,7 +59,7 @@ pub struct Outcome<T, E>(Effect<View<T>, E>);
 pub enum IO<T, E = Infallible> {
     /// There is an IO result from the task
     Result(Outcome<T, E>),
-    /// The task ahas
+    /// The task has terminated before the IO block
     Aborted(String),
 }
 

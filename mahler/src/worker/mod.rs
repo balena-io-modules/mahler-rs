@@ -19,7 +19,7 @@ use crate::serde::{de::DeserializeOwned, Serialize};
 use crate::state::State;
 use crate::sync::{channel, rw_lock, Interrupt, Reader, WithAck, Writer};
 use crate::system_ext::SystemExt;
-use crate::task::Task;
+use crate::task::{Id as TaskId, Task};
 
 mod auto_interrupt;
 mod domain;
@@ -107,6 +107,7 @@ pub struct Uninitialized {
     domain: Domain,
     sensors: SensorRouter,
     resources: Resources,
+    cleanup_hook: Option<TaskId>,
 }
 
 /// Initialized worker state
@@ -118,6 +119,7 @@ pub struct Ready {
     domain: Domain,
     system: System,
     sensor_router: SensorRouter,
+    cleanup_hook: Option<TaskId>,
     worker_id: u64,
 }
 
@@ -364,6 +366,7 @@ impl<O> Worker<O, Uninitialized> {
             domain: Domain::new(),
             resources: Resources::new(),
             sensors: SensorRouter::new(),
+            cleanup_hook: None,
         })
     }
 }
@@ -449,6 +452,111 @@ impl<O> Worker<O, Uninitialized> {
     /// ```
     pub fn jobs<const N: usize>(mut self, route: &'static str, list: [Job; N]) -> Self {
         self.inner.domain = self.inner.domain.jobs(route, list);
+        self
+    }
+
+    /// Register a post-workflow (cleanup) hook.
+    ///
+    /// The handler is registered as a [`none`](`crate::job::none`) job for the default route (`""`),
+    /// meaning it is not considered during planning. Instead, [`find_workflow`](Worker::find_workflow)
+    /// appends the task at the end of every successfully planned workflow.
+    ///
+    /// During planning, the handler is evaluated against the **post-workflow state**
+    /// (the state after all main workflow tasks have been simulated) and receives the
+    /// **target state** given to [find_workflow](`Worker::find_workflow`).
+    ///
+    /// If the handler's condition is not met
+    /// ([`ConditionNotMet`](`crate::error::ErrorKind::ConditionNotMet`)), the task
+    /// is silently skipped.
+    ///
+    /// Only one cleanup task may be registered. Calling this method again
+    /// replaces the previous one.
+    ///
+    /// Note: this task is only appended by [`find_workflow`](Worker::find_workflow)
+    /// (and by extension [`seek_target`](Worker::seek_target)).
+    /// [`run_task`](Worker::run_task) does not include it, since it executes a
+    /// specific task outside the normal planning cycle.
+    ///
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use mahler::extract::View;
+    /// use mahler::state::State;
+    /// use mahler::worker::{Worker, Uninitialized};
+    /// use mahler::task::{IO, with_io, enforce};
+    ///
+    /// #[derive(State)]
+    /// struct MyState {
+    ///     value: i32,
+    ///     needs_sync: bool,
+    /// }
+    ///
+    /// fn sync_state(mut state: View<MyState>) -> IO<MyState> {
+    ///     enforce!(state.needs_sync);
+    ///     state.needs_sync = false;
+    ///
+    ///     with_io(state, async |state| {
+    ///         todo!("perform state cleanup tasks")
+    ///     })
+    /// }
+    ///
+    /// let worker: Worker<MyState, Uninitialized> = Worker::new()
+    ///     .with_cleanup(sync_state);
+    /// ```
+    ///
+    /// <div class="warning">
+    /// The post-workflow hook is registered to the default route, meaning all extractors for the handler
+    /// must use the top level state model.
+    /// </div>
+    ///
+    /// ```rust
+    /// use mahler::extract::View;
+    /// use mahler::state::{State, Map};
+    /// use mahler::worker::{Worker, Uninitialized};
+    /// use mahler::task::IO;
+    ///
+    /// #[derive(State, Clone, Debug)]
+    /// struct Service;
+    ///
+    /// #[derive(State)]
+    /// struct MyState {
+    ///     services: Map<String, Service>,
+    /// }
+    ///
+    /// // registering this as a post-workflow hook will fail when trying
+    /// // to deserialize MyState into a Service
+    /// fn bad_cleanup(mut service: View<Service>) -> IO<MyState> {
+    ///     todo!()
+    /// }
+    ///
+    /// let worker: Worker<MyState, Uninitialized> = Worker::new()
+    ///     .with_cleanup(bad_cleanup);
+    /// ```
+    pub fn with_cleanup<H, T, U, I>(mut self, handler: H) -> Self
+    where
+        H: crate::task::Handler<T, U, I>,
+        I: 'static,
+    {
+        let Uninitialized {
+            ref mut cleanup_hook,
+            ref mut domain,
+            ..
+        } = self.inner;
+
+        let job = crate::job::none(handler).with_description(|| "clean-up");
+
+        // remove any old jobs from the domain
+        if let Some(oldjob) = cleanup_hook.replace(job.id()) {
+            domain.remove_job(oldjob);
+        }
+
+        // also remove any other references to the job in the domain
+        domain.remove_job(job.id());
+
+        // finally add the new job to the domain at the default route
+        domain.insert_job("", job);
+
         self
     }
 
@@ -568,6 +676,7 @@ impl<O> Worker<O, Uninitialized> {
             domain,
             resources,
             sensors,
+            cleanup_hook,
         } = self.inner;
 
         // Create a new system with an initial state and resources
@@ -583,6 +692,7 @@ impl<O> Worker<O, Uninitialized> {
             domain,
             system,
             sensor_router: sensors,
+            cleanup_hook,
             worker_id,
         }))
     }
@@ -723,14 +833,32 @@ impl<O: State> Worker<O, Ready> {
             domain,
             system,
             worker_id,
+            cleanup_hook,
             ..
         } = &self.inner;
 
-        let mut workflow = planner::find_workflow_to_target::<O>(domain, system, &tgt)?;
+        let mut system = system.clone();
+        let mut workflow = planner::find_workflow_to_target::<O>(domain, &mut system, &tgt)?;
 
-        // Attach worker metadata
+        // Attach worker metadata and after-workflow task
         if let Some(w) = workflow.as_mut() {
             w.worker_id = *worker_id;
+
+            if !w.is_empty() {
+                if let Some(job) = cleanup_hook.and_then(|id| domain.find_job("", id)) {
+                    let task = job.new_task(Context::new().with_target(tgt).with_path(""));
+                    let Workflow { dag: c_dag, .. } =
+                        match planner::find_workflow_for_task(task, domain, &system) {
+                            Ok(plan) => plan,
+                            Err(e) if e.kind() == ErrorKind::ConditionNotMet => Workflow::default(),
+                            Err(e) => return Err(e),
+                        };
+
+                    // concatenate the after-workflow task at the end of the plan
+                    let w_dag = std::mem::take(&mut w.dag);
+                    w.dag = w_dag.concat(c_dag);
+                }
+            }
         }
 
         Ok(workflow)
@@ -1875,7 +2003,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stream_continues_reporting_sensors_after_workflow_complete() {
+    async fn test_stream_continues_reporting_sensors_cleanup_hookcomplete() {
         use std::pin::pin;
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -2096,6 +2224,241 @@ mod tests {
         }
 
         vec![plus_one.with_target(*tgt), plus_one.with_target(*tgt)]
+    }
+
+    // ==================== Cleanup Tests ====================
+
+    #[test]
+    fn test_cleanup_hook_appended_to_workflow() {
+        use crate::dag::{seq, Dag};
+
+        init();
+
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        struct MyState {
+            value: i32,
+            needs_cleanup: bool,
+        }
+
+        impl State for MyState {
+            type Target = Self;
+        }
+
+        fn increment(mut state: View<MyState>, Target(tgt): Target<MyState>) -> View<MyState> {
+            if state.value < tgt.value {
+                state.value += 1;
+            }
+            state
+        }
+
+        fn do_cleanup(mut state: View<MyState>) -> View<MyState> {
+            if state.needs_cleanup {
+                state.needs_cleanup = false;
+            }
+            state
+        }
+
+        let worker = Worker::new()
+            .job("", update(increment))
+            .with_cleanup(do_cleanup)
+            .initial_state(MyState {
+                value: 0,
+                needs_cleanup: true,
+            })
+            .unwrap();
+
+        let workflow = worker
+            .find_workflow(MyState {
+                value: 2,
+                needs_cleanup: true,
+            })
+            .unwrap()
+            .unwrap();
+
+        // The after-workflow task should appear after the main workflow tasks
+        let expected: Dag<&str> = seq!(
+            "mahler::worker::tests::test_cleanup_hook_appended_to_workflow::increment()",
+            "mahler::worker::tests::test_cleanup_hook_appended_to_workflow::increment()",
+            "clean-up",
+        );
+
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_cleanup_hook_skipped_when_condition_not_met() {
+        init();
+
+        fn do_cleanup(mut counter: View<i32>) -> Option<View<i32>> {
+            if *counter > 0 {
+                *counter = 0;
+                return Some(counter);
+            }
+            // Return None to signal ConditionNotMet
+            None
+        }
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .with_cleanup(do_cleanup)
+            .initial_state(0)
+            .unwrap();
+
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+
+        // The condition is met (counter > 0 after incrementing)
+        // so the after-workflow task should appear
+        let has_cleanup_hook = workflow
+            .to_string()
+            .lines()
+            .any(|line| line.trim().trim_start_matches("- ").ends_with("clean-up"));
+        assert!(
+            has_cleanup_hook,
+            "cleanup_hook task should appear: {}",
+            workflow,
+        );
+
+        // Now test when condition is NOT met.
+        // After decrementing from 2 to 0, the handler's condition (*counter > 0)
+        // is false, so it returns None and gets skipped.
+        fn decrement(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
+            if *counter > tgt {
+                *counter -= 1;
+            }
+            counter
+        }
+
+        let worker = Worker::new()
+            .job("", update(decrement))
+            .with_cleanup(do_cleanup)
+            .initial_state(2)
+            .unwrap();
+
+        let workflow = worker.find_workflow(0).unwrap().unwrap();
+
+        // After decrementing to 0, the handler's condition (*counter > 0) is false,
+        // so it should be skipped.
+        let has_cleanup_hook = workflow
+            .to_string()
+            .lines()
+            .any(|line| line.trim().trim_start_matches("- ").ends_with("clean-up"));
+        assert!(
+            !has_cleanup_hook,
+            "cleanup_hook task should not appear when condition is not met: {}",
+            workflow
+        );
+    }
+
+    #[test]
+    fn test_cleanup_hook_skipped_when_workflow_is_empty() {
+        init();
+
+        fn do_cleanup() {}
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .with_cleanup(do_cleanup)
+            .initial_state(2)
+            .unwrap();
+
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+        let has_cleanup_hook = workflow
+            .to_string()
+            .lines()
+            .any(|line| line.trim().trim_start_matches("- ").ends_with("clean-up"));
+        assert!(
+            !has_cleanup_hook,
+            "cleanup_hook should not appear if the target has already been reached: {}",
+            workflow
+        );
+    }
+
+    #[test]
+    fn test_no_cleanup_hook_when_not_configured() {
+        init();
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .unwrap();
+
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+
+        let workflow_str = workflow.to_string();
+        assert!(
+            !workflow_str.contains("clean-up"),
+            "no cleanup should appear: {workflow_str}",
+        );
+    }
+
+    #[test]
+    fn test_no_cleanup_hook_when_no_plan_found() {
+        init();
+
+        fn noop() {}
+
+        let worker: Worker<i32, _> = Worker::new().with_cleanup(noop).initial_state(0).unwrap();
+
+        // No jobs registered, so no workflow can reach the target
+        let workflow = worker.find_workflow(1).unwrap();
+        assert!(workflow.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_hook_executed() {
+        use std::pin::pin;
+
+        init();
+
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        struct Counter {
+            value: i32,
+        }
+
+        impl State for Counter {
+            type Target = Self;
+        }
+
+        fn increment(mut state: View<Counter>, Target(tgt): Target<Counter>) -> IO<Counter> {
+            if state.value < tgt.value {
+                state.value += 1;
+            }
+
+            with_io(state, |state| async { Ok(state) })
+        }
+
+        // Cleanup always bumps value by 100 to make its execution observable
+        fn mark_clean(mut state: View<Counter>) -> View<Counter> {
+            state.value += 100;
+            state
+        }
+
+        let worker = Worker::new()
+            .job("", update(increment))
+            .with_cleanup(mark_clean)
+            .initial_state(Counter { value: 0 })
+            .unwrap();
+
+        let workflow = worker.find_workflow(Counter { value: 2 }).unwrap().unwrap();
+
+        let mut state = worker.state().unwrap();
+        let mut status = WorkflowStatus::Success;
+        {
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    WorkerEvent::StateUpdated(new_state) => state = new_state,
+                    WorkerEvent::WorkflowFinished(s) => {
+                        status = s;
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(status, WorkflowStatus::Success);
+        // The cleanup added 100 to the value after incrementing to 2
+        assert_eq!(state, Counter { value: 102 });
     }
 
     #[tokio::test]
