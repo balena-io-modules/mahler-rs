@@ -683,8 +683,9 @@ impl<T> Dag<T> {
     pub fn reverse(self) -> Dag<T> {
         let Dag { head, .. } = self;
 
-        // The original head becomes the new tail after reversal
-        let tail = head.clone();
+        // The tail will be determined during reversal: it's the node that
+        // receives prev=None (the outermost head becomes the tail)
+        let mut tail: Link<T> = None;
 
         // Stack format: (current_node, previous_node, branch_path)
         // - current_node: The node we're currently processing
@@ -703,6 +704,11 @@ impl<T> Dag<T> {
                         // Store the current next node before rewiring
                         let newhead = next.clone();
 
+                        // If prev is None, this is the original head becoming the new tail
+                        if prev.is_none() {
+                            tail = head.clone();
+                        }
+
                         // Rewire this node to point backward (to previous node)
                         *next = prev;
 
@@ -713,7 +719,14 @@ impl<T> Dag<T> {
 
                     Node::Fork { ref next } => {
                         // In reversal, a fork becomes a join point that branches converge to
+                        // If prev is None, this fork is the original head, and the join
+                        // replacing it becomes the new tail
+                        let is_outermost = prev.is_none();
                         let prev = Node::join(prev).into_link();
+
+                        if is_outermost {
+                            tail = prev.clone();
+                        }
 
                         // Process branches in reverse order to preserve their relative positioning
                         // after reversal (branch 0 stays branch 0, etc.)
@@ -1916,6 +1929,25 @@ mod tests {
                     - B
                   ~ - D
                 - A
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_dag_with_just_a_fork() {
+        let dag: Dag<char> = dag!(seq!('A', 'B'), seq!('C'));
+
+        // we test that the dag is well-formed by concatenating a new value
+        let reversed = dag.reverse() + seq!('D');
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                + ~ - B
+                    - A
+                  ~ - C
+                - D
                 "#
             )
         );
