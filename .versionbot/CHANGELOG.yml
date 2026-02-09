@@ -1,4 +1,105 @@
 - commits:
+    - subject: Fix bug in Dag::reverse
+      hash: 40d04f6bef0e8e6b96a398fa502f1b72f670da16
+      body: |
+        The bug resulted in a malformed DAG when the original graph started with
+        a fork node.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Allow defining a cleanup task for the worker
+      hash: 521d18a5ed255137aa78d3eb3705ea91c112c23e
+      body: |
+        The cleanup task is appended at the end of any workflow found for a
+        target on the Worker domain.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Allow tasks called from methods to return no changes
+      hash: 5ebb5af09679afc39124472d062cefb7a6aebfe2
+      body: |
+        Tasks can validate the state of the system using the `enforce` macro if
+        needed. If used within methods, it is assumed that the method calls the
+        empty task for a reason.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Clean up Distance definition in planner module
+      hash: 9a3f9a08bf8fce210e2bfac041edd6474129fadd
+      body: |
+        Makes the code cleaner and adds an `ignored` field that collects the
+        operations skipped during initialization. These operations
+        are now returned by the Workflow for more clarity around what has been
+        ignored by setting exceptions.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Simplify Worker by removing runtime task indirection
+      hash: 19b478e3f54a740af91a70259a875bdb72af318f
+      body: >
+        Remove the separate runtime task that managed system state updates.
+
+        The Worker now owns the System directly, simplifying the architecture
+
+        and making several previously async operations synchronous.
+
+
+        Key changes:
+
+        - Remove runtime.rs - Worker owns System directly instead of through
+        Handle
+
+        - Remove testing.rs - testing utilities no longer needed
+
+        - Remove Stopped state and stop() from typestate pattern
+
+        - Remove WithResources trait and follow() method
+
+        - state() and find_workflow() are now synchronous
+
+        - run_workflow() validates workflow synchronously, returns Stream
+
+        - Add WorkerEvent and WorkflowStatus types for stream events
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+    - subject: Move worker system writer task into its own module
+      hash: ed4645eb09cfc874b1fc9ec231e1059e7bbfa0df
+      body: |
+        The runtime module now contains the logic on writing system changes and
+        updating resources. It is the only place where the system is modified by
+        the code.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Add Reader/Writer wrapper types for RwLock
+      hash: 95d9f251c2cf779ae14807817c1522507ead0b3f
+      body: |
+        Introduce dedicated Reader and Writer wrapper types around tokio's
+        RwLock to enforce single-task ownership for writers. Writer::write()
+        takes &mut self to prevent Arc<Writer> from being usable for sharing
+        across tasks, as Arc only provides &T access.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: felipe
+      nested: []
+  version: 0.25.0
+  title: ""
+  date: 2026-02-09T22:56:18.426Z
+- commits:
     - subject: Add View::create method for View<Option<T>>
       hash: 3bd2b521fa8febfde3e5c22e5f12ec40cf78961f
       body: |
