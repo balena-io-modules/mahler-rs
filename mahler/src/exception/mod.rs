@@ -39,15 +39,15 @@
 //!     view.dead && !tgt.force
 //! }
 //!
-//! # tokio_test::block_on(async {
+//! # async fn test_exception_example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Add exceptions to the worker domain
 //! let worker = Worker::new()
 //!         // ... add jobs
 //!         // add `only_alive` as an exception for update operations on all services
 //!         .exception("/{service_name}", exception::update(only_alive))
-//!         .initial_state(Services::default())
-//!         .unwrap();
-//! # })
+//!         .initial_state(Services::default())?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::cmp::Ordering;

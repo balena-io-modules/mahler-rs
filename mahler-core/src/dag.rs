@@ -6,7 +6,7 @@ use std::ops::Add;
 use std::sync::{Arc, RwLock};
 
 use crate::error::AggregateError;
-use crate::sync::{Interrupt, Sender};
+use crate::sync::{Interrupt, Reader, Sender};
 
 type Link<T> = Option<Arc<RwLock<Node<T>>>>;
 
@@ -130,9 +130,11 @@ impl<T> Iterator for Iter<T> {
 /// }
 ///
 /// // Setup the worker domain and resources
-/// let worker: Worker<i32> = Worker::new()
-///                 .job("", update(plus_one).with_description(|| "+1"));
-/// let workflow = worker.find_workflow(0, 2).unwrap();
+/// let worker = Worker::new()
+///                 .job("", update(plus_one).with_description(|| "+1"))
+///                 .initial_state(0)
+///                 .unwrap();
+/// let workflow = worker.find_workflow(2).unwrap().unwrap();
 ///
 /// // We expect a linear DAG with two tasks
 /// let expected: Dag<&str> = seq!("+1", "+1");
@@ -681,8 +683,9 @@ impl<T> Dag<T> {
     pub fn reverse(self) -> Dag<T> {
         let Dag { head, .. } = self;
 
-        // The original head becomes the new tail after reversal
-        let tail = head.clone();
+        // The tail will be determined during reversal: it's the node that
+        // receives prev=None (the outermost head becomes the tail)
+        let mut tail: Link<T> = None;
 
         // Stack format: (current_node, previous_node, branch_path)
         // - current_node: The node we're currently processing
@@ -701,6 +704,11 @@ impl<T> Dag<T> {
                         // Store the current next node before rewiring
                         let newhead = next.clone();
 
+                        // If prev is None, this is the original head becoming the new tail
+                        if prev.is_none() {
+                            tail = head.clone();
+                        }
+
                         // Rewire this node to point backward (to previous node)
                         *next = prev;
 
@@ -711,7 +719,14 @@ impl<T> Dag<T> {
 
                     Node::Fork { ref next } => {
                         // In reversal, a fork becomes a join point that branches converge to
+                        // If prev is None, this fork is the original head, and the join
+                        // replacing it becomes the new tail
+                        let is_outermost = prev.is_none();
                         let prev = Node::join(prev).into_link();
+
+                        if is_outermost {
+                            tail = prev.clone();
+                        }
 
                         // Process branches in reverse order to preserve their relative positioning
                         // after reversal (branch 0 stays branch 0, etc.)
@@ -942,10 +957,10 @@ pub enum ExecutionStatus {
     Interrupted,
 }
 
-#[async_trait]
 /// Utility trait for executable DAGs
 ///
 /// Workflow items implementing this trait can be executed as part of a DAG (workflow) execution.
+#[async_trait]
 pub trait Task {
     /// The input type for the Task
     type Input;
@@ -973,7 +988,7 @@ where
     /// NOTE: this is not public to avoid exposing external crate types
     pub async fn execute(
         self,
-        input: &Arc<crate::sync::RwLock<T::Input>>,
+        input: &Reader<T::Input>,
         channel: Sender<T::Changes>,
         interrupt: Interrupt,
     ) -> Result<ExecutionStatus, AggregateError<T::Error>> {
@@ -1012,7 +1027,7 @@ where
 
         async fn exec_node<T>(
             node: Link<T>,
-            input: &Arc<crate::sync::RwLock<T::Input>>,
+            input: &Reader<T::Input>,
             channel: &Sender<T::Changes>,
             interrupt: &Interrupt,
         ) -> Result<Link<T>, InnerError<T::Error>>
@@ -1143,7 +1158,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::sync::channel;
+    use crate::sync::{channel, rw_lock};
 
     fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
         if let Node::Item { .. } = &*node.read().unwrap() {
@@ -1605,7 +1620,7 @@ mod tests {
         }
 
         let dag: Dag<DummyTask> = seq!(DummyTask, DummyTask, DummyTask);
-        let reader = Arc::new(tokio::sync::RwLock::new(()));
+        let (reader, _writer) = rw_lock(());
         let (tx, mut rx) = channel(10);
         let sigint = Interrupt::new();
 
@@ -1663,7 +1678,7 @@ mod tests {
 
         let dag: Dag<SleepyTask> = dag!(seq!(task_a), seq!(task_b)) + seq!(task_c);
 
-        let input = Arc::new(tokio::sync::RwLock::new(()));
+        let (input, _writer) = rw_lock(());
         let (tx, mut rx) = channel::<&'static str>(10);
         let sigint = Interrupt::new();
 
@@ -1713,7 +1728,7 @@ mod tests {
             }
         );
 
-        let input = Arc::new(tokio::sync::RwLock::new(()));
+        let (input, _writer) = rw_lock(());
         let (tx, mut rx) = channel::<&'static str>(10);
         let interrupt = Interrupt::new();
 
@@ -1808,7 +1823,7 @@ mod tests {
             fail: false
         });
 
-        let input = Arc::new(tokio::sync::RwLock::new(()));
+        let (input, _writer) = rw_lock(());
         let (tx, mut rx) = channel::<&'static str>(10);
         let interrupt = Interrupt::new();
 
@@ -1914,6 +1929,25 @@ mod tests {
                     - B
                   ~ - D
                 - A
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_dag_with_just_a_fork() {
+        let dag: Dag<char> = dag!(seq!('A', 'B'), seq!('C'));
+
+        // we test that the dag is well-formed by concatenating a new value
+        let reversed = dag.reverse() + seq!('D');
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                + ~ - B
+                    - A
+                  ~ - C
+                - D
                 "#
             )
         );

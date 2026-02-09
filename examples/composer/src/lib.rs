@@ -659,7 +659,7 @@ mod tests {
 
     use bollard::container::{ListContainersOptions, RemoveContainerOptions};
     use mahler::dag::{dag, seq, Dag};
-    use mahler::worker::SeekStatus;
+    use mahler::worker::{FindWorkflow, RunTask, SeekStatus, SeekTarget};
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use tracing_subscriber::fmt::{self, format::FmtSpan};
@@ -736,12 +736,9 @@ mod tests {
         let docker = Docker::connect_with_defaults().unwrap();
         let _ = docker.info().await.unwrap();
 
-        let worker = create_worker();
-        let state = worker
-            .run_task(
-                Project::new(PROJECT_NAME),
-                fetch_image.with_arg("image_name", "alpine:3.18"),
-            )
+        let (state, _) = create_worker()
+            .initial_state(Project::new(PROJECT_NAME))
+            .run_task(fetch_image.with_arg("image_name", "alpine:3.18"))
             .await
             .unwrap();
 
@@ -757,9 +754,6 @@ mod tests {
     async fn it_can_start_container() {
         before();
 
-        let worker = create_worker()
-            .initial_state(Project::new(PROJECT_NAME))
-            .unwrap();
         let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
@@ -773,8 +767,11 @@ mod tests {
         .unwrap();
 
         // Seeking the target must succeed
-        let mut worker = worker;
-        let status = worker.seek_target(target.clone()).await.unwrap();
+        let (state, status) = create_worker()
+            .initial_state(Project::new(PROJECT_NAME))
+            .seek_target(target.clone())
+            .await
+            .unwrap();
         assert_eq!(status, SeekStatus::Success);
 
         // The alpine image must exist now
@@ -782,7 +779,6 @@ mod tests {
         let img = docker.inspect_image("alpine:3.18").await.unwrap();
 
         // The image ids should match
-        let state = worker.state().await.unwrap();
         assert_eq!(state.images.get("alpine:3.18").unwrap().id, img.id);
 
         let container = docker
@@ -809,7 +805,6 @@ mod tests {
             "services": {}
         }))
         .unwrap();
-        let worker = create_worker();
         let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
@@ -822,13 +817,16 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = worker.find_workflow(initial_state, target).unwrap();
+        let (_, workflow) = create_worker()
+            .initial_state(initial_state)
+            .find_workflow(target)
+            .unwrap();
         let expected: Dag<&str> = seq!(
             "pull image 'alpine:3.18'",
             "install container for service 'my-service'",
             "start container for service 'my-service'"
         );
-        assert_eq!(workflow.to_string(), expected.to_string());
+        assert_eq!(workflow.unwrap().to_string(), expected.to_string());
     }
 
     #[tokio::test]
@@ -849,7 +847,6 @@ mod tests {
             }
         }))
         .unwrap();
-        let worker = create_worker();
         let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
@@ -862,14 +859,17 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = worker.find_workflow(initial_state, target).unwrap();
+        let (_, workflow) = create_worker()
+            .initial_state(initial_state)
+            .find_workflow(target)
+            .unwrap();
         let expected: Dag<&str> = seq!(
             "stop container for service 'my-service'",
             "remove container for service 'my-service'",
             "install container for service 'my-service'",
             "start container for service 'my-service'"
         );
-        assert_eq!(workflow.to_string(), expected.to_string());
+        assert_eq!(workflow.unwrap().to_string(), expected.to_string());
     }
 
     #[tokio::test]
@@ -890,7 +890,6 @@ mod tests {
             }
         }))
         .unwrap();
-        let worker = create_worker();
         let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
@@ -903,7 +902,10 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = worker.find_workflow(initial_state, target).unwrap();
+        let (_, workflow) = create_worker()
+            .initial_state(initial_state)
+            .find_workflow(target)
+            .unwrap();
         let expected: Dag<&str> = dag!(
             seq!("pull image 'alpine:3.20'",),
             seq!(
@@ -915,7 +917,7 @@ mod tests {
             "remove image 'alpine:3.18'",
             "start container for service 'my-service'",
         );
-        assert_eq!(workflow.to_string(), expected.to_string());
+        assert_eq!(workflow.unwrap().to_string(), expected.to_string());
     }
 
     #[tokio::test]
@@ -936,7 +938,6 @@ mod tests {
             }
         }))
         .unwrap();
-        let worker = create_worker();
         let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
@@ -949,9 +950,12 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = worker.find_workflow(initial_state, target).unwrap();
+        let (_, workflow) = create_worker()
+            .initial_state(initial_state)
+            .find_workflow(target)
+            .unwrap();
         let expected: Dag<&str> = seq!("start container for service 'my-service'",);
-        assert_eq!(workflow.to_string(), expected.to_string());
+        assert_eq!(workflow.unwrap().to_string(), expected.to_string());
 
         let initial_state = serde_json::from_value::<Project>(json!({
             "name": "my-project",
@@ -979,18 +983,18 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = worker.find_workflow(initial_state, target).unwrap();
+        let (_, workflow) = create_worker()
+            .initial_state(initial_state)
+            .find_workflow(target)
+            .unwrap();
         let expected: Dag<&str> = seq!("start container for service 'my-service'",);
-        assert_eq!(workflow.to_string(), expected.to_string());
+        assert_eq!(workflow.unwrap().to_string(), expected.to_string());
     }
 
     #[tokio::test]
     async fn test_create_start_and_stop_container() {
         before();
 
-        let worker = create_worker()
-            .initial_state(Project::new(PROJECT_NAME))
-            .unwrap();
         let target = serde_json::from_value::<ProjectTarget>(json!({
             "name": "my-project",
             "services": {
@@ -1004,8 +1008,11 @@ mod tests {
         .unwrap();
 
         // Seeking the target must succeed
-        let mut worker = worker;
-        let status = worker.seek_target(target).await.unwrap();
+        let (state, status) = create_worker()
+            .initial_state(Project::new(PROJECT_NAME))
+            .seek_target(target)
+            .await
+            .unwrap();
         assert_eq!(status, SeekStatus::Success);
 
         // The alpine image must exist now
@@ -1016,7 +1023,6 @@ mod tests {
             .unwrap();
 
         // The image ids should match
-        let state = worker.state().await.unwrap();
         assert_eq!(
             state
                 .images
@@ -1050,8 +1056,11 @@ mod tests {
         .unwrap();
 
         // Seeking the target must succeed
-        let mut worker = worker;
-        let status = worker.seek_target(target).await.unwrap();
+        let (state, status) = create_worker()
+            .initial_state(state)
+            .seek_target(target)
+            .await
+            .unwrap();
         assert_eq!(status, SeekStatus::Success);
 
         // The container ids should match
@@ -1078,7 +1087,11 @@ mod tests {
         .unwrap();
 
         // Seeking the target must succeed
-        let status = worker.seek_target(target).await.unwrap();
+        let (state, status) = create_worker()
+            .initial_state(state)
+            .seek_target(target)
+            .await
+            .unwrap();
         assert_eq!(status, SeekStatus::Success);
 
         // The container ids should match
@@ -1099,7 +1112,11 @@ mod tests {
         .unwrap();
 
         // Seeking the target must succeed
-        let status = worker.seek_target(target).await.unwrap();
+        let (_, status) = create_worker()
+            .initial_state(state)
+            .seek_target(target)
+            .await
+            .unwrap();
         assert_eq!(status, SeekStatus::Success);
 
         // The container should no longer exist

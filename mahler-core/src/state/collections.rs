@@ -44,6 +44,11 @@ impl<T> List<T> {
     pub fn into_inner(self) -> Vec<T> {
         self.0
     }
+
+    /// Returns true if the list is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl<T> Default for List<T> {
@@ -215,6 +220,11 @@ impl<T: Ord> Set<T> {
     pub fn into_inner(self) -> BTreeSet<T> {
         self.0
     }
+
+    /// Returns true if the set is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl<T: Ord> Deref for Set<T> {
@@ -368,6 +378,11 @@ impl<K: Ord, V> Map<K, V> {
     /// Unwraps the Map into the inner BTreeMap.
     pub fn into_inner(self) -> BTreeMap<K, V> {
         self.0
+    }
+
+    /// Returns true if the map is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 

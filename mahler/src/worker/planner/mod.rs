@@ -1,14 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use json_patch::diff;
 use jsonptr::PointerBuf;
 use tracing::{field, instrument, trace, trace_span, warn, Span};
 
 use crate::dag::Dag;
 use crate::error::{Error, ErrorKind};
-use crate::json::{Operation, OperationMatcher, Patch, PatchOperation, Path, Value};
+use crate::json::{OperationMatcher, Patch, PatchOperation, Path, Value};
+use crate::result::Result;
 use crate::runtime::{Context, System};
 use crate::state::State;
 use crate::system_ext::SystemExt;
@@ -154,37 +153,6 @@ impl Ord for Candidate {
     }
 }
 
-/// A planning error
-///
-/// Planning may be interrupted early because of a bug in a job definition or it
-/// may fail because there is no valid combination of jobs in the domain to reach the desired
-/// target.
-#[derive(Debug)]
-pub enum PlanningError {
-    /// Search was interrupted early due to an error in one of the job definitions
-    Aborted(Error),
-    /// No combination of jobs was found for the give set of changes
-    NotFound(Vec<Operation>),
-}
-
-impl fmt::Display for PlanningError {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let PlanningError::Aborted(reason) = self {
-            write!(fmt, "workflow not found: {reason}")
-        } else {
-            write!(fmt, "workflow not found")
-        }
-    }
-}
-
-impl std::error::Error for PlanningError {}
-
-impl From<Error> for PlanningError {
-    fn from(e: Error) -> Self {
-        PlanningError::Aborted(e)
-    }
-}
-
 /// Convert the task into a workflow if possible
 ///
 /// For primitive tasks, the workflow will just contain a single node, however
@@ -195,12 +163,7 @@ impl From<Error> for PlanningError {
 /// * `db` - a reference to the worker [`Domain`]
 /// * `task` - the task to convert to a workflow
 /// * `cur_state` - the state of the system before running the task
-#[cfg(debug_assertions)]
-pub fn find_workflow_for_task(
-    mut task: Task,
-    db: &Domain,
-    cur_state: &System,
-) -> Result<Workflow, Error> {
+pub fn find_workflow_for_task(mut task: Task, db: &Domain, cur_state: &System) -> Result<Workflow> {
     // Look-up the task on the domain to find its path
     let task_id = task.id();
     let Context { args, .. } = task.context_mut();
@@ -234,20 +197,13 @@ fn try_task_into_workflow(
     cur_state: &System,
     domain: &mut BTreeSet<Path>,
     changes: &mut Vec<PatchOperation>,
-) -> Result<Dag<WorkUnit>, Error> {
+) -> Result<Dag<WorkUnit>> {
     match task {
         Task::Action(action) => {
             let work_id = WorkUnit::new_id(action, cur_state.inner_state());
 
             // Simulate the task and get the list of changes
-            let patch = action.dry_run(cur_state)?;
-            if patch.is_empty() {
-                // An empty result from the task is equivalent to
-                // the task condition not being met
-                return Err(ErrorKind::ConditionNotMet)?;
-            }
-
-            let Patch(ops) = patch;
+            let Patch(ops) = action.dry_run(cur_state)?;
 
             // Prepend a new node to the workflow, include a copy
             // of the changes for validation during runtime
@@ -332,7 +288,7 @@ fn try_task_into_workflow(
                     };
 
                 // Apply the task changes
-                cur_state.patch(Patch(task_changes.to_vec()))?;
+                cur_state.patch(&Patch(task_changes.to_vec()))?;
 
                 // Add the new dag to the list of branches and update the cummulative domain
                 plan_branches.push(partial_plan);
@@ -354,23 +310,18 @@ fn try_task_into_workflow(
 
 /// Find a workflow that takes the system from its current state
 /// to the target state using the tasks in the provided Domain
+///
+/// If found, this will replace the value of system with the final state of the system
 #[instrument(level = "trace", skip_all, err(level = "trace"))]
 pub fn find_workflow_to_target<T>(
     db: &Domain,
-    system: &System,
+    system: &mut System,
     tgt: &Value,
-) -> Result<Workflow, PlanningError>
+) -> Result<Option<Workflow>>
 where
     T: State,
 {
     trace!(initial=%system, target=%tgt, "searching for workflow");
-
-    // calculate the distance to the target at the beginning of the search
-    let ini = system
-        .state::<T::Target>()
-        .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
-    let Patch(changes) = diff(&ini, tgt);
-    let changes: Vec<Operation> = changes.into_iter().map(Operation::from).collect();
 
     // The search stack stores (current_state, current_plan, depth)
     let mut stack = vec![(system.clone(), Dag::default(), 0)];
@@ -385,7 +336,7 @@ where
         // Prevent infinite recursion (e.g., from buggy tasks or recursive methods)
         if depth >= 256 {
             warn!(parent: &find_workflow_span, "reached max search depth (256)");
-            return Err(PlanningError::NotFound(changes));
+            return Err(ErrorKind::PlanningOverflow.into());
         }
 
         // Normalize state: deserialize into the target type and re-serialize to remove internal fields
@@ -403,9 +354,11 @@ where
         if distance.is_empty() {
             // we need to reverse the plan before returning
             let mut workflow = Workflow::new(cur_plan.reverse());
-            workflow.ignored = skipped_state_paths;
-            workflow.operations = changes;
-            return Ok(workflow);
+            workflow.ignored = distance.ignored;
+
+            // update the system
+            *system = cur_state;
+            return Ok(Some(workflow));
         }
 
         let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
@@ -419,7 +372,7 @@ where
         let mut candidates: Vec<Candidate> = Vec::new();
 
         // Iterate over distance operations and jobs to find possible candidates
-        for op in distance.operations() {
+        for op in distance.operations {
             let path = op.path();
             let pointer = path.as_ref();
 
@@ -441,7 +394,7 @@ where
 
                 // if there are any exceptions that apply to the context, add the path to
                 // the list and skip the path
-                if exceptions.filter(|j| j.operation().matches(op)).any(|exception| {
+                if exceptions.filter(|j| j.operation().matches(&op)).any(|exception| {
                     exception.test(&cur_state, &context)
                         .inspect_err(
                             |e| warn!(parent: &find_workflow_span, "cannot evaluate {exception}: {e}"),
@@ -462,7 +415,7 @@ where
                 };
 
                 // Look for jobs matching the operation
-                for job in jobs.filter(|j| j.operation().matches(op)) {
+                for job in jobs.filter(|j| j.operation().matches(&op)) {
                     let task = job.new_task(context.clone());
                     let mut changes = Vec::new();
                     let mut domain = BTreeSet::new();
@@ -484,24 +437,13 @@ where
                             // Skip the task if condition is not met
                             ErrorKind::ConditionNotMet => {}
                             // Critical internal errors terminate the search
-                            ErrorKind::Internal => return Err(e)?,
+                            ErrorKind::Internal => return Err(e),
                             // Other job errors are ignored unless debugging
-                            _ => {
-                                if cfg!(debug_assertions) {
-                                    return Err(e.into());
-                                }
-                                warn!(
-                                    parent: &find_workflow_span,
-                                    "task {} failed: {} ... ignoring",
-                                    task.id(),
-                                    e
-                                );
-                                return Err(e.into());
-                            }
+                            _ => return Err(e),
                         },
 
                         // ignore if changes is empty
-                        _ => {}
+                        _ => trace!(task=%task, "ignored empty task"),
                     }
                 }
             }
@@ -586,7 +528,7 @@ where
         } in candidates.into_iter().rev()
         {
             let mut new_state = cur_state.clone();
-            new_state.patch(Patch(changes))?;
+            new_state.patch(&Patch(changes))?;
 
             // Ignore the candidate if it takes us to a state the planner has visited before,
             // this avoids the planner just trying tasks in a different order or potentially
@@ -618,7 +560,7 @@ where
     }
 
     // No candidate plan reached the goal state
-    Err(PlanningError::NotFound(changes))?
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -637,6 +579,7 @@ mod tests {
     use crate::dag::{dag, par, seq, Dag};
     use crate::extract::{Args, System, Target, View};
     use crate::job::*;
+    use crate::json::Operation;
     use crate::state::{Map, State};
     use crate::task::prelude::*;
 
@@ -694,16 +637,16 @@ mod tests {
         counter
     }
 
-    pub fn find_plan<T>(db: &Domain, cur: T, tgt: T::Target) -> Result<Workflow, PlanningError>
+    pub fn find_plan<T>(db: &Domain, cur: T, tgt: T::Target) -> Result<Option<Workflow>>
     where
         T: State,
     {
         let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
-        let system =
+        let mut system =
             crate::runtime::System::try_from(cur).expect("failed to serialize current state");
 
-        let res = find_workflow_to_target::<T>(db, &system, &tgt)?;
+        let res = find_workflow_to_target::<T>(db, &mut system, &tgt)?;
         Ok(res)
     }
 
@@ -713,7 +656,7 @@ mod tests {
             .job("", update(plus_one))
             .job("", update(minus_one));
 
-        let workflow = find_plan(&domain, 0, 2).unwrap();
+        let workflow = find_plan(&domain, 0, 2).unwrap().unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -730,7 +673,7 @@ mod tests {
 
         let workflow = find_plan(&domain, 0, 2);
 
-        assert!(matches!(workflow, Err(PlanningError::NotFound(_))));
+        assert!(matches!(workflow, Ok(None)));
     }
 
     #[test]
@@ -750,7 +693,7 @@ mod tests {
             .job("", update(plus_two))
             .job("", none(plus_one));
 
-        let workflow = find_plan(&domain, 0, 2).unwrap();
+        let workflow = find_plan(&domain, 0, 2).unwrap().unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -784,7 +727,7 @@ mod tests {
             .job("/counters/{counter}", update(minus_one))
             .job("/counters/{counter}", update(plus_one));
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect counters to be updated concurrently
         let expected: Dag<&str> = par!(
@@ -821,7 +764,7 @@ mod tests {
             .job("/counters/{counter}", none(plus_one))
             .job("/counters/{counter}", update(plus_two));
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(
@@ -862,7 +805,7 @@ mod tests {
             .job("/counters/{counter}", none(plus_two))
             .job("/counters/{counter}", update(plus_three));
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect a linear DAG with two tasks
         let expected: Dag<&str> = seq!(
@@ -891,7 +834,7 @@ mod tests {
             .job("/{counter}", none(plus_one))
             .job("/{counter}", update(plus_other));
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect a parallel dag for this specific target
         let expected: Dag<&str> = par!(
@@ -902,12 +845,8 @@ mod tests {
         assert_eq!(workflow.to_string(), expected.to_string(),);
     }
 
-    // This test will fail to find a plan due to a bug in the task definitions,
-    // with backtracking, the planner might find a correct candidated but the planner avoids
-    // backtracking to prevent combinatorial explosion.
-    // ```
     #[test]
-    fn it_fails_to_find_a_plan_for_a_buggy_task() {
+    fn it_allows_empty_tasks_as_part_of_methods() {
         init();
 
         #[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -981,7 +920,8 @@ mod tests {
                 return vec![];
             }
 
-            // dummy task is always empty so do_cleanup will never be picked
+            // dummy task is always empty but it should be accepted as part of the
+            // method
             vec![dummy_task.into_task(), complete_cleanup.into_task()]
         }
 
@@ -1030,8 +970,15 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target);
-        assert!(workflow.is_err(), "unexpected plan:\n{}", workflow.unwrap());
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
+        let expected: Dag<&str> = seq!("ensure cleanup")
+            + par!(
+                "store configuration",
+                "set device name",
+                "prepare app my-app"
+            )
+            + seq!("dummy task", "complete cleanup");
+        assert_eq!(expected.to_string(), workflow.to_string());
     }
 
     #[test]
@@ -1115,7 +1062,7 @@ mod tests {
         )
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         let expected: Dag<&str> = seq!(
             "create image 'ubuntu'",
@@ -1186,7 +1133,7 @@ mod tests {
         )
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         let expected: Dag<&str> = par!("update configurations", "create counter 'one'");
         assert_eq!(expected.to_string(), workflow.to_string());
@@ -1272,7 +1219,7 @@ mod tests {
             ]),
         };
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // We expect a concurrent dag with two tasks on each branch
         let expected: Dag<&str> = dag!(seq!("a++", "a++"), seq!("b++", "b++"))
@@ -1362,7 +1309,7 @@ mod tests {
             ]),
         };
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Should run concurrently because different array elements and map keys don't conflict
         let expected: Dag<&str> = par!("mahler::worker::planner::tests::test_array_element_conflicts::update_config(/configs/database)",
@@ -1620,7 +1567,7 @@ mod tests {
             ]),
         };
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
         let expected: Dag<&str> = seq!(
             "unstack block C",
             "put down block C",
@@ -1840,7 +1787,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Service "two" should be skipped because it failed
         let expected: Dag<&str> = par!("start service one", "start service three");
@@ -1848,7 +1795,13 @@ mod tests {
 
         // Verify that the ignored paths include service two
         assert_eq!(workflow.ignored.len(), 1);
-        assert_eq!(workflow.ignored[0].as_str(), "/services/two");
+        assert_eq!(
+            workflow.ignored[0],
+            Operation::Update {
+                path: Path::from_static("/services/two/running"),
+                value: json!(true)
+            }
+        );
     }
 
     #[test]
@@ -1925,13 +1878,19 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // App "foo" should be skipped because it's pinned to 1.0
         let expected: Dag<&str> = par!("update app bar", "update app baz");
         assert_eq!(expected.to_string(), workflow.to_string());
         assert_eq!(workflow.ignored.len(), 1);
-        assert_eq!(workflow.ignored[0].as_str(), "/apps/foo");
+        assert_eq!(
+            workflow.ignored[0],
+            Operation::Update {
+                path: Path::from_static("/apps/foo/version"),
+                value: json!("2.0")
+            }
+        );
     }
 
     #[test]
@@ -2010,7 +1969,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Resource "a" update should be skipped, but "b" should be updated
         let expected: Dag<&str> = seq!("update resource b");
@@ -2031,7 +1990,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Resource "c" should be created even though value is negative
         let expected: Dag<&str> = seq!("create resource c");
@@ -2156,7 +2115,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Service "web" and config "host" should be skipped
         // Check that both tasks are present (order may vary)
@@ -2164,89 +2123,26 @@ mod tests {
         assert!(workflow_str.contains("start service api"));
         assert!(workflow_str.contains("update config port"));
         assert_eq!(workflow.ignored.len(), 2);
-        assert!(workflow
-            .ignored
-            .contains(&Path::from_static("/services/web")));
-        assert!(workflow
-            .ignored
-            .contains(&Path::from_static("/config/host")));
-    }
-
-    #[test]
-    fn test_exception_with_args_extractor() {
-        init();
-
-        #[derive(Serialize, Deserialize)]
-        struct Item {
-            value: String,
-        }
-
-        impl State for Item {
-            type Target = Self;
-        }
-
-        #[derive(Serialize, Deserialize)]
-        struct Items {
-            items: Map<String, Item>,
-        }
-
-        impl State for Items {
-            type Target = Self;
-        }
-
-        fn update_item(mut item: View<Item>, Target(tgt): Target<Item>) -> View<Item> {
-            item.value = tgt.value;
-            item
-        }
-
-        // Exception: skip items with specific names
-        fn skip_protected_items(crate::extract::Args(name): crate::extract::Args<String>) -> bool {
-            name == "protected" || name == "system"
-        }
-
-        let domain = Domain::new()
-            .job(
-                "/items/{name}",
-                update(update_item)
-                    .with_description(|Args(name): Args<String>| format!("update item {name}")),
-            )
-            .exception(
-                "/items/{name}",
-                crate::exception::update(skip_protected_items),
-            );
-
-        let initial = serde_json::from_value::<Items>(json!({
-            "items": {
-                "normal": { "value": "old1" },
-                "protected": { "value": "old2" },
-                "system": { "value": "old3" },
-                "user": { "value": "old4" }
-            }
-        }))
-        .unwrap();
-
-        let target = serde_json::from_value::<Items>(json!({
-            "items": {
-                "normal": { "value": "new1" },
-                "protected": { "value": "new2" },
-                "system": { "value": "new3" },
-                "user": { "value": "new4" }
-            }
-        }))
-        .unwrap();
-
-        let workflow = find_plan(&domain, initial, target).unwrap();
-
-        // Items "protected" and "system" should be skipped
-        let expected: Dag<&str> = par!("update item normal", "update item user");
-        assert_eq!(expected.to_string(), workflow.to_string());
-        assert_eq!(workflow.ignored.len(), 2);
-        assert!(workflow
-            .ignored
-            .contains(&Path::from_static("/items/protected")));
-        assert!(workflow
-            .ignored
-            .contains(&Path::from_static("/items/system")));
+        assert_eq!(
+            workflow
+                .ignored
+                .iter()
+                .find(|op| op.path().starts_with("/services/web")),
+            Some(&Operation::Update {
+                path: Path::from_static("/services/web/running"),
+                value: json!(true)
+            })
+        );
+        assert_eq!(
+            workflow
+                .ignored
+                .iter()
+                .find(|op| op.path().starts_with("/config/host")),
+            Some(&Operation::Update {
+                path: Path::from_static("/config/host/value"),
+                value: json!("new")
+            })
+        );
     }
 
     #[test]
@@ -2337,13 +2233,19 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // App "api" should be skipped because node:14 image is not available
         let expected: Dag<&str> = par!("update app web", "update app worker");
         assert_eq!(expected.to_string(), workflow.to_string());
         assert_eq!(workflow.ignored.len(), 1);
-        assert_eq!(workflow.ignored[0].as_str(), "/apps/api");
+        assert_eq!(
+            workflow.ignored[0],
+            Operation::Update {
+                path: Path::from_static("/apps/api/image"),
+                value: json!("node:16")
+            }
+        );
     }
 
     #[test]
@@ -2439,7 +2341,7 @@ mod tests {
         }))
         .unwrap();
 
-        let workflow = find_plan(&domain, initial, target).unwrap();
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
 
         // Container "a" and all its nested fields should be skipped
         let expected: Dag<&str> =
@@ -2447,6 +2349,12 @@ mod tests {
         assert_eq!(expected.to_string(), workflow.to_string());
 
         // The parent path /containers/a should be on the ignore list
-        assert_eq!(workflow.ignored[0].as_str(), "/containers/a");
+        assert_eq!(
+            workflow.ignored[0],
+            Operation::Update {
+                path: Path::from_static("/containers/a/name"),
+                value: json!("still-disabled")
+            }
+        );
     }
 }

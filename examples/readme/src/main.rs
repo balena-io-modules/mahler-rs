@@ -7,8 +7,8 @@ use mahler::extract::{Args, Target, View};
 use mahler::job::update;
 use mahler::result::Result;
 use mahler::state::{Map, State};
-use mahler::task::{with_io, Handler, Task, IO};
-use mahler::worker::Worker;
+use mahler::task::{enforce, with_io, Handler, Task, IO};
+use mahler::worker::{SeekStatus, Worker};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 // The state model needs to be Serializable and Deserializable
@@ -23,10 +23,11 @@ struct Counters(Map<String, i32>);
 // the job task can affect the global state
 // - `Target`, providing a read only view to the target being seeked by the planner
 fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
-    if *counter < tgt {
-        // Modify the counter value if we are below the target
-        *counter += 1;
-    }
+    // abort the task if the target has already been reached
+    enforce!(*counter < tgt);
+
+    // Modify the counter value if we are below the target
+    *counter += 1;
 
     // The task is called at planning and at runtime, the `with_io` function
     // allows us to define what is returned by the function at each context.
@@ -68,7 +69,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mut worker = Worker::new()
+    let worker = Worker::new()
         // The jobs are applicable to `UPDATE` operations
         // on individual counters
         .job(
@@ -87,18 +88,14 @@ async fn main() -> Result<()> {
 
     // Tell the worker to find a plan from the initial state (a:0, b:0)
     // to the target state (a:1, b:2) and execute it
-    let _status = worker
+    let (state, status) = worker
         .seek_target(CountersTarget(Map::from([
             ("a".to_string(), 1),
             ("b".to_string(), 2),
         ])))
         .await?;
 
-    // Get the internal state from the Worker. The worker
-    // is idle but the state may not be static so we need
-    // to use an await to get the current state.
-    let state = worker.state().await?;
-
+    assert_eq!(status, SeekStatus::Success);
     assert_eq!(
         state,
         Counters(Map::from([("a".to_string(), 1), ("b".to_string(), 2),]))

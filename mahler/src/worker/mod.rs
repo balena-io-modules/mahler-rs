@@ -1,52 +1,54 @@
 //! Automated planning and execution of task workflows
 
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::pin::pin;
 use std::time::Instant;
-use tokio::select;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_stream::wrappers::WatchStream;
-use tokio_stream::{Stream, StreamExt};
-use tracing::field::display;
-use tracing::{
-    debug, error, field, info, info_span, instrument, span, trace, warn, Instrument, Level, Span,
-};
 
-#[cfg(debug_assertions)]
-mod testing;
+use async_stream::try_stream;
+use jsonptr::{Pointer, PointerBuf};
+use tokio_stream::{Stream, StreamExt, StreamMap};
+use tracing::{debug, info, trace, warn, Instrument, Span};
 
 use crate::error::{AggregateError, Error, ErrorKind};
 use crate::exception::Exception;
 use crate::job::Job;
-use crate::json::{Patch, Value};
+use crate::json::{Operation, Patch, PatchOperation, ReplaceOperation, Value};
 use crate::result::Result;
-use crate::runtime::{Resources, System};
-use crate::serde::de::DeserializeOwned;
+use crate::runtime::{Context, Resources, System};
+use crate::sensor::{Sensor, SensorBuilder, SensorRouter, SensorStream};
+use crate::serde::{de::DeserializeOwned, Serialize};
 use crate::state::State;
-use crate::sync::{channel, Interrupt, RwLock, Sender};
+use crate::sync::{channel, rw_lock, Interrupt, Reader, WithAck, Writer};
 use crate::system_ext::SystemExt;
+use crate::task::{Id as TaskId, Task};
 
 mod auto_interrupt;
 mod domain;
 mod planner;
 mod workflow;
+
 use auto_interrupt::AutoInterrupt;
 use domain::Domain;
+use workflow::WorkflowStatus as InnerWorkflowStatus;
 
-pub use planner::PlanningError;
-pub use workflow::*;
+pub use workflow::Workflow;
 
+/// Events emitted during workflow execution
+///
+/// Yielded by the stream returned from [`Worker::run_workflow`].
 #[derive(Debug)]
+pub enum WorkerEvent<S> {
+    /// State was updated after a task completed
+    StateUpdated(S),
+    /// Workflow execution terminated
+    WorkflowFinished(WorkflowStatus),
+}
+
 /// Exit status from [`Worker::seek_target`]
+#[derive(Debug)]
 pub enum SeekStatus {
-    /// The worker has reached the target state
-    Success,
-    /// No workflow was found for the given target
     NotFound,
-    /// Worker interrupted by user request
-    Interrupted,
+    /// The workflow was executed successfully
+    Success,
     /// An error happened while executing the workflow.
     Aborted(Vec<Error>),
 }
@@ -55,14 +57,43 @@ impl PartialEq for SeekStatus {
     fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (SeekStatus::Success, SeekStatus::Success)
-                | (SeekStatus::NotFound, SeekStatus::NotFound)
-                | (SeekStatus::Interrupted, SeekStatus::Interrupted)
+            (SeekStatus::NotFound, SeekStatus::NotFound)
+                | (SeekStatus::Success, SeekStatus::Success)
         )
     }
 }
 
 impl Eq for SeekStatus {}
+
+impl From<WorkflowStatus> for SeekStatus {
+    fn from(s: WorkflowStatus) -> Self {
+        use WorkflowStatus::*;
+        match s {
+            Success => SeekStatus::Success,
+            Aborted(errors) => SeekStatus::Aborted(errors),
+        }
+    }
+}
+
+/// Exit status from [`Worker::run_workflow`]
+#[derive(Debug)]
+pub enum WorkflowStatus {
+    /// The workflow was executed successfully
+    Success,
+    /// An error happened while executing the workflow.
+    Aborted(Vec<Error>),
+}
+
+impl PartialEq for WorkflowStatus {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (WorkflowStatus::Success, WorkflowStatus::Success)
+        )
+    }
+}
+
+impl Eq for WorkflowStatus {}
 
 /// Helper trait to implement the Typestate pattern for Worker
 pub trait WorkerState {}
@@ -71,9 +102,12 @@ pub trait WorkerState {}
 ///
 /// While in the `Uninitialized` state, jobs and resources may be
 /// assigned to the Worker
+#[derive(Clone)]
 pub struct Uninitialized {
     domain: Domain,
+    sensors: SensorRouter,
     resources: Resources,
+    cleanup_hook: Option<TaskId>,
 }
 
 /// Initialized worker state
@@ -81,68 +115,82 @@ pub struct Uninitialized {
 /// This is the state where the `Worker` moves to after receiving an initial state.
 ///
 /// At this point the Worker is ready to start seeking a target state
-#[derive(Clone)]
 pub struct Ready {
     domain: Domain,
-    resources: Resources,
-    system_rwlock: Arc<RwLock<System>>,
-    update_event_channel: watch::Sender<()>,
-    patch_tx: Sender<Patch>,
-    writer_closed_rx: watch::Receiver<()>,
+    system: System,
+    sensor_router: SensorRouter,
+    cleanup_hook: Option<TaskId>,
     worker_id: u64,
-    generation: Arc<AtomicU64>,
 }
-
-/// Final state of a Worker
-///
-/// No further Worker operations can be performed after this state
-pub struct Stopped {}
 
 impl WorkerState for Uninitialized {}
 impl WorkerState for Ready {}
-impl WorkerState for Stopped {}
-
-pub trait WithResources {
-    fn insert_resource<R: Send + Sync + 'static>(&mut self, resource: R);
-}
-
-impl WithResources for Uninitialized {
-    fn insert_resource<R>(&mut self, resource: R)
-    where
-        R: Send + Sync + 'static,
-    {
-        self.resources.insert(resource);
-    }
-}
-
-impl WithResources for Ready {
-    fn insert_resource<R>(&mut self, resource: R)
-    where
-        R: Send + Sync + 'static,
-    {
-        self.resources.insert(resource);
-    }
-}
 
 /// Core component for workflow generation and execution
 ///
 /// Given a target to [`Worker::seek_target`], the `Worker` will look for a plan that takes the
-/// system from the current state to the target, execute the plan (workflow) and re-plan if some
-/// pre-condition failed at runtime.
+/// system from the current state to the target and execute the plan (workflow).
 ///
 /// # Worker setup
 ///
 /// A worker may be in one of the following states
 /// - `Uninitialized` is the initial state of the worker, while the worker is in this state, new
-///   [jobs](`Worker::job`) and [resources](`Worker::resource`) may be configured to the worker.
-/// - `Ready` this is the default state. The `Worker` goes into this state when an [initial
-///   state](`Worker::initial_state`) been defined or when a `seek_target` operation terminates
-///   without error.
-/// - `Stopped` is the final state of the Worker. The worker will go into this state if [`Worker::stop`] is
-///   called and no furher operations can be performed.
+///   [jobs](`Worker::job`), [sensors](`Worker::sensor`), [exceptions](`Worker::exception`) and
+///   [resources](`Worker::resource`) may be configured to the worker.
+/// - `Ready` the `Worker` goes into this state when an [initial state](`Worker::initial_state`)
+///   is provided.
+///
+/// # Ownership model
+///
+/// The `Worker<O, Ready>` is consumed by [`seek_target`](Worker::seek_target),
+/// [`run_workflow`](Worker::run_workflow), and [`listen`](Worker::listen). This design ensures
+/// that the worker's internal state remains consistent during workflow execution.
+///
+/// The `Worker<O, Uninitialized>` is [`Clone`], allowing a configured worker to be reused
+/// with different initial states:
+///
+/// ```rust
+/// # use mahler::state::State;
+/// # use mahler::worker::{Worker, Uninitialized};
+/// # use mahler::job::update;
+/// # #[derive(State, Clone)] struct MyState;
+/// # fn my_job() {/* .. */}
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // Configure the worker once
+/// let base: Worker<MyState, Uninitialized> = Worker::new()
+///     .job("/", update(my_job));
+///
+/// // Clone and initialize with different states
+/// let worker_a = base.clone().initial_state(MyState { /* .. */ })?;
+/// let worker_b = base.clone().initial_state(MyState { /* .. */ })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// To perform sequential operations, create a new worker with the resulting state:
+///
+/// ```rust
+/// # use mahler::state::State;
+/// # use mahler::worker::Worker;
+/// # #[derive(State, Clone)] struct MyState;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let worker = Worker::new().initial_state(MyState { /* .. */ })?;
+/// let (state, _) = worker.seek_target(MyStateTarget { /* .. */ }).await?;
+///
+/// // Create a new worker with the updated state
+/// let worker = Worker::new().initial_state(state)?;
+/// let (state, _) = worker.seek_target(MyStateTarget { /* .. */ }).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Cancellation
+///
+/// Operations can be cancelled by dropping the returned future or stream. When dropped,
+/// any in-progress workflow execution is interrupted gracefully.
 ///
 ///
-/// ```rust,no_run
+/// ```rust
 /// use serde::{Deserialize, Serialize};
 ///
 /// use mahler::result::Result;
@@ -160,8 +208,7 @@ impl WithResources for Ready {
 /// // A composite job
 /// fn plus_two() -> Vec<Task> { todo!() }
 ///
-/// #[tokio::main]
-/// async fn main() -> Result<()> {
+/// # async fn test_worker_example() -> Result<()> {
 ///     // create a new uninitialized worker
 ///     let mut worker = Worker::new()
 ///         // configure jobs
@@ -174,19 +221,16 @@ impl WithResources for Ready {
 ///         ])))?;
 ///
 ///     // start searching for a target
-///     let status = worker.seek_target(CountersTarget(Map::from([
+///     let (state, status) = worker.seek_target(CountersTarget(Map::from([
 ///         ("a".to_string(), 1),
 ///         ("b".to_string(), 2),
 ///     ])))
 ///     // wait for a result
 ///     .await?;
 ///
-///     if matches!(status, SeekStatus::Success) {
-///         println!("SUCCESS!");
-///     }
-///
-///     Ok(())
-/// }
+///     assert_eq!(status, SeekStatus::Success);
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # State type compatibility
@@ -305,14 +349,6 @@ impl<O, S: WorkerState> Worker<O, S> {
             _output: std::marker::PhantomData,
         }
     }
-
-    /// Stop following system updates
-    ///
-    /// This drops all internal structure for the Worker and no further
-    /// operations can be performed after this is called.
-    pub fn stop(self) -> Worker<O, Stopped> {
-        Worker::from_inner(Stopped {})
-    }
 }
 
 // Worker initialization
@@ -329,11 +365,201 @@ impl<O> Worker<O, Uninitialized> {
         Worker::from_inner(Uninitialized {
             domain: Domain::new(),
             resources: Resources::new(),
+            sensors: SensorRouter::new(),
+            cleanup_hook: None,
         })
     }
 }
 
-impl<O, S: WorkerState + WithResources> Worker<O, S> {
+// Only implement Clone for uninitialized workers, as an initialized worker
+// has a unique id to validate workflows
+impl<O> Clone for Worker<O, Uninitialized> {
+    fn clone(&self) -> Self {
+        let inner = self.inner.clone();
+        Worker::from_inner(inner)
+    }
+}
+
+impl<O> Worker<O, Uninitialized> {
+    /// Add a [Job](`crate::job::Job`) to the worker domain
+    pub fn job(mut self, route: &'static str, job: Job) -> Self {
+        self.inner.domain = self.inner.domain.job(route, job);
+        self
+    }
+
+    /// Add an [Exception](`crate::exception::Exception`) to the worker domain
+    pub fn exception(mut self, route: &'static str, exception: Exception) -> Self {
+        self.inner.domain = self.inner.domain.exception(route, exception);
+        self
+    }
+
+    /// Configure a new [Sensor](`crate::sensor`) to be set up by the
+    /// worker runtime whenever a state matching the sensor path is created in the system.
+    ///
+    /// # Example
+    ///
+    /// ```rust, no_run
+    /// use mahler::extract::Args;
+    /// use mahler::state::State;
+    /// use mahler::worker::{Worker, Uninitialized};
+    /// use tokio_stream::Stream;
+    ///
+    /// #[derive(State)]
+    /// struct HomeHeating;
+    ///
+    /// fn temperature_monitor(Args(room): Args<String>) -> impl Stream<Item = i32> {
+    ///     tokio_stream::iter(vec![20, 21, 22])
+    /// }
+    ///
+    /// let worker: Worker<HomeHeating, Uninitialized> = Worker::new()
+    ///         // add a temperature sensor to any new configured room in the home heating system
+    ///         .sensor("/rooms/{room}/temperature", temperature_monitor);
+    /// ```
+    pub fn sensor<H, T, U>(mut self, route: &'static str, sensor: H) -> Self
+    where
+        H: SensorBuilder<T, U>,
+        U: Serialize + 'static,
+    {
+        let Uninitialized {
+            ref mut sensors, ..
+        } = self.inner;
+
+        // insert the sensor replacing the route
+        sensors.insert(route, Sensor::new(sensor));
+
+        self
+    }
+
+    /// Add a list if jobs linked to the same route on the worker domain
+    ///
+    /// This is a convenience method to simplify the configuration of multiple jobs
+    /// for the same domain
+    ///
+    /// ```rust
+    /// use mahler::state::State;
+    /// use mahler::job::update;
+    /// use mahler::worker::{Worker, Uninitialized};
+    ///
+    /// #[derive(State)]
+    /// struct StateModel;
+    ///
+    /// fn foo() {}
+    /// fn bar() {}
+    ///
+    /// let worker: Worker<StateModel, Uninitialized> = Worker::new()
+    ///         // configure multiple jobs for path `/{foo}`
+    ///         .jobs("/{foo}", [update(foo), update(bar)]);
+    /// ```
+    pub fn jobs<const N: usize>(mut self, route: &'static str, list: [Job; N]) -> Self {
+        self.inner.domain = self.inner.domain.jobs(route, list);
+        self
+    }
+
+    /// Register a post-workflow (cleanup) hook.
+    ///
+    /// The handler is registered as a [`none`](`crate::job::none`) job for the default route (`""`),
+    /// meaning it is not considered during planning. Instead, [`find_workflow`](Worker::find_workflow)
+    /// appends the task at the end of every successfully planned workflow.
+    ///
+    /// During planning, the handler is evaluated against the **post-workflow state**
+    /// (the state after all main workflow tasks have been simulated) and receives the
+    /// **target state** given to [find_workflow](`Worker::find_workflow`).
+    ///
+    /// If the handler's condition is not met
+    /// ([`ConditionNotMet`](`crate::error::ErrorKind::ConditionNotMet`)), the task
+    /// is silently skipped.
+    ///
+    /// Only one cleanup task may be registered. Calling this method again
+    /// replaces the previous one.
+    ///
+    /// Note: this task is only appended by [`find_workflow`](Worker::find_workflow)
+    /// (and by extension [`seek_target`](Worker::seek_target)).
+    /// [`run_task`](Worker::run_task) does not include it, since it executes a
+    /// specific task outside the normal planning cycle.
+    ///
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use mahler::extract::View;
+    /// use mahler::state::State;
+    /// use mahler::worker::{Worker, Uninitialized};
+    /// use mahler::task::{IO, with_io, enforce};
+    ///
+    /// #[derive(State)]
+    /// struct MyState {
+    ///     value: i32,
+    ///     needs_sync: bool,
+    /// }
+    ///
+    /// fn sync_state(mut state: View<MyState>) -> IO<MyState> {
+    ///     enforce!(state.needs_sync);
+    ///     state.needs_sync = false;
+    ///
+    ///     with_io(state, async |state| {
+    ///         todo!("perform state cleanup tasks")
+    ///     })
+    /// }
+    ///
+    /// let worker: Worker<MyState, Uninitialized> = Worker::new()
+    ///     .with_cleanup(sync_state);
+    /// ```
+    ///
+    /// <div class="warning">
+    /// The post-workflow hook is registered to the default route, meaning all extractors for the handler
+    /// must use the top level state model.
+    /// </div>
+    ///
+    /// ```rust
+    /// use mahler::extract::View;
+    /// use mahler::state::{State, Map};
+    /// use mahler::worker::{Worker, Uninitialized};
+    /// use mahler::task::IO;
+    ///
+    /// #[derive(State, Clone, Debug)]
+    /// struct Service;
+    ///
+    /// #[derive(State)]
+    /// struct MyState {
+    ///     services: Map<String, Service>,
+    /// }
+    ///
+    /// // registering this as a post-workflow hook will fail when trying
+    /// // to deserialize MyState into a Service
+    /// fn bad_cleanup(mut service: View<Service>) -> IO<MyState> {
+    ///     todo!()
+    /// }
+    ///
+    /// let worker: Worker<MyState, Uninitialized> = Worker::new()
+    ///     .with_cleanup(bad_cleanup);
+    /// ```
+    pub fn with_cleanup<H, T, U, I>(mut self, handler: H) -> Self
+    where
+        H: crate::task::Handler<T, U, I>,
+        I: 'static,
+    {
+        let Uninitialized {
+            ref mut cleanup_hook,
+            ref mut domain,
+            ..
+        } = self.inner;
+
+        let job = crate::job::none(handler).with_description(|| "clean-up");
+
+        // remove any old jobs from the domain
+        if let Some(oldjob) = cleanup_hook.replace(job.id()) {
+            domain.remove_job(oldjob);
+        }
+
+        // also remove any other references to the job in the domain
+        domain.remove_job(job.id());
+
+        // finally add the new job to the domain at the default route
+        domain.insert_job("", job);
+
+        self
+    }
+
     /// Add a shared resource to use within tasks
     ///
     /// Resources are stored by [TypeId](`std::any::TypeId`),
@@ -380,7 +606,7 @@ impl<O, S: WorkerState + WithResources> Worker<O, S> {
     where
         R: Send + Sync + 'static,
     {
-        self.inner.insert_resource(res);
+        self.inner.resources.insert(res);
         self
     }
 
@@ -428,46 +654,7 @@ impl<O, S: WorkerState + WithResources> Worker<O, S> {
     where
         R: Send + Sync + 'static,
     {
-        self.inner.insert_resource(res);
-    }
-}
-
-impl<O> Worker<O, Uninitialized> {
-    /// Add a [Job](`crate::job::Job`) to the worker domain
-    pub fn job(mut self, route: &'static str, job: Job) -> Self {
-        self.inner.domain = self.inner.domain.job(route, job);
-        self
-    }
-
-    /// Add an [Exception](`crate::exception::Exception`) to the worker domain
-    pub fn exception(mut self, route: &'static str, exception: Exception) -> Self {
-        self.inner.domain = self.inner.domain.exception(route, exception);
-        self
-    }
-
-    /// Add a list if jobs linked to the same route on the worker domain
-    ///
-    /// This is a convenience method to simplify the configuration of multiple jobs
-    /// for the same domain
-    ///
-    /// ```rust
-    /// use mahler::state::State;
-    /// use mahler::job::update;
-    /// use mahler::worker::{Worker, Uninitialized};
-    ///
-    /// #[derive(State)]
-    /// struct StateModel;
-    ///
-    /// fn foo() {}
-    /// fn bar() {}
-    ///
-    /// let worker: Worker<StateModel, Uninitialized> = Worker::new()
-    ///
-    ///         .jobs("/{foo}", [update(foo), update(bar)]);
-    /// ```
-    pub fn jobs<const N: usize>(mut self, route: &'static str, list: [Job; N]) -> Self {
-        self.inner.domain = self.inner.domain.jobs(route, list);
-        self
+        self.inner.resources.insert(res);
     }
 
     /// Provide the initial worker state
@@ -486,608 +673,781 @@ impl<O> Worker<O, Uninitialized> {
         O: State,
     {
         let Uninitialized {
-            domain, resources, ..
+            domain,
+            resources,
+            sensors,
+            cleanup_hook,
         } = self.inner;
 
-        // Create a new system with an initial state
-        let system = System::try_from(state)?;
+        // Create a new system with an initial state and resources
+        let mut system = System::try_from(state)?;
+        system.set_resources(resources);
 
-        // Shared system protected by RwLock
-        let system_rwlock = Arc::new(RwLock::new(system));
-
-        // Create the state changes synchronization channel
-        // XXX: should the channel size configurable? Or should we make it unbounded at risk of running
-        // out of memory
-        let (patch_tx, mut patch_rx) = channel::<Patch>(100);
-
-        // Patch error signal (notify)
-        let (writer_closed_tx, writer_closed_rx) = watch::channel(());
-
-        // Broadcast channel for state updates
-        let (update_event_channel, _) = watch::channel(());
-
-        // Generate unique worker ID using random hash
+        // Generate unique worker ID
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hasher};
         let worker_id = RandomState::new().build_hasher().finish();
 
-        // Spawn system writer task
-        {
-            let system_writer = Arc::clone(&system_rwlock);
-            let update_event_tx = update_event_channel.clone();
-            tokio::spawn(
-                async move {
-                    // If the worker is dropped, then patch_tx will get dropped and
-                    // this task will terminate, causing update_event_tx to get dropped
-                    // and notifying the broadcast channel followers
-                    while let Some(mut msg) = patch_rx.recv().await {
-                        let changes = std::mem::take(&mut msg.data);
-                        trace!(received=%changes);
-
-                        let mut system = system_writer.write().await;
-                        if let Err(e) = system.patch(changes) {
-                            // we need to abort on patch failure a this means the
-                            // internal state may have become inconsistent and we cannot continue
-                            // applying changes
-                            error!("patch failed: {e}");
-
-                            // We drop the channel to let receivers know the writer task has closed
-                            drop(writer_closed_tx);
-                            break;
-                        }
-                        trace!("patch successful");
-
-                        // Notify worker followers, ignore errors if no receivers exist
-                        let _ = update_event_tx.send(());
-
-                        // yield back to the workflow
-                        msg.ack();
-                    }
-                }
-                .instrument(span!(Level::TRACE, "worker_writer", worker_id=%worker_id)),
-            );
-        }
-
         Ok(Worker::from_inner(Ready {
             domain,
-            resources,
-            system_rwlock,
-            update_event_channel,
-            patch_tx,
-            writer_closed_rx,
+            system,
+            sensor_router: sensors,
+            cleanup_hook,
             worker_id,
-            generation: Arc::new(AtomicU64::new(0)),
         }))
+    }
+}
+
+/// Utility trait to allow chaining operations from a workflow created
+/// by calling `initial_state`
+#[async_trait::async_trait]
+pub trait SeekTarget<O: State> {
+    async fn seek_target(self, tgt: O::Target) -> Result<(O, SeekStatus)>
+    where
+        O: State + DeserializeOwned + Send + Unpin + 'static,
+        O::Target: Serialize + Send;
+}
+
+#[async_trait::async_trait]
+impl<O: State> SeekTarget<O> for Result<Worker<O, Ready>> {
+    async fn seek_target(self, tgt: O::Target) -> Result<(O, SeekStatus)>
+    where
+        O: State + DeserializeOwned + Send + Unpin + 'static,
+        O::Target: Serialize + Send,
+    {
+        let worker = self?;
+        worker.seek_target(tgt).await
+    }
+}
+
+/// Utility trait to allow chaining operations from a workflow created
+/// by calling `initial_state`
+#[async_trait::async_trait]
+pub trait RunTask<O: State> {
+    async fn run_task(self, task: Task) -> Result<(O, WorkflowStatus)>
+    where
+        O: State + DeserializeOwned + Send + Unpin + 'static;
+}
+
+#[async_trait::async_trait]
+impl<O: State> RunTask<O> for Result<Worker<O, Ready>> {
+    async fn run_task(self, task: Task) -> Result<(O, WorkflowStatus)>
+    where
+        O: State + DeserializeOwned + Send + Unpin + 'static,
+    {
+        let worker = self?;
+        worker.run_task(task).await
+    }
+}
+
+/// Utility trait to allow chaining operations from a workflow created
+/// by calling `initial_state`
+pub trait FindWorkflow<O: State> {
+    fn find_workflow(self, target: O::Target) -> Result<(Worker<O, Ready>, Option<Workflow>)>;
+}
+
+impl<O: State> FindWorkflow<O> for Result<Worker<O, Ready>> {
+    fn find_workflow(self, target: O::Target) -> Result<(Worker<O, Ready>, Option<Workflow>)> {
+        let worker = self?;
+        let workflow = worker.find_workflow(target)?;
+        Ok((worker, workflow))
     }
 }
 
 // -- Worker is ready to receive a target state
 
-/// Helper type to receive Worker state changes
-///
-/// See [`Worker::follow`]
-struct WorkerStream<T> {
-    inner: Pin<Box<dyn Stream<Item = T> + Send + 'static>>,
-}
-
-impl<T> WorkerStream<T> {
-    /// Create a new FollowStream from a Stream
-    fn new<S>(stream: S) -> Self
-    where
-        S: Stream<Item = T> + Send + 'static,
-    {
-        Self {
-            inner: Box::pin(stream),
-        }
-    }
-}
-
-impl<T> Stream for WorkerStream<T> {
-    type Item = T;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx)
-    }
-}
-
-/// Returns a stream of updated states after each system change.
-///
-/// The stream is best effort, meaning updates may be missed if the receiver lags behind.
-fn follow_worker<T>(
-    channel: watch::Sender<()>,
-    sys_reader: Weak<RwLock<System>>,
-) -> impl Stream<Item = T>
-where
-    T: DeserializeOwned,
-{
-    let rx = channel.subscribe();
-    WorkerStream::new(
-        WatchStream::from_changes(rx)
-            .then(move |_| {
-                let sys_reader = sys_reader.clone();
-                async move {
-                    if let Some(sys_reader) = sys_reader.upgrade() {
-                        // Read the system state
-                        let system = sys_reader.read().await;
-                        system.state::<T>().ok()
-                    } else {
-                        None
-                    }
-                }
-            })
-            .filter_map(|opt| opt),
-    )
-}
-
 impl<O: State> Worker<O, Ready> {
     /// Read the current system state from the worker
-    ///
-    /// The system state is behind a [RwLock](`tokio::sync::RwLock`)
-    /// to allow for concurrent modification, which is why this method is `async`.
     ///
     /// # Errors
     ///
     /// The method will throw an [`Error`] of kind [`ErrorKind::Serialization`] if the
     /// internal state cannot be deserialized into the output type `<O>`
-    pub async fn state(&self) -> Result<O>
+    pub fn state(&self) -> Result<O>
     where
         O: DeserializeOwned,
     {
-        let system = self.inner.system_rwlock.read().await;
-        let state = system.state()?;
-        Ok(state)
+        self.inner.system.state()
     }
 
-    /// Returns a stream of updated states after each system change
+    /// Returns the distance from the current state to the target
     ///
-    /// The stream is best effort, meaning updates may be missed if the receiver lags behind.
+    /// The distance is the differences between the current state and target
+    /// in the form of a list of [Operations](`crate::json::Operation`).
+    pub fn distance(&self, tgt: &O::Target) -> Result<Vec<Operation>> {
+        let Ready { system, .. } = &self.inner;
+
+        // the distance is calculated between target state types
+        let ini = system
+            .state::<O::Target>()
+            .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
+        let tgt = serde_json::to_value(tgt)?;
+
+        let Patch(changes) = json_patch::diff(&ini, &tgt);
+
+        Ok(changes.into_iter().map(Operation::from).collect())
+    }
+
+    /// Monitor the state of the system via sensors
     ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use serde::{Deserialize, Serialize};
-    /// use mahler::worker::Worker;
-    /// use mahler::state::State;
-    /// use tokio_stream::StreamExt;
-    ///
-    /// #[derive(State, Debug)]
-    /// struct MySystem;
-    ///
-    /// # tokio_test::block_on(async move {
-    /// let mut worker = Worker::new()
-    ///     // todo: configure jobs
-    ///     .initial_state(MySystem {/* .. */}).unwrap();
-    ///
-    /// // Get a state stream
-    /// let mut update_stream = worker.follow();
-    /// tokio::spawn(async move {
-    ///     while let Some(state) = update_stream.next().await {
-    ///         println!("Updated State: {:?}", state);
-    ///     }
-    /// });
-    ///
-    /// // Start state search
-    /// worker.seek_target(MySystemTarget {/* .. */})
-    ///     .await
-    ///     .unwrap();
-    /// # })
-    /// ```
-    pub fn follow(&self) -> impl Stream<Item = O>
+    /// This will terminate immediately if there are no sensors defined given the current
+    /// state condition
+    pub fn listen(self) -> impl Stream<Item = Result<O>>
     where
-        O: DeserializeOwned,
+        O: DeserializeOwned + Send + Unpin + 'static,
     {
-        follow_worker(
-            self.inner.update_event_channel.clone(),
-            Arc::downgrade(&self.inner.system_rwlock),
-        )
+        async_stream::try_stream! {
+            // Setup state
+            let system = self.inner.system.clone();
+            let sensor_router = self.inner.sensor_router;
+            let state = StreamState::new(system, sensor_router)?;
+
+            let mut sensor_stream = pin!(listen_stream(state, Interrupt::new()));
+            while let Some(local_state) = sensor_stream.next().await {
+                yield local_state?;
+            }
+        }
     }
 
     /// Find a workflow to reach a target state
     ///
     /// Returns a workflow that can be executed with [`run_workflow`](Self::run_workflow).
-    /// The workflow remains valid while other workflows have been executed in the meantime.
+    ///
+    /// # Return values
+    ///
+    /// - `Ok(Some(workflow))` - A valid workflow was found
+    /// - `Ok(None)` - No combination of registered jobs can reach the target state
     ///
     /// # Errors
-    /// Returns [`PlanningError::NotFound`] if no workflow can be found
-    /// Returns [`PlanningError::Aborted`] on internal or serialization errors
-    pub async fn find_workflow_to_target(
-        &self,
-        tgt: O::Target,
-    ) -> core::result::Result<Workflow, PlanningError> {
+    ///
+    /// Returns an error if planning fails. In particular,
+    /// [`ErrorKind::PlanningOverflow`](`crate::error::ErrorKind::PlanningOverflow`) indicates
+    /// the planner exceeded the maximum search depth, typically caused by an underspecified job
+    /// that doesn't make progress toward the target.
+    ///
+    /// See [`ErrorKind`](`crate::error::ErrorKind`) for other possible error conditions.
+    pub fn find_workflow(&self, tgt: O::Target) -> Result<Option<Workflow>> {
         let tgt = serde_json::to_value(tgt).map_err(Error::from)?;
 
         let Ready {
             domain,
-            system_rwlock,
+            system,
             worker_id,
-            generation,
+            cleanup_hook,
             ..
         } = &self.inner;
 
-        let system = system_rwlock.read().await;
-        let current_generation = generation.load(Ordering::Acquire);
+        let mut system = system.clone();
+        let mut workflow = planner::find_workflow_to_target::<O>(domain, &mut system, &tgt)?;
 
-        let mut workflow = planner::find_workflow_to_target::<O>(domain, &system, &tgt)?;
+        // Attach worker metadata and after-workflow task
+        if let Some(w) = workflow.as_mut() {
+            w.worker_id = *worker_id;
 
-        // Attach worker metadata
-        workflow.worker_id = *worker_id;
-        workflow.generation = current_generation;
+            if !w.is_empty() {
+                if let Some(job) = cleanup_hook.and_then(|id| domain.find_job("", id)) {
+                    let task = job.new_task(Context::new().with_target(tgt).with_path(""));
+                    let Workflow { dag: c_dag, .. } =
+                        match planner::find_workflow_for_task(task, domain, &system) {
+                            Ok(plan) => plan,
+                            Err(e) if e.kind() == ErrorKind::ConditionNotMet => Workflow::default(),
+                            Err(e) => return Err(e),
+                        };
+
+                    // concatenate the after-workflow task at the end of the plan
+                    let w_dag = std::mem::take(&mut w.dag);
+                    w.dag = w_dag.concat(c_dag);
+                }
+            }
+        }
 
         Ok(workflow)
     }
 
-    /// Execute a previously found workflow
+    /// Execute a previously found workflow, returning a stream of events
     ///
-    /// This will only succeed if:
-    /// - The workflow was created by this worker (worker_id matches)
-    /// - No other workflows have been executed since the workflow was created (generation matches)
+    /// The returned stream yields [`WorkerEvent`] items:
+    /// - [`WorkerEvent::StateUpdated`] after each task completes
+    /// - [`WorkerEvent::WorkflowFinished`] when the workflow terminates.
     ///
-    /// # Errors
-    /// - [`ErrorKind::`InvalidInput] if workflow was created by different worker or the workflow
-    /// generation does not match the current generation
-    /// - [`ErrorKind::ConditionNotMet`] if workflow conditions changed at runtime (caller should re-plan)
-    /// - Returns [`SeekStatus::Aborted`] if workflow execution fails with runtime errors
-    #[instrument(skip_all)]
-    pub async fn run_workflow(
-        &mut self,
-        workflow: Workflow,
-        interrupt: Interrupt,
-    ) -> Result<SeekStatus> {
+    /// If the stream is dropped while the workflow is being executed, the workflow will be
+    /// stopped.
+    ///
+    /// If any [sensors](`crate::sensor`) are defined for the worker, the stream will continue yielding
+    /// values from sensors after the workflow completes. An interrupt while in this stage will
+    /// just terminate the stream.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the Workflow was created by a different Worker
+    pub fn run_workflow(self, workflow: Workflow) -> impl Stream<Item = Result<WorkerEvent<O>>>
+    where
+        O: DeserializeOwned + Send + Unpin + 'static,
+    {
+        assert_eq!(
+            workflow.worker_id, self.inner.worker_id,
+            "workflow worker_id {} does not match current worker_id {}",
+            workflow.worker_id, self.inner.worker_id,
+        );
+
+        workflow_stream(self, workflow)
+    }
+
+    /// Trigger system changes by providing a new target state and interrupt signal
+    ///
+    /// This is a convenience method that looks for a workflow for the given state and
+    /// runs it waiting for the return status.
+    ///
+    /// It returns the updated state and the status after running the workflow.
+    ///
+    /// If no plan is found, the function returns [`SeekStatus::NotFound`].
+    ///
+    /// If any [sensors](`crate::sensor`) are defined for the worker, the stream will continue yielding
+    /// values from sensors after the workflow completes. An interrupt while in this stage will
+    /// just terminate the stream.
+    ///
+    /// If the future returned by the function is dropped while the workflow is being executed, the
+    /// workflow will be interrupted.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use mahler::state::State;
+    /// use mahler::worker::{Worker, SeekStatus};
+    ///
+    /// #[derive(State, Debug, Clone)]
+    /// struct MySystem;
+    ///
+    /// # async fn test_seek_target_example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut worker = Worker::new()
+    ///     .initial_state(MySystem {})?;
+    ///
+    /// let (state, status) = (worker.seek_target(MySystemTarget {})).await?;
+    /// assert_eq!(status, SeekStatus::Success);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(skip_all)]
+    pub async fn seek_target(self, tgt: O::Target) -> Result<(O, SeekStatus)>
+    where
+        O: State + DeserializeOwned + Send + Unpin + 'static,
+        O::Target: Serialize,
+    {
+        let mut state = self.state()?;
+
+        info!("searching workflow");
+
+        // Show pending changes at debug level
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let changes = self.distance(&tgt)?;
+            if !changes.is_empty() {
+                debug!("pending changes:");
+                for change in changes {
+                    debug!("- {}", change);
+                }
+            }
+        }
+
+        let now = Instant::now();
+        let workflow = match self.find_workflow(tgt)? {
+            Some(w) => w,
+            None => {
+                warn!(time = ?now.elapsed(), "workflow not found");
+                return Ok((state, SeekStatus::NotFound));
+            }
+        };
+
+        if workflow.is_empty() {
+            debug!("nothing to do");
+            return Ok((state, SeekStatus::Success));
+        }
+        info!(time = ?now.elapsed(), "workflow found");
+
+        if tracing::enabled!(tracing::Level::WARN) && !workflow.exceptions().is_empty() {
+            warn!("the following operations were ignored during planning");
+            for path in workflow.exceptions() {
+                warn!("{path}");
+            }
+        }
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            debug!("will execute the following tasks:");
+            for line in workflow.to_string().lines() {
+                debug!("{line}");
+            }
+        }
+
+        let now = Instant::now();
+        info!("executing workflow");
+
+        let mut stream = std::pin::pin!(self.run_workflow(workflow));
+        let mut final_status = SeekStatus::Success;
+
+        while let Some(event) = stream.next().await {
+            match event? {
+                WorkerEvent::StateUpdated(new_state) => state = new_state,
+                WorkerEvent::WorkflowFinished(status) => {
+                    info!(time = ?now.elapsed(), "workflow executed successfully");
+                    final_status = status.into();
+                    break;
+                }
+            }
+        }
+
+        Ok((state, final_status))
+    }
+
+    /// Run a task within the context of the worker domain
+    ///
+    /// # Example
+    /// ```rust
+    /// use std::time::Duration;
+    /// use tokio::time::sleep;
+    ///
+    /// use mahler::error::ErrorKind;
+    /// use mahler::task::{Handler, IO, with_io, enforce};
+    /// use mahler::extract::{View, Target};
+    /// use mahler::worker::{Worker, Ready, WorkflowStatus, RunTask};
+    /// use mahler::job::update;
+    ///
+    /// fn plus_one(mut counter: View<i32>, Target(target): Target<i32>) -> IO<i32> {
+    ///     // modify the counter only if below the target
+    ///     enforce!(*counter < target);
+    ///     *counter += 1;
+    ///
+    ///     with_io(counter, |counter| async {
+    ///         sleep(Duration::from_millis(10)).await;
+    ///         Ok(counter)
+    ///     })
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Setup the worker domain and resources
+    /// let worker = Worker::new()
+    ///     .job("", update(plus_one)).initial_state(0);
+    ///
+    /// // Run task emulating a target of 2 and initial state of 0
+    /// let (state, status) = worker.run_task(plus_one.with_target(2)).await?;
+    /// assert_eq!(status, WorkflowStatus::Success);
+    /// assert_eq!(state, 1);
+    ///
+    /// // Run task emulating a target of 2 and initial state of 2 (condition not met)
+    /// let worker = Worker::new()
+    ///     .job("", update(plus_one)).initial_state(2);
+    ///
+    /// let err = worker.run_task(plus_one.with_target(2)).await.unwrap_err();
+    /// assert_eq!(err.kind(), ErrorKind::ConditionNotMet);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn run_task(self, task: Task) -> Result<(O, WorkflowStatus)>
+    where
+        O: State + DeserializeOwned + Send + Unpin + 'static,
+        O::Target: Serialize,
+    {
+        let mut state = self.state()?;
         let Ready {
-            resources,
-            system_rwlock,
-            patch_tx,
+            domain,
+            system,
             worker_id,
-            generation,
-            writer_closed_rx,
             ..
         } = &self.inner;
 
-        // do not execute the workflow if the writer task has closed
-        if writer_closed_rx.has_changed().is_err() {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                format!("worker ({worker_id}) is in an inconsistent state",),
-            ));
-        }
+        info!("searching workflow");
+        let now = Instant::now();
 
-        // Validate workflow belongs to this worker
-        if workflow.worker_id != *worker_id {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "workflow worker_id {} does not match current worker_id {worker_id}",
-                    workflow.worker_id,
-                ),
-            ));
-        }
-
-        // Validate workflow is still current
-        let current_generation = generation.load(Ordering::Acquire);
-        if workflow.generation != current_generation {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "workflow created at generation {} but current generation is {current_generation}",
-                    workflow.generation,
-                ),
-            ));
-        }
-
-        // Update system properties
-        {
-            let mut system = self.inner.system_rwlock.write().await;
-            system.set_resources(resources.clone());
-        }
-
-        let mut writer_closed_rx = writer_closed_rx.clone();
-        let res = select! {
-            biased;
-            _ = writer_closed_rx.changed() => {
-                return Err(Error::internal("state patch failed, worker state possibly tainted"));
+        // look for a workflow for the task
+        let mut workflow = match planner::find_workflow_for_task(task, domain, system) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(time = ?now.elapsed(), "workflow not found");
+                return Err(e);
             }
-            res = workflow.execute(system_rwlock, patch_tx.clone(), interrupt) => res
         };
 
-        // Increment generation after every workflow execution as
-        // the state may have been changed by the workflow
-        generation.fetch_add(1, Ordering::Release);
+        // set the worker id
+        workflow.worker_id = *worker_id;
 
-        match res {
-            Ok(status) => match status {
-                WorkflowStatus::Completed => Ok(SeekStatus::Success),
-                WorkflowStatus::Interrupted => Ok(SeekStatus::Interrupted),
-            },
-            Err(agg_err) => {
+        if workflow.is_empty() {
+            debug!("nothing to do");
+            return Ok((state, WorkflowStatus::Success));
+        }
+        info!(time = ?now.elapsed(), "workflow found");
+
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            debug!("will execute the following tasks:");
+            for line in workflow.to_string().lines() {
+                debug!("{line}");
+            }
+        }
+
+        let now = Instant::now();
+        info!("executing workflow");
+
+        let mut stream = std::pin::pin!(self.run_workflow(workflow));
+        let mut final_status = WorkflowStatus::Success;
+
+        while let Some(event) = stream.next().await {
+            match event? {
+                WorkerEvent::StateUpdated(new_state) => state = new_state,
+                WorkerEvent::WorkflowFinished(status) => {
+                    info!(time = ?now.elapsed(), "workflow executed successfully");
+                    final_status = status;
+                    break;
+                }
+            }
+        }
+
+        Ok((state, final_status))
+    }
+}
+
+// -- Stream implementations for workflow execution
+
+/// Shared state for workflow stream execution
+struct StreamState {
+    system_reader: Reader<System>,
+    system_writer: Writer<System>,
+    sensor_streams: StreamMap<PointerBuf, SensorStream>,
+    sensor_router: SensorRouter,
+}
+
+impl StreamState {
+    /// Create stream state from a cloned system
+    fn new(system: System, sensor_router: SensorRouter) -> Result<Self> {
+        // Create initial sensor subscriptions
+        let mut sensor_streams = StreamMap::new();
+        let mut all_paths = Vec::new();
+        Self::collect_paths(system.inner_state(), Pointer::root(), &mut all_paths);
+        for path in all_paths {
+            Self::try_subscribe(&system, &path, &sensor_router, &mut sensor_streams)?;
+        }
+
+        let (system_reader, system_writer) = rw_lock(system);
+
+        Ok(Self {
+            system_reader,
+            system_writer,
+            sensor_streams,
+            sensor_router,
+        })
+    }
+
+    /// Helper function to extract all paths from a JSON value
+    fn collect_paths(value: &Value, current_path: &Pointer, paths: &mut Vec<PointerBuf>) {
+        match value {
+            Value::Object(map) => {
+                for (key, v) in map {
+                    // create a new path and add it to the list
+                    let mut path = current_path.to_buf();
+                    path.push_back(key);
+                    paths.push(path.clone());
+
+                    Self::collect_paths(v, &path, paths);
+                }
+            }
+            Value::Array(arr) => {
+                for (i, v) in arr.iter().enumerate() {
+                    // create a new path and add it to the list
+                    let mut path = current_path.to_buf().clone();
+                    path.push_back(i);
+                    paths.push(path.clone());
+
+                    Self::collect_paths(v, &path, paths);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Try to create a sensor subscription for a path if it matches any sensor route
+    fn try_subscribe(
+        system: &System,
+        pointer: &Pointer,
+        sensor_router: &SensorRouter,
+        sensor_streams: &mut StreamMap<PointerBuf, SensorStream>,
+    ) -> Result<()> {
+        let path = pointer.to_buf();
+        if sensor_streams.contains_key(&path) {
+            return Ok(());
+        }
+
+        if let Some((args, sensor)) = sensor_router.at(pointer.as_str()) {
+            // try create the stream using the path and args
+            let context = Context::new().with_path(pointer).with_args(args);
+            let stream = sensor.create_stream(system, &context)?;
+
+            sensor_streams.insert(path, stream);
+            trace!(path = %pointer, "sensor subscription created");
+        }
+
+        Ok(())
+    }
+
+    /// Update the state subscriptions based on the last patch
+    fn update(&mut self, system: &System, last_patch: &Patch) -> Result<()> {
+        let sensor_streams = &mut self.sensor_streams;
+        let sensor_router = &self.sensor_router;
+
+        // Remove subscriptions for deleted paths
+        let paths_to_remove: Vec<PointerBuf> = sensor_streams
+            .keys()
+            .filter(|path| path.resolve(system.inner_state()).is_err())
+            .cloned()
+            .collect();
+
+        for path in paths_to_remove {
+            sensor_streams.remove(&path);
+            trace!(path = %path, "sensor subscription removed");
+        }
+
+        // Create subscriptions for paths affected by the patch
+        for patch_op in last_patch.0.iter() {
+            // Ignored removed paths as those should have been taken care by
+            // the previous step
+            if matches!(patch_op, &PatchOperation::Remove { .. }) {
+                continue;
+            }
+            let change_path = patch_op.path();
+
+            if let Ok(value) = change_path.resolve(system.inner_state()) {
+                let mut new_paths = Vec::new();
+                Self::collect_paths(value, change_path, &mut new_paths);
+                new_paths.push(change_path.to_buf());
+
+                for path in new_paths {
+                    StreamState::try_subscribe(system, &path, sensor_router, sensor_streams)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Creates a workflow stream using async-stream
+///
+/// After workflow completion, the stream continues to listen for sensor updates
+/// until interrupted or an error occurs.
+fn workflow_stream<O>(
+    worker: Worker<O, Ready>,
+    workflow: Workflow,
+) -> impl Stream<Item = Result<WorkerEvent<O>>>
+where
+    O: State + DeserializeOwned + Unpin + Send + 'static,
+{
+    enum WorkflowEvent {
+        Patch(WithAck<Patch>),
+        Sensor(PointerBuf, Result<Value>),
+    }
+
+    let current_span = Span::current();
+
+    try_stream! {
+        // Setup state
+        let system = worker.inner.system.clone();
+        let sensor_router = worker.inner.sensor_router.clone();
+        let mut state = StreamState::new(system, sensor_router)?;
+
+        // Create patch channel and spawn workflow task
+        let (patch_tx, mut patch_rx) = channel::<Patch>(100);
+        let system_reader = state.system_reader.clone();
+        let interrupt = Interrupt::new();
+        let workflow_interrupt = interrupt.clone();
+        let workflow_handle = tokio::spawn(async move {
+            workflow.execute(&system_reader, patch_tx, workflow_interrupt).await
+        }.instrument(current_span));
+
+        // make sure that returning from this function or
+        // dropping the stream interrupts the workflow that is running in a separate
+        // task
+        let drop_interrupt = AutoInterrupt::from(interrupt);
+        let interrupt = drop_interrupt.clone();
+
+        // Phase 1: Executing loop - poll patches and sensors concurrently
+        loop {
+            let result = tokio::select! {
+                patch_opt = patch_rx.recv() => match patch_opt {
+                    Some(patch) => WorkflowEvent::Patch(patch),
+                    // the worklow ended once all patch senders close
+                    None => break
+                },
+                Some((path, result)) = state.sensor_streams.next() => WorkflowEvent::Sensor(path, result),
+            };
+
+            match result {
+                WorkflowEvent::Patch(mut msg) => {
+                    let patch = std::mem::take(&mut msg.data);
+                    trace!(received=%patch);
+
+                    // Apply patch to system
+                    let (state_result, system_copy) = {
+                        let mut system = state.system_writer.write().await;
+                        if let Err(e) = system.patch(&patch) {
+                            return Err(e)?;
+                        } else {
+                            let system_copy = system.clone();
+                            (system.state::<O>(), system_copy)
+                        }
+                    };
+                    trace!("patch successful");
+
+                    // Update sensor subscriptions
+                    let update_sensors_res = state.update(&system_copy, &patch);
+
+                    // allow the workflow to resume once the patch succeeds
+                    msg.ack();
+
+
+                    // Update sensor subscriptions
+                    if let Err(e) = update_sensors_res {
+                        return Err(e)?;
+                    } else {
+                        match state_result {
+                            Ok(new_state) => yield WorkerEvent::StateUpdated(new_state),
+                            Err(e) => {
+                                return Err(e)?;
+                            }
+                        }
+                    }
+                },
+                WorkflowEvent::Sensor(path, result) => {
+                    match result {
+                        Ok(value) => {
+                            let patch = Patch(vec![PatchOperation::Replace(ReplaceOperation {
+                                path: path.clone(),
+                                value,
+                            })]);
+
+                            let state_result = {
+                                let mut system = state.system_writer.write().await;
+                                // a failure to patch the state here probably means there is a
+                                // conflict between sensors (i.e. two sensors writing to the same
+                                // path)
+                                if let Err(e) = system.patch(&patch).map_err(|e| Error::runtime(format!("sensor conflict: {e}"))) {
+                                    return Err(e)?;
+                                } else {
+                                    system.state::<O>()
+                                }
+                            };
+
+                            match state_result {
+                                Ok(new_state) => yield WorkerEvent::StateUpdated(new_state),
+                                Err(e) => {
+                                    return Err(e)?;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            return Err(e)?;
+                        }
+                    }
+                },
+            }
+        };
+
+        // Phase 2: Handle workflow completion
+        let workflow_status = workflow_handle.await;
+
+        match workflow_status {
+            Ok(Ok(InnerWorkflowStatus::Completed)) => {
+                yield WorkerEvent::WorkflowFinished(WorkflowStatus::Success);
+            }
+            // this is unreachable, since the workflow is only interrupted by
+            // dropping the stream, in which case the status will never be evaluated
+            Ok(Ok(InnerWorkflowStatus::Interrupted)) => unreachable!(),
+            Ok(Err(agg_err)) => {
                 let AggregateError(all) = agg_err;
                 let mut recoverable = Vec::new();
                 let mut other = Vec::new();
 
                 for e in all.into_iter() {
                     match e.kind() {
-                        ErrorKind::Runtime => recoverable.push(e),
-                        ErrorKind::ConditionNotMet => recoverable.push(e),
+                        ErrorKind::Runtime | ErrorKind::ConditionNotMet => {
+                            recoverable.push(e);
+                        }
                         _ => other.push(e),
                     }
                 }
 
+                // Any other errors while running the workflow mean
+                // there is a bug somewhere and we need to return an internal error
                 if !other.is_empty() {
-                    return Err(Error::internal(AggregateError::from(other)));
+                    Err(Error::internal(AggregateError::from(other)))?;
                 }
 
-                // All remaining errors are recoverable, abort
-                Ok(SeekStatus::Aborted(recoverable))
+                yield WorkerEvent::WorkflowFinished(WorkflowStatus::Aborted(recoverable));
+            }
+            Err(e) => {
+                Err(Error::internal(e))?;
+            }
+        }
+
+
+        // Phase 3: Listening loop - continue sensor updates until interrupt
+        let mut sensor_stream = pin!(listen_stream(state, interrupt));
+        while let Some(res) = sensor_stream.next().await {
+            match res {
+                Ok(new_state) => yield WorkerEvent::StateUpdated(new_state),
+                Err(e) => return Err(e)?,
             }
         }
     }
+}
 
-    /// Trigger system changes by providing a new target state and interrupt signal
-    ///
-    /// When called, this method tells the worker to look for a plan for the given
-    /// target. If a plan is found, the worker then will try to execute the resulting workflow and
-    /// and terminate if interrupted or a runtime error occurs. If a requirement changes between
-    /// planning and runtime, the Worker triggers a re-plan.
-    ///
-    /// The provided `interrupt` allows external cancellation of the worker execution.
-    /// When triggered, the worker will gracefully terminate and return [`SeekStatus::Interrupted`].
-    ///
-    /// The worker will also be interrupted if the future is dropped, providing automatic cancellation.
-    ///
-    /// If no plan is found, the search terminates with a [`SeekStatus::NotFound`].
-    ///
-    /// # Parameters
-    /// - `tgt`: The target state to seek
-    /// - `interrupt`: User-controlled interrupt for canceling the operation
-    ///
-    /// # Errors
-    /// The method will result in an [`Error`] if a serialization issue occurs while converting
-    /// between state types, if the worker runtime panics or there is an unexpected error during
-    /// planning.
-    pub async fn seek_with_interrupt(
-        &mut self,
-        tgt: O::Target,
-        interrupt: Interrupt,
-    ) -> Result<SeekStatus> {
-        let tgt = serde_json::to_value(tgt)?;
-
-        let Ready {
-            resources,
-            domain,
-            system_rwlock,
-            writer_closed_rx,
-            patch_tx,
-            generation,
-            worker_id,
-            ..
-        } = self.inner.clone();
-
-        // abort if the writer has closed
-        if writer_closed_rx.has_changed().is_err() {
-            return Err(Error::new(
-                ErrorKind::Internal,
-                format!("worker ({worker_id}) is in an inconsistent state",),
-            ));
-        }
-
-        // Update system properties
-        {
-            let mut system = self.inner.system_rwlock.write().await;
-            system.set_resources(resources);
-        }
-
-        enum InnerSeekResult {
-            TargetReached,
-            WorkflowCompleted,
-            Interrupted,
-        }
-
-        enum InnerSeekError {
-            Runtime(AggregateError<Error>),
-            Planning(PlanningError),
-        }
-
-        async fn find_and_run_workflow<T: State>(
-            domain: &Domain,
-            sys_reader: &Arc<RwLock<System>>,
-            tgt: &Value,
-            patch_tx: &Sender<Patch>,
-            sigint: &Interrupt,
-            generation: &Arc<AtomicU64>,
-        ) -> core::result::Result<InnerSeekResult, InnerSeekError> {
-            info!("searching workflow");
-            let now = Instant::now();
-
-            let workflow = {
-                let system = sys_reader.read().await;
-                let res = planner::find_workflow_to_target::<T>(domain, &system, tgt);
-
-                // Show pending changes at debug level
-                if tracing::enabled!(tracing::Level::DEBUG) {
-                    let changes = match res {
-                        Ok(ref workflow) => workflow.operations(),
-                        Err(PlanningError::NotFound(ref changes)) => changes.iter().collect(),
-                        Err(e) => return Err(InnerSeekError::Planning(e)),
-                    };
-
-                    if !changes.is_empty() {
-                        debug!("pending changes:");
-                        for change in changes {
-                            debug!("- {}", change);
-                        }
-                    }
-                }
-
-                if res.is_err() {
-                    warn!(time = ?now.elapsed(), "workflow not found");
-                }
-                res.map_err(InnerSeekError::Planning)?
-
-                // NOTE: there is no need to set the workflow generation here since the
-                // workflow is only used internally
+fn listen_stream<O>(mut state: StreamState, interrupt: Interrupt) -> impl Stream<Item = Result<O>>
+where
+    O: State + DeserializeOwned + Unpin + Send + 'static,
+{
+    async_stream::try_stream! {
+        loop {
+            let (path, result) = tokio::select! {
+                biased;
+                _ = interrupt.wait() => break,
+                sensor_result = state.sensor_streams.next() => match sensor_result {
+                    Some((path, result)) => (path, result),
+                    _ => break
+                },
             };
 
-            if workflow.is_empty() {
-                debug!("nothing to do");
-                return Ok(InnerSeekResult::TargetReached);
-            }
-            info!(time = ?now.elapsed(), "workflow found");
+            match result {
+                Ok(value) => {
+                    let patch = Patch(vec![PatchOperation::Replace(ReplaceOperation {
+                        path: path.clone(),
+                        value,
+                    })]);
 
-            if tracing::enabled!(tracing::Level::WARN) {
-                warn!("the following paths were ignored during planning");
-                for path in workflow.ignored() {
-                    warn!("{path}");
-                }
-            }
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                debug!("will execute the following tasks:");
-                for line in workflow.to_string().lines() {
-                    debug!("{line}");
-                }
-            }
+                    let state_result = {
+                        let mut system = state.system_writer.write().await;
+                        if let Err(e) = system
+                            .patch(&patch)
+                            .map_err(|e| Error::runtime(format!("sensor conflict: {e}")))
+                        {
+                            return Err(e)?;
+                        } else {
+                            system.state::<O>()
+                        }
+                    };
 
-            let now = Instant::now();
-            info!("executing workflow");
-            let res = workflow
-                .execute(sys_reader, patch_tx.clone(), sigint.clone())
-                .await
-                .map_err(InnerSeekError::Runtime);
-
-            // Increment worker generation after every workflow execution as
-            // state may have changed
-            generation.fetch_add(1, Ordering::Release);
-
-            // Get the status from the result
-            let status = res?;
-            info!(time = ?now.elapsed(), "workflow executed successfully");
-
-            if matches!(status, WorkflowStatus::Interrupted) {
-                return Ok(InnerSeekResult::Interrupted);
-            }
-
-            Ok(InnerSeekResult::WorkflowCompleted)
-        }
-
-        // Make sure dropping the future will interrupt the search
-        let drop_interrupt = AutoInterrupt::from(interrupt);
-
-        // Main seek_with_interrupt planning and execution loop
-        let handle: JoinHandle<Result<SeekStatus>> = {
-            let mut err_rx = writer_closed_rx;
-            let interrupt = drop_interrupt.clone();
-            // No writing allowed on this copy of the system lock
-            let sys_reader = system_rwlock;
-            let patch_tx = patch_tx;
-
-            // We spawn a task rather than looping directly so we can catch panics happening
-            // within the loop
-            tokio::spawn(
-                async move {
-                    let seek_span = Span::current();
-                    info!("applying target state");
-                    loop {
-                        let res = select! {
-                            biased;
-                            _ = err_rx.changed() => {
-                                return Err(Error::internal("state patch failed, worker state possibly tainted"));
-                            }
-                            res = find_and_run_workflow::<O>(&domain, &sys_reader, &tgt, &patch_tx, &interrupt, &generation) => res
-                        };
-
-                        match res {
-                            Ok(InnerSeekResult::TargetReached) => {
-                                info!("target state applied");
-                                seek_span.record("result", display("success"));
-                                return Ok(SeekStatus::Success);
-                            }
-                            Ok(InnerSeekResult::WorkflowCompleted) => {}
-                            Ok(InnerSeekResult::Interrupted) => {
-                                warn!("target state apply interrupted by user request");
-                                seek_span.record("result", display("interrupted"));
-
-                                return Ok(SeekStatus::Interrupted);
-                            }
-                            Err(InnerSeekError::Planning(e)) => {
-                                if let PlanningError::Aborted(err) = e {
-                                    return Err(err);
-                                } else {
-                                    seek_span.record("result", display("workflow_not_found"));
-                                    return Ok(SeekStatus::NotFound);
-                                }
-                            }
-                            Err(InnerSeekError::Runtime(err)) => {
-                                let mut io = Vec::new();
-                                let mut other = Vec::new();
-                                let AggregateError(all) = err;
-                                for e in all.into_iter() {
-                                    match e.kind() {
-                                        ErrorKind::Runtime => io.push(e),
-                                        ErrorKind::ConditionNotMet => {}
-                                        _ => other.push(e),
-                                    }
-                                }
-
-                                // If there are non-IO errors, there is
-                                // probably a bug somewhere so we package them as an internal
-                                // error
-                                if !other.is_empty() {
-                                    return Err(Error::internal(AggregateError::from(other)))?;
-                                }
-
-                                // Abort if there are any runtime errors as those
-                                // should be recoverable
-                                if !io.is_empty() {
-                                    warn!("target state apply interrupted due to error");
-                                    seek_span.record("result", display("aborted"));
-                                    return Ok(SeekStatus::Aborted(io));
-                                }
-
-                                // If we got here, all errors were of type ConditionNotMet
-                                // in which case we re-plan as the state may have changed
-                                // underneath the worker
-                                continue;
-                            }
+                    match state_result {
+                        Ok(new_state) => yield new_state,
+                        Err(e) => {
+                            return Err(e)?;
                         }
                     }
                 }
-                .instrument(info_span!("seek_target", result = field::Empty)),
-            )
-        };
-
-        let status = match handle.await {
-            Ok(Ok(res)) => Ok(res),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(Error::runtime(e))?,
-        }?;
-
-        Ok(status)
-    }
-
-    /// Trigger system changes by providing a new target state for the worker
-    ///
-    /// When called, this method tells the worker to look for a plan for the given
-    /// target. If a plan is found, the worker then will try to execute the resulting workflow and
-    /// and terminate if interrupted or a runtime error occurs. If a requirement changes between
-    /// planning and runtime, the Worker triggers a re-plan.
-    ///
-    /// The worker will be interrupted if the future is dropped, providing automatic cancellation.
-    ///
-    /// If no plan is found, the search terminates with a [`SeekStatus::NotFound`].
-    ///
-    /// # Errors
-    /// The method will result in an [`Error`] if a serialization issue occurs while converting
-    /// between state types, if the worker runtime panics or there is an unexpected error during
-    /// planning.
-    pub async fn seek_target(&mut self, tgt: O::Target) -> Result<SeekStatus> {
-        self.seek_with_interrupt(tgt, Interrupt::new()).await
+                Err(e) => {
+                    return Err(e)?;
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use super::*;
@@ -1095,11 +1455,11 @@ mod tests {
     use crate::job::*;
     use crate::task::*;
     use serde::{Deserialize, Serialize};
-    use tokio::time::{sleep, timeout};
+    use tokio::time::sleep;
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::{prelude::*, EnvFilter};
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct Counters(HashMap<String, i32>);
 
     impl State for Counters {
@@ -1150,15 +1510,14 @@ mod tests {
     #[tokio::test]
     async fn test_worker_complex_state() {
         init();
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .initial_state(Counters(HashMap::from([
                 ("one".to_string(), 0),
                 ("two".to_string(), 0),
-            ])))
-            .unwrap();
+            ])));
 
-        let status = worker
+        let (state, status) = worker
             .seek_target(Counters(HashMap::from([
                 ("one".to_string(), 2),
                 ("two".to_string(), 0),
@@ -1167,7 +1526,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(status, SeekStatus::Success);
-        let state = worker.state().await.unwrap();
         assert_eq!(
             state,
             Counters(HashMap::from([
@@ -1179,8 +1537,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_find_and_run_separately() {
+        use std::pin::pin;
+
         init();
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .initial_state(Counters(HashMap::from([
                 ("one".to_string(), 0),
@@ -1189,23 +1549,30 @@ mod tests {
             .unwrap();
 
         let workflow = worker
-            .find_workflow_to_target(Counters(HashMap::from([
+            .find_workflow(Counters(HashMap::from([
                 ("one".to_string(), 2),
                 ("two".to_string(), 0),
             ])))
-            .await
+            .unwrap()
             .unwrap();
 
-        let workflow_copy = workflow.clone();
+        // Run the workflow stream to completion
+        let mut state = worker.state().unwrap();
+        let mut status = WorkflowStatus::Success;
+        {
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    WorkerEvent::StateUpdated(new_state) => state = new_state,
+                    WorkerEvent::WorkflowFinished(last_status) => {
+                        status = last_status;
+                        break;
+                    }
+                }
+            }
+        }
 
-        // Run the workflow
-        let status = worker
-            .run_workflow(workflow, Interrupt::new())
-            .await
-            .unwrap();
-
-        assert_eq!(status, SeekStatus::Success);
-        let state = worker.state().await.unwrap();
+        assert_eq!(status, WorkflowStatus::Success);
         assert_eq!(
             state,
             Counters(HashMap::from([
@@ -1213,13 +1580,10 @@ mod tests {
                 ("two".to_string(), 0),
             ]))
         );
-
-        // Try to run the old-workflow again, this should fail
-        let res = worker.run_workflow(workflow_copy, Interrupt::new()).await;
-        assert!(res.is_err());
     }
 
     #[tokio::test]
+    #[should_panic]
     async fn test_worker_workflow_mismatch_should_fail() {
         init();
         let worker = Worker::new()
@@ -1231,15 +1595,15 @@ mod tests {
             .unwrap();
 
         let workflow = worker
-            .find_workflow_to_target(Counters(HashMap::from([
+            .find_workflow(Counters(HashMap::from([
                 ("one".to_string(), 2),
                 ("two".to_string(), 0),
             ])))
-            .await
+            .unwrap()
             .unwrap();
 
         // Create a different worker
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("/{counter}", update(plus_one))
             .initial_state(Counters(HashMap::from([
                 ("one".to_string(), 0),
@@ -1247,250 +1611,84 @@ mod tests {
             ])))
             .unwrap();
 
-        // Running the workflow should fail
-        let res = worker.run_workflow(workflow, Interrupt::new()).await;
-        assert!(res.is_err());
+        // This will panic
+        let _ = worker.run_workflow(workflow);
     }
 
     #[tokio::test]
     async fn test_worker_bug() {
         init();
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("", update(buggy_plus_one))
             .initial_state(0)
             .unwrap();
 
-        let status = worker.seek_target(2).await.unwrap();
-        assert!(matches!(status, SeekStatus::NotFound));
+        let err = worker.seek_target(2).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PlanningOverflow);
     }
 
     #[tokio::test]
-    async fn test_worker_follow_updates() {
+    async fn test_stream_yields_state_updates() {
+        use std::pin::pin;
+
         init();
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
             .unwrap();
 
-        // Collect all results
-        let mut updates = worker.follow();
-        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+
+        // Collect all state updates from the stream
+        let mut results = Vec::new();
         {
-            let results = Arc::clone(&results);
-            tokio::spawn(async move {
-                let mut res = results.write().await;
-                // Capture two updates
-                let first_update = updates.next().await;
-                res.push(first_update);
-
-                let second_update = updates.next().await;
-                res.push(second_update);
-            });
-        }
-
-        // Wait for worker to finish
-        let status = worker.seek_target(2).await.unwrap();
-        assert_eq!(status, SeekStatus::Success);
-
-        let results = results.read().await;
-        assert_eq!(*results, vec![Some(1), Some(2)]);
-    }
-
-    #[tokio::test]
-    async fn test_worker_follow_best_effort_loss() {
-        init();
-        let mut worker = Worker::new()
-            .job("", update(plus_one))
-            .initial_state(0)
-            .unwrap();
-
-        let mut updates = worker.follow();
-        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-        {
-            let results = Arc::clone(&results);
-            tokio::spawn(async move {
-                let mut res = results.write().await;
-
-                // Consume only some of the updates to simulate slow reader
-                let first = updates.next().await;
-                res.push(first);
-
-                // Sleep to let many updates be missed
-                tokio::time::sleep(Duration::from_millis(200)).await;
-
-                // Attempt to read again (might be after some lag)
-                let maybe_update = updates.next().await;
-                res.push(maybe_update);
-            });
-        }
-
-        // Wait for worker to finish
-        let status = worker.seek_target(100).await.unwrap();
-        assert_eq!(status, SeekStatus::Success);
-
-        let results = results.read().await;
-        assert_eq!(
-            (*results)
-                .iter()
-                .map(|r| r.is_some())
-                .collect::<Vec<bool>>(),
-            vec![true, true]
-        )
-    }
-
-    #[tokio::test]
-    async fn test_worker_interrupt_status() {
-        init();
-
-        fn sleepy_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
-            if *counter < tgt {
-                // Modify the counter if we are below target
-                *counter += 1;
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    WorkerEvent::StateUpdated(state) => {
+                        results.push(state);
+                    }
+                    WorkerEvent::WorkflowFinished(status) => {
+                        assert_eq!(status, WorkflowStatus::Success);
+                        break;
+                    }
+                }
             }
-
-            // Return the updated counter. The I/O part of the
-            // effect will only be called if the job is chosen
-            // in the workflow which will only happens if there are
-            // changes
-            with_io(counter, |counter| async {
-                sleep(Duration::from_millis(10)).await;
-                Ok(counter)
-            })
         }
 
-        let mut worker = Worker::new()
-            .job("", update(sleepy_plus_one))
-            .initial_state(0)
-            .unwrap();
-
-        let mut updates = worker.follow();
-        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-        {
-            let results = Arc::clone(&results);
-            tokio::spawn(async move {
-                while let Some(s) = updates.next().await {
-                    let mut res = results.write().await;
-                    res.push(s);
-                }
-            });
-        }
-
-        // Ensure a timeout happens before the end of the run
-        let res = timeout(Duration::from_millis(30), worker.seek_target(10)).await;
-        assert!(res.is_err());
-
-        // dropping the worker terminates the stream early
-        let results = results.read().await;
-        assert!(results.len() < 3);
+        assert_eq!(results, vec![1, 2]);
     }
 
     #[tokio::test]
-    async fn test_follow_stream_closes_on_worker_end() {
+    async fn test_stream_with_no_sensors_closes_on_completion() {
+        use std::pin::pin;
+
         init();
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("", update(plus_one))
             .initial_state(0)
             .unwrap();
 
-        let mut updates = worker.follow();
-        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let workflow = worker.find_workflow(1).unwrap().unwrap();
+        let mut event_count = 0;
         {
-            let results = Arc::clone(&results);
-            tokio::spawn(async move {
-                let mut res = results.write().await;
-
-                // After worker finishes, stream should terminate
-                let first = updates.next().await;
-                res.push(first);
-
-                let end = updates.next().await;
-                res.push(end);
-            });
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                event_count += 1;
+                if let WorkerEvent::WorkflowFinished(status) = event.unwrap() {
+                    assert_eq!(status, WorkflowStatus::Success);
+                }
+            }
         }
 
-        let status = worker.seek_target(1).await.unwrap();
-
-        // Wait for worker to finish
-        assert_eq!(status, SeekStatus::Success);
-
-        // Close the stream
-        worker.stop();
-
-        let results = results.read().await;
-        assert_eq!(*results, vec![Some(1), None]);
+        // Should have: StateUpdated, WorkflowComplete
+        assert_eq!(event_count, 2);
     }
 
     #[tokio::test]
-    async fn test_multiple_streams_receive_all_changes() {
-        init();
-        let mut worker = Worker::new()
-            .job("", update(plus_one))
-            .initial_state(0)
-            .unwrap();
+    async fn test_view_flush_propagates_to_stream() {
+        use std::pin::pin;
 
-        // Create multiple streams
-        let mut stream1 = worker.follow();
-        let mut stream2 = worker.follow();
-        let mut stream3 = worker.follow();
-
-        let results1 = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-        let results2 = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-        let results3 = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-
-        // Spawn tasks to collect updates from each stream
-        let task1 = {
-            let results = Arc::clone(&results1);
-            tokio::spawn(async move {
-                let mut res = results.write().await;
-                while let Some(update) = stream1.next().await {
-                    res.push(update);
-                }
-            })
-        };
-
-        let task2 = {
-            let results = Arc::clone(&results2);
-            tokio::spawn(async move {
-                let mut res = results.write().await;
-                while let Some(update) = stream2.next().await {
-                    res.push(update);
-                }
-            })
-        };
-
-        let task3 = {
-            let results = Arc::clone(&results3);
-            tokio::spawn(async move {
-                let mut res = results.write().await;
-                while let Some(update) = stream3.next().await {
-                    res.push(update);
-                }
-            })
-        };
-
-        // Execute the worker to generate state changes
-        let status = worker.seek_target(3).await.unwrap();
-        assert_eq!(status, SeekStatus::Success);
-
-        // Stop the worker to terminate streams
-        worker.stop();
-
-        // Wait for all tasks to complete
-        let _ = tokio::join!(task1, task2, task3);
-
-        // Verify all streams received the same updates
-        let results1 = results1.read().await;
-        let results2 = results2.read().await;
-        let results3 = results3.read().await;
-
-        let expected = vec![1, 2, 3];
-        assert_eq!(*results1, expected);
-        assert_eq!(*results2, expected);
-        assert_eq!(*results3, expected);
-    }
-
-    #[tokio::test]
-    async fn test_view_flush_propagates_to_followers() {
         init();
 
         // Create a job that flushes intermediate changes
@@ -1516,38 +1714,29 @@ mod tests {
             })
         }
 
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("", update(plus_four))
             .initial_state(0)
             .unwrap();
+        let workflow = worker.find_workflow(4).unwrap().unwrap();
 
-        // Follow the worker state
-        let mut updates = worker.follow();
-        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-
+        let mut results = Vec::new();
         {
-            let results = Arc::clone(&results);
-            tokio::spawn(async move {
-                let mut res = results.write().await;
-                while let Some(update) = updates.next().await {
-                    res.push(update);
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    WorkerEvent::StateUpdated(state) => {
+                        results.push(state);
+                    }
+                    WorkerEvent::WorkflowFinished(status) => {
+                        assert_eq!(status, WorkflowStatus::Success);
+                        break;
+                    }
                 }
-            });
+            }
         }
 
-        // Execute the worker - target 4 because: 0 + 1 (planning) + 3 (flushes) = 4
-        let status = worker.seek_target(4).await.unwrap();
-        assert_eq!(status, SeekStatus::Success);
-
-        // Stop the worker to ensure all updates are received
-        worker.stop();
-
-        // Give some time for updates to be processed
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let results = results.read().await;
-
-        // We should see intermediate states from flushes
+        // We should see intermediate states from flushes: 1, 2, 3, 4
         assert!(
             results.len() >= 4,
             "Expected at least 4 updates, got {}: {:?}",
@@ -1555,7 +1744,6 @@ mod tests {
             &results
         );
 
-        // The final state should be 4
         assert_eq!(results[0], 1);
         assert_eq!(results[1], 2);
         assert_eq!(results[2], 3);
@@ -1564,6 +1752,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_flushed_changes_rollback_on_error() {
+        use std::pin::pin;
+
         init();
 
         // Create a job that flushes changes then fails
@@ -1589,36 +1779,30 @@ mod tests {
             })
         }
 
-        let mut worker = Worker::new()
+        let worker = Worker::new()
             .job("", update(failing_after_flush))
             .initial_state(0)
             .unwrap();
 
-        // Follow the worker state
-        let mut updates = worker.follow();
-        let results = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-
+        let workflow = worker.find_workflow(4).unwrap().unwrap();
+        let mut results = Vec::new();
+        let mut final_status = WorkflowStatus::Success;
         {
-            let results = Arc::clone(&results);
-            tokio::spawn(async move {
-                let mut res = results.write().await;
-                while let Some(update) = updates.next().await {
-                    res.push(update);
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    WorkerEvent::StateUpdated(state) => {
+                        results.push(state);
+                    }
+                    WorkerEvent::WorkflowFinished(status) => {
+                        final_status = status;
+                        break;
+                    }
                 }
-            });
+            }
         }
 
-        // Execute the worker - should fail
-        let status = worker.seek_target(4).await.unwrap();
-        assert!(matches!(status, SeekStatus::Aborted(_)));
-
-        // Stop the worker
-        worker.stop();
-
-        // Give some time for updates to be processed
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let results = results.read().await;
+        assert!(matches!(final_status, WorkflowStatus::Aborted(_)));
 
         assert!(
             results.len() >= 4,
@@ -1631,6 +1815,711 @@ mod tests {
         assert_eq!(results[0], 1);
         assert_eq!(results[1], 2);
         assert_eq!(results[2], 3);
-        assert_eq!(results[3], 0);
+        assert_eq!(results[3], 0); // rollback
+    }
+
+    // ==================== Sensor Tests ====================
+    // Note: Sensor updates during workflow execution are delivered through the stream.
+    // Sensors are only polled during active workflow execution.
+
+    #[tokio::test]
+    async fn test_sensor_updates_during_workflow() {
+        use std::pin::pin;
+
+        init();
+
+        // Simple state with just temperature
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct TempState {
+            temperature: i32,
+            target_val: i32,
+        }
+
+        impl State for TempState {
+            type Target = Self;
+        }
+
+        fn update_target(
+            mut state: View<TempState>,
+            Target(tgt): Target<TempState>,
+        ) -> IO<TempState> {
+            if state.target_val != tgt.target_val {
+                state.target_val = tgt.target_val;
+            }
+
+            with_io(state, |state| async move {
+                // Sleep to give sensor time to emit updates
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(state)
+            })
+        }
+
+        let worker: Worker<TempState, _> = Worker::new()
+            .job("", update(update_target))
+            .sensor("/temperature", || {
+                async_stream::stream! {
+                    for temp in [25, 26, 27] {
+                        yield temp;
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                    }
+                }
+            })
+            .initial_state(TempState {
+                temperature: 20,
+                target_val: 0,
+            })
+            .unwrap();
+
+        let workflow = worker
+            .find_workflow(TempState {
+                temperature: 20,
+                target_val: 1,
+            })
+            .unwrap()
+            .unwrap();
+        // Collect temperature updates during workflow execution
+        let mut temp_updates = Vec::new();
+        {
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    WorkerEvent::StateUpdated(state) => {
+                        temp_updates.push(state.temperature);
+                    }
+                    WorkerEvent::WorkflowFinished(_) => {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // We should see sensor updates interleaved with workflow execution
+        assert!(
+            !temp_updates.is_empty(),
+            "Expected some temperature updates, got none"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sensor_initial_subscription_for_existing_state() {
+        use std::pin::pin;
+
+        init();
+
+        // Tests that sensors are created for paths that exist at startup
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct InnerClimate {
+            temperature: i32,
+            humidity: i32,
+            target: i32,
+        }
+
+        impl State for InnerClimate {
+            type Target = Self;
+        }
+
+        fn update_target(
+            mut state: View<InnerClimate>,
+            Target(tgt): Target<InnerClimate>,
+        ) -> IO<InnerClimate> {
+            if state.target != tgt.target {
+                state.target = tgt.target;
+            }
+
+            with_io(state, |state| async move {
+                // Sleep to give sensors time to emit
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(state)
+            })
+        }
+
+        // Track which sensors were created
+        let created = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
+        let created_temp = Arc::clone(&created);
+        let temp_sensor = move || {
+            let created = Arc::clone(&created_temp);
+            async_stream::stream! {
+                {
+                    let mut c = created.write().await;
+                    c.push("temperature".to_string());
+                }
+                yield 25;
+            }
+        };
+
+        let created_humid = Arc::clone(&created);
+        let humidity_sensor = move || {
+            let created = Arc::clone(&created_humid);
+            async_stream::stream! {
+                {
+                    let mut c = created.write().await;
+                    c.push("humidity".to_string());
+                }
+                yield 60;
+            }
+        };
+
+        let worker: Worker<InnerClimate, _> = Worker::new()
+            .job("", update(update_target))
+            .sensor("/temperature", temp_sensor)
+            .sensor("/humidity", humidity_sensor)
+            .initial_state(InnerClimate {
+                temperature: 20,
+                humidity: 50,
+                target: 0,
+            })
+            .unwrap();
+
+        let workflow = worker
+            .find_workflow(InnerClimate {
+                temperature: 20,
+                humidity: 50,
+                target: 1,
+            })
+            .unwrap()
+            .unwrap();
+
+        // Trigger a workflow to activate sensors
+        {
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), WorkerEvent::WorkflowFinished { .. }) {
+                    break;
+                }
+            }
+        }
+
+        // Check that sensors were created
+        let created = created.read().await;
+        assert!(
+            created.contains(&"temperature".to_string()),
+            "temperature sensor not created"
+        );
+        assert!(
+            created.contains(&"humidity".to_string()),
+            "humidity sensor not created"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_continues_reporting_sensors_cleanup_hookcomplete() {
+        use std::pin::pin;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        init();
+
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct SensorState {
+            value: i32,
+            target_val: i32,
+        }
+
+        impl State for SensorState {
+            type Target = Self;
+        }
+
+        fn update_target(
+            mut state: View<SensorState>,
+            Target(tgt): Target<SensorState>,
+        ) -> View<SensorState> {
+            if state.target_val != tgt.target_val {
+                state.target_val = tgt.target_val;
+            }
+            state
+        }
+
+        // Sensor that emits values continuously
+        let sensor_emit_count = Arc::new(AtomicUsize::new(0));
+        let sensor_emit_count_clone = Arc::clone(&sensor_emit_count);
+
+        let worker: Worker<SensorState, _> = Worker::new()
+            .job("", update(update_target))
+            .sensor("/value", move || {
+                let count = Arc::clone(&sensor_emit_count_clone);
+                async_stream::stream! {
+                    for i in 1..=5 {
+                        count.fetch_add(1, AtomicOrdering::SeqCst);
+                        yield i * 10;
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
+            })
+            .initial_state(SensorState {
+                value: 0,
+                target_val: 0,
+            })
+            .unwrap();
+
+        let interrupt = Interrupt::new();
+        let interrupt_clone = interrupt.clone();
+
+        // Collect all state updates
+        let mut updates_before_complete = Vec::new();
+        let mut updates_after_complete = Vec::new();
+        let mut workflow_completed = false;
+
+        let workflow = worker
+            .find_workflow(SensorState {
+                value: 0,
+                target_val: 1,
+            })
+            .unwrap()
+            .unwrap();
+        {
+            let mut stream = pin!(worker.run_workflow(workflow));
+
+            // Collect updates, continuing after WorkflowComplete
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    WorkerEvent::StateUpdated(state) => {
+                        if workflow_completed {
+                            updates_after_complete.push(state.value);
+                        } else {
+                            updates_before_complete.push(state.value);
+                        }
+                    }
+                    WorkerEvent::WorkflowFinished(status) => {
+                        assert_eq!(status, WorkflowStatus::Success);
+                        workflow_completed = true;
+                        // Continue polling to get more sensor updates
+                        // Set interrupt after getting a few more updates
+                        let interrupt = interrupt_clone.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(80)).await;
+                            interrupt.trigger();
+                        });
+                    }
+                }
+            }
+        }
+
+        assert!(workflow_completed, "Workflow should have completed");
+        assert!(
+            !updates_after_complete.is_empty(),
+            "Expected sensor updates after workflow completion, got none. \
+             Before: {:?}, After: {:?}",
+            updates_before_complete,
+            updates_after_complete
+        );
+
+        // Verify sensor continued emitting after workflow completed
+        let total_emits = sensor_emit_count.load(AtomicOrdering::SeqCst);
+        assert!(
+            total_emits >= 2,
+            "Expected sensor to emit multiple times, got {}",
+            total_emits
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workflow_interrupted_when_stream_dropped() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+        init();
+
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+        struct SlowState {
+            value: i32,
+        }
+
+        impl State for SlowState {
+            type Target = Self;
+        }
+
+        // Track how many tasks actually completed their IO
+        let tasks_completed = Arc::new(AtomicUsize::new(0));
+        let tasks_started = Arc::new(AtomicUsize::new(0));
+        let workflow_was_interrupted = Arc::new(AtomicBool::new(false));
+
+        let tasks_completed_clone = Arc::clone(&tasks_completed);
+        let tasks_started_clone = Arc::clone(&tasks_started);
+
+        fn slow_increment(
+            mut state: View<SlowState>,
+            Target(tgt): Target<SlowState>,
+            tasks_started: Arc<AtomicUsize>,
+            tasks_completed: Arc<AtomicUsize>,
+        ) -> IO<SlowState> {
+            if state.value < tgt.value {
+                state.value += 1;
+            }
+
+            with_io(state, move |state| {
+                let started = tasks_started;
+                let completed = tasks_completed;
+                async move {
+                    started.fetch_add(1, AtomicOrdering::SeqCst);
+                    // Long sleep to simulate slow IO
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    completed.fetch_add(1, AtomicOrdering::SeqCst);
+                    Ok(state)
+                }
+            })
+        }
+
+        let worker: Worker<SlowState, _> = Worker::new()
+            .job(
+                "",
+                update({
+                    let started = Arc::clone(&tasks_started_clone);
+                    let completed = Arc::clone(&tasks_completed_clone);
+                    move |state: View<SlowState>, tgt: Target<SlowState>| {
+                        slow_increment(state, tgt, Arc::clone(&started), Arc::clone(&completed))
+                    }
+                }),
+            )
+            .initial_state(SlowState { value: 0 })
+            .unwrap();
+
+        let workflow = worker
+            .find_workflow(SlowState { value: 5 })
+            .unwrap()
+            .unwrap();
+        // Start seeking a target that requires multiple slow tasks
+        let workflow_was_interrupted_clone = Arc::clone(&workflow_was_interrupted);
+        {
+            use std::pin::pin;
+
+            let mut stream = pin!(worker.run_workflow(workflow));
+
+            // Wait for at least one task to start
+            while tasks_started.load(AtomicOrdering::SeqCst) == 0 {
+                // Poll the stream to start the workflow
+                if let Some(event) = stream.next().await {
+                    if let WorkerEvent::WorkflowFinished(status) = event.unwrap() {
+                        if status == WorkflowStatus::Success {
+                            workflow_was_interrupted_clone.store(true, AtomicOrdering::SeqCst);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Drop the stream while tasks are still running
+            // (stream goes out of scope here)
+        }
+
+        // Give some time for any in-flight tasks to potentially complete
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let started = tasks_started.load(AtomicOrdering::SeqCst);
+        let completed = tasks_completed.load(AtomicOrdering::SeqCst);
+
+        // The workflow should have been interrupted - not all 5 tasks should complete
+        assert!(
+            completed < 5,
+            "Expected workflow to be interrupted before all tasks completed. \
+             Started: {}, Completed: {}",
+            started,
+            completed
+        );
+    }
+
+    fn plus_two(counter: View<i32>, tgt: Target<i32>) -> Vec<Task> {
+        if *tgt - *counter < 2 {
+            // Returning an empty result tells the planner
+            // the task is not applicable to reach the target
+            return vec![];
+        }
+
+        vec![plus_one.with_target(*tgt), plus_one.with_target(*tgt)]
+    }
+
+    // ==================== Cleanup Tests ====================
+
+    #[test]
+    fn test_cleanup_hook_appended_to_workflow() {
+        use crate::dag::{seq, Dag};
+
+        init();
+
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        struct MyState {
+            value: i32,
+            needs_cleanup: bool,
+        }
+
+        impl State for MyState {
+            type Target = Self;
+        }
+
+        fn increment(mut state: View<MyState>, Target(tgt): Target<MyState>) -> View<MyState> {
+            if state.value < tgt.value {
+                state.value += 1;
+            }
+            state
+        }
+
+        fn do_cleanup(mut state: View<MyState>) -> View<MyState> {
+            if state.needs_cleanup {
+                state.needs_cleanup = false;
+            }
+            state
+        }
+
+        let worker = Worker::new()
+            .job("", update(increment))
+            .with_cleanup(do_cleanup)
+            .initial_state(MyState {
+                value: 0,
+                needs_cleanup: true,
+            })
+            .unwrap();
+
+        let workflow = worker
+            .find_workflow(MyState {
+                value: 2,
+                needs_cleanup: true,
+            })
+            .unwrap()
+            .unwrap();
+
+        // The after-workflow task should appear after the main workflow tasks
+        let expected: Dag<&str> = seq!(
+            "mahler::worker::tests::test_cleanup_hook_appended_to_workflow::increment()",
+            "mahler::worker::tests::test_cleanup_hook_appended_to_workflow::increment()",
+            "clean-up",
+        );
+
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_cleanup_hook_skipped_when_condition_not_met() {
+        init();
+
+        fn do_cleanup(mut counter: View<i32>) -> Option<View<i32>> {
+            if *counter > 0 {
+                *counter = 0;
+                return Some(counter);
+            }
+            // Return None to signal ConditionNotMet
+            None
+        }
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .with_cleanup(do_cleanup)
+            .initial_state(0)
+            .unwrap();
+
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+
+        // The condition is met (counter > 0 after incrementing)
+        // so the after-workflow task should appear
+        let has_cleanup_hook = workflow
+            .to_string()
+            .lines()
+            .any(|line| line.trim().trim_start_matches("- ").ends_with("clean-up"));
+        assert!(
+            has_cleanup_hook,
+            "cleanup_hook task should appear: {}",
+            workflow,
+        );
+
+        // Now test when condition is NOT met.
+        // After decrementing from 2 to 0, the handler's condition (*counter > 0)
+        // is false, so it returns None and gets skipped.
+        fn decrement(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
+            if *counter > tgt {
+                *counter -= 1;
+            }
+            counter
+        }
+
+        let worker = Worker::new()
+            .job("", update(decrement))
+            .with_cleanup(do_cleanup)
+            .initial_state(2)
+            .unwrap();
+
+        let workflow = worker.find_workflow(0).unwrap().unwrap();
+
+        // After decrementing to 0, the handler's condition (*counter > 0) is false,
+        // so it should be skipped.
+        let has_cleanup_hook = workflow
+            .to_string()
+            .lines()
+            .any(|line| line.trim().trim_start_matches("- ").ends_with("clean-up"));
+        assert!(
+            !has_cleanup_hook,
+            "cleanup_hook task should not appear when condition is not met: {}",
+            workflow
+        );
+    }
+
+    #[test]
+    fn test_cleanup_hook_skipped_when_workflow_is_empty() {
+        init();
+
+        fn do_cleanup() {}
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .with_cleanup(do_cleanup)
+            .initial_state(2)
+            .unwrap();
+
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+        let has_cleanup_hook = workflow
+            .to_string()
+            .lines()
+            .any(|line| line.trim().trim_start_matches("- ").ends_with("clean-up"));
+        assert!(
+            !has_cleanup_hook,
+            "cleanup_hook should not appear if the target has already been reached: {}",
+            workflow
+        );
+    }
+
+    #[test]
+    fn test_no_cleanup_hook_when_not_configured() {
+        init();
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .unwrap();
+
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+
+        let workflow_str = workflow.to_string();
+        assert!(
+            !workflow_str.contains("clean-up"),
+            "no cleanup should appear: {workflow_str}",
+        );
+    }
+
+    #[test]
+    fn test_no_cleanup_hook_when_no_plan_found() {
+        init();
+
+        fn noop() {}
+
+        let worker: Worker<i32, _> = Worker::new().with_cleanup(noop).initial_state(0).unwrap();
+
+        // No jobs registered, so no workflow can reach the target
+        let workflow = worker.find_workflow(1).unwrap();
+        assert!(workflow.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_hook_executed() {
+        use std::pin::pin;
+
+        init();
+
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        struct Counter {
+            value: i32,
+        }
+
+        impl State for Counter {
+            type Target = Self;
+        }
+
+        fn increment(mut state: View<Counter>, Target(tgt): Target<Counter>) -> IO<Counter> {
+            if state.value < tgt.value {
+                state.value += 1;
+            }
+
+            with_io(state, |state| async { Ok(state) })
+        }
+
+        // Cleanup always bumps value by 100 to make its execution observable
+        fn mark_clean(mut state: View<Counter>) -> View<Counter> {
+            state.value += 100;
+            state
+        }
+
+        let worker = Worker::new()
+            .job("", update(increment))
+            .with_cleanup(mark_clean)
+            .initial_state(Counter { value: 0 })
+            .unwrap();
+
+        let workflow = worker.find_workflow(Counter { value: 2 }).unwrap().unwrap();
+
+        let mut state = worker.state().unwrap();
+        let mut status = WorkflowStatus::Success;
+        {
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    WorkerEvent::StateUpdated(new_state) => state = new_state,
+                    WorkerEvent::WorkflowFinished(s) => {
+                        status = s;
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(status, WorkflowStatus::Success);
+        // The cleanup added 100 to the value after incrementing to 2
+        assert_eq!(state, Counter { value: 102 });
+    }
+
+    #[tokio::test]
+    async fn it_allows_running_atomic_tasks() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Counters(HashMap<String, i32>);
+
+        impl State for Counters {
+            type Target = Self;
+        }
+
+        let worker = Worker::new()
+            .job("/{counter}", update(plus_one))
+            .job("/{counter}", update(plus_two))
+            .initial_state(Counters(HashMap::from([
+                ("one".to_string(), 1),
+                ("two".to_string(), 0),
+            ])))
+            .unwrap();
+
+        let task = plus_one.with_target(3).with_arg("counter", "one");
+        let (state, status) = worker.run_task(task).await.unwrap();
+
+        assert_eq!(status, WorkflowStatus::Success);
+        assert_eq!(
+            state,
+            Counters(HashMap::from([
+                ("one".to_string(), 2),
+                ("two".to_string(), 0),
+            ]))
+        );
+    }
+
+    #[tokio::test]
+    async fn it_allows_testing_compound_tasks() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Counters(HashMap<String, i32>);
+
+        impl State for Counters {
+            type Target = Self;
+        }
+
+        let worker: Worker<Counters, _> = Worker::new()
+            .job("/{counter}", update(plus_one))
+            .job("/{counter}", update(plus_two))
+            .initial_state(Counters(HashMap::from([
+                ("one".to_string(), 0),
+                ("two".to_string(), 0),
+            ])))
+            .unwrap();
+
+        let task = plus_two.with_target(3).with_arg("counter", "one");
+        let (state, status) = worker.run_task(task).await.unwrap();
+
+        assert_eq!(status, WorkflowStatus::Success);
+        assert_eq!(
+            state,
+            Counters(HashMap::from([
+                ("one".to_string(), 2),
+                ("two".to_string(), 0),
+            ]))
+        );
     }
 }

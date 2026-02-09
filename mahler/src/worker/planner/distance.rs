@@ -1,17 +1,15 @@
-use json_patch::diff;
+use json_patch::{diff, Patch};
 use jsonptr::Pointer;
-use std::collections::btree_set::Iter;
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::json::{
-    Operation, Patch, PatchOperation, Path, RemoveOperation, ReplaceOperation, Value,
-};
+use crate::json::{Operation, Path, Value};
 
 #[derive(Debug)]
 pub struct Distance {
-    changes: Patch,
-    operations: BTreeSet<Operation>,
+    pub required: Vec<Operation>,
+    pub ignored: Vec<Operation>,
+    pub operations: Vec<Operation>,
 }
 
 fn insert_remove_ops(ops: &mut BTreeSet<Operation>, path: &Pointer, value: &Value) {
@@ -24,9 +22,9 @@ fn insert_remove_ops(ops: &mut BTreeSet<Operation>, path: &Pointer, value: &Valu
             for (k, v) in obj.iter() {
                 let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
                 // Insert a remove operation for each child
-                ops.insert(Operation::from(PatchOperation::Remove(RemoveOperation {
-                    path: path.clone(),
-                })));
+                ops.insert(Operation::Delete {
+                    path: Path::new(path.as_ref()),
+                });
 
                 // Append the value to the queue
                 queue.push((path, v));
@@ -39,9 +37,9 @@ fn insert_remove_ops(ops: &mut BTreeSet<Operation>, path: &Pointer, value: &Valu
                 let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
 
                 // Insert a remove operation for each child
-                ops.insert(Operation::from(PatchOperation::Remove(RemoveOperation {
-                    path: path.clone(),
-                })));
+                ops.insert(Operation::Delete {
+                    path: Path::new(path.as_ref()),
+                });
 
                 // Append the value to the queue
                 queue.push((path, v));
@@ -52,7 +50,21 @@ fn insert_remove_ops(ops: &mut BTreeSet<Operation>, path: &Pointer, value: &Valu
 
 impl fmt::Display for Distance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        self.changes.fmt(f)
+        write!(f, "{{\"required\": [")?;
+        for (i, op) in self.required.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            op.fmt(f)?;
+        }
+        write!(f, "], \"ignored\": [")?;
+        for (i, op) in self.ignored.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            op.fmt(f)?;
+        }
+        write!(f, "]}}")
     }
 }
 
@@ -80,18 +92,19 @@ impl Distance {
 
         // calculate differences between the system root and
         // the target
-        let changes = diff(src, tgt);
-        for op in &changes.0 {
+        let Patch(changes) = diff(src, tgt);
+
+        let (ignored, required): (Vec<_>, Vec<_>) = changes
+            .into_iter()
+            .map(Operation::from)
+            .partition(|op| ignore.iter().any(|p| p.is_prefix_of(op.path())));
+
+        for op in required.iter() {
             // For every operation on the list of changes
-            let path = op.path();
-
-            if ignore.iter().any(|p| p.is_prefix_of(&Path::new(path))) {
-                continue;
-            }
-
-            let mut parent = path;
+            let path = op.path().as_ref();
 
             // get all paths up to the root
+            let mut parent = path;
             while let Some(newparent) = parent.parent() {
                 // get the target at the parent to use as value
                 // no matter the operation, the parent of the target should
@@ -101,17 +114,17 @@ impl Distance {
                     .unwrap_or_else(|e| panic!("path `{path}` should be resolvable on state: {e}"));
 
                 // Insert a replace operation for each one
-                operations.insert(Operation::from(PatchOperation::Replace(ReplaceOperation {
-                    path: newparent.to_buf(),
+                operations.insert(Operation::Update {
+                    path: Path::new(newparent),
                     value: value.clone(),
-                })));
+                });
 
                 parent = newparent;
             }
 
             // for every delete operation '/a/b/c', add child
             // nodes of the deleted path with 'remove' operation
-            if let PatchOperation::Remove(_) = op {
+            if let Operation::Delete { .. } = op {
                 // By definition of the remove operation the path should be
                 // resolvable on the left side of the diff
                 let value = path
@@ -123,21 +136,18 @@ impl Distance {
             }
 
             // Finally insert the actual operation
-            operations.insert(Operation::from(op.clone()));
+            operations.insert(op.clone());
         }
 
         Distance {
-            changes,
-            operations,
+            ignored,
+            required,
+            operations: operations.into_iter().collect(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.operations.is_empty()
-    }
-
-    pub fn operations(&self) -> Iter<'_, Operation> {
-        self.operations.iter()
+        self.required.is_empty()
     }
 }
 
@@ -152,7 +162,8 @@ mod tests {
 
         // Serialize results to make comparison easier
         let ops: Vec<Value> = distance
-            .operations()
+            .operations
+            .iter()
             .map(|o| serde_json::to_value(o).unwrap())
             .collect();
 

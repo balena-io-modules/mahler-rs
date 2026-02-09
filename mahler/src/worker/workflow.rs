@@ -4,16 +4,13 @@ use async_trait::async_trait;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use tracing::{info, instrument};
 
 use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
 use crate::error::{AggregateError, Error, ErrorKind};
-use crate::json::{
-    Operation, Patch, PatchOperation, Path, RemoveOperation, ReplaceOperation, Value,
-};
+use crate::json::{Operation, Patch, PatchOperation, RemoveOperation, ReplaceOperation, Value};
 use crate::runtime::{Channel, System};
-use crate::sync::{Interrupt, RwLock, Sender};
+use crate::sync::{Interrupt, Reader, Sender};
 use crate::task::{Action, Id};
 
 /// Unique representation of a task acting on a specific path and system state.
@@ -31,7 +28,7 @@ struct WorkUnitId<'s> {
 
 #[derive(Clone, PartialEq, Eq)]
 /// Utility type to encode a single work unit in a workflow
-pub(crate) struct WorkUnit {
+pub(super) struct WorkUnit {
     /// Unique id for the action. This is calculed by hashing a WorkUnitId
     pub id: u64,
 
@@ -175,20 +172,14 @@ pub struct Workflow {
     pub(super) dag: Dag<WorkUnit>,
 
     /// List of skipped paths/operations during planning due to a halted state
-    pub(super) ignored: Vec<Path>,
-
-    /// The list of operations that triggered this workflow creation
-    pub(super) operations: Vec<Operation>,
+    pub(super) ignored: Vec<Operation>,
 
     /// The worker that created this workflow
     pub(super) worker_id: u64,
-
-    /// The generation when this workflow was created
-    pub(super) generation: u64,
 }
 
 /// Runtime status of a workflow execution
-pub(crate) enum WorkflowStatus {
+pub(super) enum WorkflowStatus {
     /// The workflow execution terminated successfully
     Completed,
 
@@ -206,24 +197,18 @@ impl From<DagExecutionStatus> for WorkflowStatus {
 }
 
 impl Workflow {
-    pub(crate) fn new(dag: Dag<WorkUnit>) -> Self {
+    pub(super) fn new(dag: Dag<WorkUnit>) -> Self {
         Workflow {
             dag,
             ignored: Vec::new(),
-            operations: Vec::new(),
             worker_id: 0,
-            generation: 0,
         }
     }
 
-    /// Return the list of ignored paths during planning due to halted states
-    pub fn ignored(&self) -> Vec<&Path> {
+    /// Return the list of skipped operations during planning
+    /// due to matching exceptions
+    pub fn exceptions(&self) -> Vec<&Operation> {
         self.ignored.iter().collect()
-    }
-
-    /// Return the list of operations that triggered this workflow to be built
-    pub fn operations(&self) -> Vec<&Operation> {
-        self.operations.iter().collect()
     }
 
     /// Return `true` if the Workflow's internal graph has no elements
@@ -236,14 +221,9 @@ impl Workflow {
         self.worker_id
     }
 
-    /// Get the generation when this workflow was created
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     pub(super) async fn execute(
         self,
-        sys_reader: &Arc<RwLock<System>>,
+        sys_reader: &Reader<System>,
         patch_tx: Sender<Patch>,
         interrupt: Interrupt,
     ) -> Result<WorkflowStatus, AggregateError<Error>> {

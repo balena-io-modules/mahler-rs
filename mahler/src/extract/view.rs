@@ -710,7 +710,7 @@ mod tests {
             .unwrap()
         );
 
-        system.patch(changes).unwrap();
+        system.patch(&changes).unwrap();
         assert_eq!(
             system.inner_state(),
             &serde_json::from_value::<Value>(json!({"numbers": ["one", "three"]})).unwrap()

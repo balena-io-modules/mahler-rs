@@ -41,4 +41,9 @@ impl Context {
         args.insert(key, encoded);
         Self { args, ..self }
     }
+
+    /// Return a new context with the provided path arguments
+    pub fn with_args(self, args: PathArgs) -> Self {
+        Self { args, ..self }
+    }
 }

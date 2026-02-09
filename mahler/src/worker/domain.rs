@@ -34,12 +34,17 @@ impl Domain {
     ///
     /// This function will panic if the route is not a valid path
     /// or if a job is assigned to multiple routes
-    pub fn job(self, route: &'static str, job: Job) -> Self {
+    pub fn job(mut self, route: &'static str, job: Job) -> Self {
+        self.insert_job(route, job);
+        self
+    }
+
+    pub fn insert_job(&mut self, route: &'static str, job: Job) {
         // TODO: it would be great to figure out a way to validate
         // that the pointer is valid for the parent state at compile time
         let Self {
-            mut jobs,
-            mut index,
+            ref mut jobs,
+            ref mut index,
             ..
         } = self;
 
@@ -62,12 +67,29 @@ impl Domain {
                 )
             }
         }
+    }
 
-        Self {
-            jobs,
-            index,
-            ..self
+    /// Remove all jobs with the given id
+    pub fn remove_job(&mut self, id: TaskId) -> bool {
+        let Self {
+            ref mut jobs,
+            ref mut index,
+            ..
+        } = self;
+
+        // find the route from the index
+        if let Some(route) = index.remove(&id) {
+            // Remove the route from the router if it exists
+            if let Some(mut queue) = jobs.remove(&route) {
+                queue.retain(|job| job.id() != id);
+                // (re)insert the queue to the router
+                jobs.insert(route, queue).expect("route should be valid");
+
+                return true;
+            }
         }
+
+        false
     }
 
     /// Add an exception to the domain
@@ -187,7 +209,7 @@ impl Domain {
             Ok(final_route)
         } else {
             Err(Error::new(
-                ErrorKind::NotFound,
+                ErrorKind::UnregisteredJob,
                 format!("{task_id} not in domain"),
             ))
         }
