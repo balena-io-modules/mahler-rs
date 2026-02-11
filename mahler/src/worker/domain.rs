@@ -125,11 +125,12 @@ impl Domain {
         if let Some(route) = self.index.get(&task_id) {
             let mut route = route.clone();
             let mut replacements = Vec::new();
-            let mut used_keys = Vec::new();
+            // Track used keys with their position in the route for ordering
+            let mut used_keys: Vec<(usize, String)> = Vec::new();
 
             // Step 1: Look for any `{param}` or `{*param}` references
             // for every key in the argument list. If there any escaped params {{param}}, replace them
-            // with a tem placeholder.
+            // with a temp placeholder.
             for (k, v) in args.iter() {
                 let param = format!("{{{k}}}");
                 let wildcard_param = format!("{{*{k}}}");
@@ -140,8 +141,9 @@ impl Domain {
                 route = route.replace(&escaped_param, &placeholder);
 
                 // Only mark as used if actual replacement occurs
-                if route.contains(&param) || route.contains(&wildcard_param) {
-                    used_keys.push(k.clone());
+                let pos = route.find(&param).or_else(|| route.find(&wildcard_param));
+                if let Some(pos) = pos {
+                    used_keys.push((pos, k.to_string()));
                     replacements.push((param, v.clone()));
                     replacements.push((wildcard_param, v.clone()));
                 }
@@ -203,8 +205,15 @@ impl Domain {
                 final_route = final_route.replace(&placeholder, &param);
             }
 
-            // Retain only the used keys (excluding those used only as escaped)
-            args.retain(|(k, _)| used_keys.contains(k));
+            // Retain only the used keys, sorted by the order they appear in the route
+            used_keys.sort_by_key(|(pos, _)| *pos);
+            args.retain(|(k, _)| used_keys.iter().any(|(_, uk)| uk.as_str() == k.as_ref()));
+            args.sort_by_key(|(k, _)| {
+                used_keys
+                    .iter()
+                    .position(|(_, uk)| uk.as_str() == k.as_ref())
+                    .unwrap_or(usize::MAX)
+            });
 
             Ok(final_route)
         } else {
@@ -330,6 +339,24 @@ mod tests {
         assert_eq!(
             args,
             PathArgs::from(vec![("id", "42"), ("path", "reports/january.csv"),])
+        );
+    }
+
+    #[test]
+    fn test_args_sorted_by_route_order() {
+        let func = |file: View<()>| file;
+        let domain = Domain::new().job("/users/{id}/files/{*path}", update(func));
+
+        // Args provided in reverse order relative to the route
+        let mut args = PathArgs::from(vec![("path", "reports/january.csv"), ("id", "42")]);
+        let result = domain.find_path(func.id(), &mut args).unwrap();
+
+        assert_eq!(result, "/users/42/files/reports/january.csv".to_string());
+
+        // Args should be reordered to match route order: id before path
+        assert_eq!(
+            args,
+            PathArgs::from(vec![("id", "42"), ("path", "reports/january.csv")])
         );
     }
 
