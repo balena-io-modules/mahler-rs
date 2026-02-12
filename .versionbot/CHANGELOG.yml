@@ -1,4 +1,20 @@
 - commits:
+    - subject: Sort path args in the order that they appear on the path
+      hash: fd5a27170525c0768886d5970a79715572d35201
+      body: |
+        This updates `Domain::find_path` to sort the arguments given as
+        parameter to use the order they appear on the path. This should ensure
+        that when deserializing args using the `Args` extractor, deserializing
+        as a tuple provides the right order.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.25.1
+  title: ""
+  date: 2026-02-12T00:05:39.605Z
+- commits:
     - subject: Fix bug in Dag::reverse
       hash: 40d04f6bef0e8e6b96a398fa502f1b72f670da16
       body: |
