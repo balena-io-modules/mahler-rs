@@ -1,4 +1,16 @@
 - commits:
+    - subject: Allow Worker::find_workflow to receive both a reference and a value
+      hash: 53a252febecc468d9f22f1beb4b448b63b6654c2
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.25.2
+  title: ""
+  date: 2026-02-16T22:51:52.883Z
+- commits:
     - subject: Sort path args in the order that they appear on the path
       hash: fd5a27170525c0768886d5970a79715572d35201
       body: |
