@@ -1,5 +1,6 @@
 //! Automated planning and execution of task workflows
 
+use std::borrow::Borrow;
 use std::pin::pin;
 use std::time::Instant;
 
@@ -743,11 +744,16 @@ impl<O: State> RunTask<O> for Result<Worker<O, Ready>> {
 /// Utility trait to allow chaining operations from a workflow created
 /// by calling `initial_state`
 pub trait FindWorkflow<O: State> {
-    fn find_workflow(self, target: O::Target) -> Result<(Worker<O, Ready>, Option<Workflow>)>;
+    fn find_workflow<T>(self, target: T) -> Result<(Worker<O, Ready>, Option<Workflow>)>
+    where
+        T: Borrow<O::Target>;
 }
 
 impl<O: State> FindWorkflow<O> for Result<Worker<O, Ready>> {
-    fn find_workflow(self, target: O::Target) -> Result<(Worker<O, Ready>, Option<Workflow>)> {
+    fn find_workflow<T>(self, target: T) -> Result<(Worker<O, Ready>, Option<Workflow>)>
+    where
+        T: Borrow<O::Target>,
+    {
         let worker = self?;
         let workflow = worker.find_workflow(target)?;
         Ok((worker, workflow))
@@ -826,8 +832,11 @@ impl<O: State> Worker<O, Ready> {
     /// that doesn't make progress toward the target.
     ///
     /// See [`ErrorKind`](`crate::error::ErrorKind`) for other possible error conditions.
-    pub fn find_workflow(&self, tgt: O::Target) -> Result<Option<Workflow>> {
-        let tgt = serde_json::to_value(tgt).map_err(Error::from)?;
+    pub fn find_workflow<T>(&self, tgt: T) -> Result<Option<Workflow>>
+    where
+        T: Borrow<O::Target>,
+    {
+        let tgt = serde_json::to_value(tgt.borrow()).map_err(Error::from)?;
 
         let Ready {
             domain,
@@ -949,7 +958,7 @@ impl<O: State> Worker<O, Ready> {
         }
 
         let now = Instant::now();
-        let workflow = match self.find_workflow(tgt)? {
+        let workflow = match self.find_workflow(&tgt)? {
             Some(w) => w,
             None => {
                 warn!(time = ?now.elapsed(), "workflow not found");
