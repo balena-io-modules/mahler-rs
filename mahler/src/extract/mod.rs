@@ -31,7 +31,7 @@
 //!
 //! ```rust
 //! use mahler::state::State;
-//! use mahler::extract::{View, Args, Target, System, RawTarget, Res};
+//! use mahler::extract::{View, Args, Target, System, SystemTarget, RawTarget, Res};
 //!
 //! use serde::Deserialize;
 //!
@@ -62,6 +62,9 @@
 //! // `RawTarget` gives you the target value for the Job operation for any
 //! // type that implements `Deserialize` (useful for conversions).
 //! fn raw_target(RawTarget(tgt): RawTarget<Number>) {}
+//!
+//! // `SystemTarget` gives you the global target passed to the planner
+//! fn system_target(SystemTarget(tgt): SystemTarget<MySystemState>) {}
 //!
 //! // `System` provides a view into the top level system state.
 //! // A Job using the System extractor cannot run concurrently to other jobs
