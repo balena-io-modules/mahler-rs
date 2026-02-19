@@ -51,49 +51,35 @@ impl<T> Node<T> {
 }
 
 struct Iter<T> {
-    /// Holds the current node
-    /// and a stack to keep  track of the branching
-    /// so the iteration knows when to continue after finding
-    /// a join node
-    stack: Vec<(Link<T>, Vec<usize>)>,
+    stack: Vec<Link<T>>,
+    pending: Vec<usize>,
 }
 
 impl<T> Iterator for Iter<T> {
     type Item = Arc<RwLock<Node<T>>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((link, branching)) = self.stack.pop() {
+        while let Some(link) = self.stack.pop() {
             if let Some(node_rc) = link {
                 let node_ref = node_rc.read().unwrap();
                 match &*node_ref {
                     Node::Item { next, .. } => {
-                        // Push the next node onto the stack for continuation
-                        self.stack.push((next.clone(), branching));
-                        // Yield the current node
+                        self.stack.push(next.clone());
                         return Some(node_rc.clone());
                     }
                     Node::Fork { next } => {
-                        // Push all branches onto the stack
-                        for (i, branch_head) in next.iter().rev().enumerate() {
-                            // Keep track of the branch within the DAG
-                            let mut branching = branching.clone();
-                            branching.push(i);
-                            self.stack.push((branch_head.clone(), branching));
+                        self.pending.push(next.len());
+                        for branch_head in next.iter().rev() {
+                            self.stack.push(branch_head.clone());
                         }
-                        // Yield the fork node itself
                         return Some(node_rc.clone());
                     }
                     Node::Join { next } => {
-                        let mut branching = branching;
-
-                        // Get  the current branch at the top of the stack
-                        if let Some(branch) = branching.pop() {
-                            // Only continue the iteration when reaching the last
-                            // branch of the node
-                            if branch == 0 {
-                                self.stack.push((next.clone(), branching));
-
-                                // Yield the join node itself
+                        if let Some(count) = self.pending.last_mut() {
+                            *count -= 1;
+                            if *count == 0 {
+                                self.pending.pop();
+                                self.stack.push(next.clone());
                                 return Some(node_rc.clone());
                             }
                         }
@@ -101,7 +87,7 @@ impl<T> Iterator for Iter<T> {
                 }
             }
         }
-        None // No more nodes to traverse
+        None
     }
 }
 
@@ -597,7 +583,8 @@ impl<T> Dag<T> {
     /// details
     fn iter(&self) -> Iter<T> {
         Iter {
-            stack: vec![(self.head.clone(), Vec::new())],
+            stack: vec![self.head.clone()],
+            pending: Vec::new(),
         }
     }
 
@@ -775,15 +762,12 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn fmt_node<T: fmt::Display>(
             f: &mut fmt::Formatter<'_>,
-            // the current node
             node: &Node<T>,
-            // the indentation level
             indent: usize,
-            // the current index within the branch
             index: usize,
-            // a stack storing the index of the fork and whether the
-            // branch is the last one
-            branching: Vec<(usize, bool)>,
+            // stack storing (fork_index, is_last_branch) per active fork;
+            // pushed before entering a branch, popped by the Join at its end
+            branching: &mut Vec<(usize, bool)>,
         ) -> fmt::Result {
             let fmt_newline =
                 |f: &mut fmt::Formatter, level: usize, condition: bool| -> fmt::Result {
@@ -812,32 +796,22 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
                             fmt_newline(f, indent + 1, br_idx > 0)?;
                             write!(f, "~ ")?;
 
-                            let mut updated_branching = branching.clone();
-                            updated_branching.push((index, br_idx == next.len() - 1));
-
-                            fmt_node(
-                                f,
-                                &*branch_head.read().unwrap(),
-                                indent + 2,
-                                0,
-                                updated_branching,
-                            )?;
+                            branching.push((index, br_idx == next.len() - 1));
+                            fmt_node(f, &*branch_head.read().unwrap(), indent + 2, 0, branching)?;
                         }
                     }
                 }
                 Node::Join { next } => {
-                    let mut branching = branching;
-                    if let Some((index, is_last)) = branching.pop() {
-                        if is_last {
-                            if let Some(next_rc) = next {
-                                fmt_node(
-                                    f,
-                                    &*next_rc.read().unwrap(),
-                                    indent - 2,
-                                    index + 1,
-                                    branching,
-                                )?;
-                            }
+                    // if this is the last branch
+                    if let Some((index, true)) = branching.pop() {
+                        if let Some(next_rc) = next {
+                            fmt_node(
+                                f,
+                                &*next_rc.read().unwrap(),
+                                indent - 2,
+                                index + 1,
+                                branching,
+                            )?;
                         }
                     }
                 }
@@ -846,13 +820,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
         }
 
         if let Some(root) = &self.head {
-            fmt_node(
-                f,
-                &*root.read().unwrap(),
-                0,          // Initial indent level
-                0,          // Initial index
-                Vec::new(), // Initial branching
-            )?
+            fmt_node(f, &*root.read().unwrap(), 0, 0, &mut Vec::new())?
         }
         Ok(())
     }
