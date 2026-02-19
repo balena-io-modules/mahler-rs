@@ -226,22 +226,32 @@ fn try_task_into_workflow(
                 let task_id = t.id();
 
                 let Context {
-                    args: method_args, ..
+                    args: m_args,
+                    target: m_target,
+                    ..
                 } = method.context();
-                let Context { args, .. } = t.context_mut();
+                let Context {
+                    args: t_args,
+                    target: t_target,
+                    ..
+                } = t.context_mut();
 
                 // Propagate arguments from the method into the child tasks.
                 // This is just for better user experience as it avoids having to define
                 // arguments for each sub-task in the method
-                for (k, v) in method_args.iter() {
-                    if !args.contains_key(k) {
-                        args.insert(k, v);
+                for (k, v) in m_args.iter() {
+                    if !t_args.contains_key(k) {
+                        t_args.insert(k, v);
                     }
                 }
 
+                // The global target is the same for every task so we propagate it
+                // to the child task
+                *t_target = m_target.clone();
+
                 // Find the job path on the domain list, pass the argument for path matching
                 // this will remove any unused arguments in the path
-                let path = db.find_path(task_id, args)?;
+                let path = db.find_path(task_id, t_args)?;
 
                 // Using the path, now find the actual job on the domain.
                 // The domain job includes additional configuration like the description that
@@ -374,22 +384,19 @@ where
         // Iterate over distance operations and jobs to find possible candidates
         for op in distance.operations {
             let path = op.path();
-            let pointer = path.as_ref();
 
             // skip the path if any parent path has been halted
             if skipped_state_paths.iter().any(|p| p.is_prefix_of(path)) {
                 continue;
             }
 
-            // resolve the operation pointer on the target state
-            let target = pointer.resolve(tgt).unwrap_or(&Value::Null);
-
             // Look for matching exceptions for the path and operation
             if let Some((args, exceptions)) = db.find_matching_exceptions(path.as_str()) {
                 let context = Context {
                     path: path.clone(),
                     args,
-                    target: target.clone(),
+                    target: tgt.clone(),
+                    target_override: None,
                 };
 
                 // if there are any exceptions that apply to the context, add the path to
@@ -411,7 +418,8 @@ where
                 let context = Context {
                     path: path.clone(),
                     args,
-                    target: target.clone(),
+                    target: tgt.clone(),
+                    target_override: None,
                 };
 
                 // Look for jobs matching the operation
@@ -615,7 +623,7 @@ mod tests {
 
     fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
         if tgt - *counter > 1 {
-            return vec![plus_one.with_target(tgt), plus_one.with_target(tgt)];
+            return vec![plus_one.into_task(), plus_one.into_task()];
         }
 
         vec![]
@@ -825,7 +833,8 @@ mod tests {
 
         fn plus_other(Target(tgt): Target<i32>) -> Vec<Task> {
             vec![
-                plus_one.with_arg("counter", "one").with_target(tgt),
+                // should work with or without target
+                plus_one.with_arg("counter", "one"),
                 plus_one.with_arg("counter", "two").with_target(tgt),
             ]
         }

@@ -48,8 +48,9 @@ fn plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
 fn plus_two(counter: View<i32>, Target(tgt): Target<i32>) -> Vec<Task> {
     // If the difference between the current state and target is >1
     if tgt - *counter > 1 {
-        // Then return a sequence of two tasks with the same target
-        return vec![plus_one.with_target(tgt), plus_one.with_target(tgt)];
+        // Then return a sequence of two tasks. The target for the tasks is
+        // automatically inherited from the method
+        return vec![plus_one.into_task(), plus_one.into_task()];
     }
 
     // Otherwise do nothing

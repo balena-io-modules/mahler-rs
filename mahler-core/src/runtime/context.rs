@@ -5,8 +5,17 @@ use crate::json::{Path, PathArgs, Value};
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 /// Describes the Task applicability context
 pub struct Context {
+    /// The global target passed to the planner
     pub target: Value,
+
+    /// A specific target passed to the task as an
+    /// override via with_target
+    pub target_override: Option<Value>,
+
+    /// The task path in the system state
     pub path: Path,
+
+    /// The task path arguments if any
     pub args: PathArgs,
 }
 
@@ -17,7 +26,10 @@ impl Context {
 
     /// Return a new context with the provided target
     pub fn with_target(self, target: Value) -> Self {
-        Self { target, ..self }
+        Self {
+            target_override: Some(target),
+            ..self
+        }
     }
 
     /// Return a new context with the provided path
