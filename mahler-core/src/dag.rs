@@ -51,49 +51,35 @@ impl<T> Node<T> {
 }
 
 struct Iter<T> {
-    /// Holds the current node
-    /// and a stack to keep  track of the branching
-    /// so the iteration knows when to continue after finding
-    /// a join node
-    stack: Vec<(Link<T>, Vec<usize>)>,
+    stack: Vec<Link<T>>,
+    pending: Vec<usize>,
 }
 
 impl<T> Iterator for Iter<T> {
     type Item = Arc<RwLock<Node<T>>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((link, branching)) = self.stack.pop() {
+        while let Some(link) = self.stack.pop() {
             if let Some(node_rc) = link {
                 let node_ref = node_rc.read().unwrap();
                 match &*node_ref {
                     Node::Item { next, .. } => {
-                        // Push the next node onto the stack for continuation
-                        self.stack.push((next.clone(), branching));
-                        // Yield the current node
+                        self.stack.push(next.clone());
                         return Some(node_rc.clone());
                     }
                     Node::Fork { next } => {
-                        // Push all branches onto the stack
-                        for (i, branch_head) in next.iter().rev().enumerate() {
-                            // Keep track of the branch within the DAG
-                            let mut branching = branching.clone();
-                            branching.push(i);
-                            self.stack.push((branch_head.clone(), branching));
+                        self.pending.push(next.len());
+                        for branch_head in next.iter().rev() {
+                            self.stack.push(branch_head.clone());
                         }
-                        // Yield the fork node itself
                         return Some(node_rc.clone());
                     }
                     Node::Join { next } => {
-                        let mut branching = branching;
-
-                        // Get  the current branch at the top of the stack
-                        if let Some(branch) = branching.pop() {
-                            // Only continue the iteration when reaching the last
-                            // branch of the node
-                            if branch == 0 {
-                                self.stack.push((next.clone(), branching));
-
-                                // Yield the join node itself
+                        if let Some(count) = self.pending.last_mut() {
+                            *count -= 1;
+                            if *count == 0 {
+                                self.pending.pop();
+                                self.stack.push(next.clone());
                                 return Some(node_rc.clone());
                             }
                         }
@@ -101,7 +87,7 @@ impl<T> Iterator for Iter<T> {
                 }
             }
         }
-        None // No more nodes to traverse
+        None
     }
 }
 
@@ -597,7 +583,8 @@ impl<T> Dag<T> {
     /// details
     fn iter(&self) -> Iter<T> {
         Iter {
-            stack: vec![(self.head.clone(), Vec::new())],
+            stack: vec![self.head.clone()],
+            pending: Vec::new(),
         }
     }
 
@@ -681,105 +668,69 @@ impl<T> Dag<T> {
     ///     + - f - e - +
     /// ```
     pub fn reverse(self) -> Dag<T> {
-        let Dag { head, .. } = self;
+        let Dag { head: head_in, .. } = self;
 
-        // The tail will be determined during reversal: it's the node that
-        // receives prev=None (the outermost head becomes the tail)
-        let mut tail: Link<T> = None;
+        let mut tail_out: Link<T> = None;
+        let mut head_out: Link<T> = None;
 
-        // Stack format: (current_node, previous_node, branch_path)
-        // - current_node: The node we're currently processing
-        // - previous_node: What this node should point to after reversal
-        // - branch_path: Track nested fork positions for join reconstruction
-        let mut stack = vec![(head, None as Link<T>, Vec::<usize>::new())];
+        // Stack entries: (current_node, previous_node).
+        let mut stack: Vec<(Link<T>, Link<T>)> = vec![(head_in, None)];
 
-        // Accumulates branch results until we can construct a fork node
-        let mut results: Vec<Link<T>> = Vec::new();
+        // One accumulator per active fork, collecting the reversed branch heads.
+        let mut results: Vec<Vec<Link<T>>> = Vec::new();
 
-        // Depth-first traversal that rewires nodes to point backward
-        while let Some((head, prev, branching)) = stack.pop() {
+        // Remaining branch count per active fork. Decremented at each Join;
+        // when it reaches zero all branches for that fork have been collected.
+        let mut pending: Vec<usize> = Vec::new();
+
+        while let Some((head, prev)) = stack.pop() {
             if let Some(node_rc) = head.clone() {
                 match *node_rc.write().unwrap() {
                     Node::Item { ref mut next, .. } => {
-                        // Store the current next node before rewiring
-                        let newhead = next.clone();
-
-                        // If prev is None, this is the original head becoming the new tail
+                        let next_head = next.clone();
                         if prev.is_none() {
-                            tail = head.clone();
+                            tail_out = head.clone();
                         }
-
-                        // Rewire this node to point backward (to previous node)
                         *next = prev;
-
-                        // Continue processing the original next node
-                        // This node becomes the "previous" for the next iteration
-                        stack.push((newhead, head, branching));
+                        stack.push((next_head, head));
                     }
 
                     Node::Fork { ref next } => {
-                        // In reversal, a fork becomes a join point that branches converge to
-                        // If prev is None, this fork is the original head, and the join
-                        // replacing it becomes the new tail
                         let is_outermost = prev.is_none();
-                        let prev = Node::join(prev).into_link();
-
+                        let new_join = Node::join(prev).into_link();
                         if is_outermost {
-                            tail = prev.clone();
+                            tail_out = new_join.clone();
                         }
-
-                        // Process branches in reverse order to preserve their relative positioning
-                        // after reversal (branch 0 stays branch 0, etc.)
-                        for (i, br_head) in next.iter().rev().enumerate() {
-                            // Track this branch's position in the fork for later join reconstruction
-                            let mut branching = branching.clone();
-                            branching.push(i);
-
-                            // Each branch will be processed independently and converge at prev
-                            stack.push((br_head.clone(), prev.clone(), branching));
+                        pending.push(next.len());
+                        results.push(Vec::new());
+                        for br_head in next.iter().rev() {
+                            stack.push((br_head.clone(), new_join.clone()));
                         }
                     }
 
                     Node::Join { ref next } => {
-                        // In reversal, a join becomes a fork point that branches diverge from
-                        // Accumulate the branch result for later fork construction
-                        results.push(prev);
-
-                        let mut branching = branching;
-                        if let Some(branch) = branching.pop() {
-                            // Only construct the fork when we've processed all branches
-                            // Branch 0 is processed last (due to reverse iteration)
-                            if branch == 0 {
-                                // Create a fork node from all accumulated branch results
-                                let head = Node::fork(results).into_link();
-                                stack.push((next.clone(), head, branching));
-
-                                // Reset for next potential fork construction
-                                results = Vec::new();
+                        if let Some(acc) = results.last_mut() {
+                            acc.push(prev);
+                        }
+                        if let Some(count) = pending.last_mut() {
+                            *count -= 1;
+                            if *count == 0 {
+                                pending.pop();
+                                let branches = results.pop().unwrap_or_default();
+                                let fork_head = Node::fork(branches).into_link();
+                                stack.push((next.clone(), fork_head));
                             }
                         }
                     }
                 }
             } else {
-                // Handle None nodes (end of a branch) by storing the previous node
-                results.push(prev);
+                head_out = prev;
             }
         }
 
-        // Construct the final reversed DAG from accumulated results
-        if results.is_empty() {
-            // Empty DAG case
-            Dag::default()
-        } else {
-            // Should have exactly one result representing the new head
-            debug_assert!(
-                results.len() == 1,
-                "Expected exactly one result after reversal"
-            );
-
-            let head = results.pop().unwrap();
-
-            Dag { head, tail }
+        Dag {
+            head: head_out,
+            tail: tail_out,
         }
     }
 }
@@ -811,15 +762,12 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn fmt_node<T: fmt::Display>(
             f: &mut fmt::Formatter<'_>,
-            // the current node
             node: &Node<T>,
-            // the indentation level
             indent: usize,
-            // the current index within the branch
             index: usize,
-            // a stack storing the index of the fork and whether the
-            // branch is the last one
-            branching: Vec<(usize, bool)>,
+            // stack storing (fork_index, is_last_branch) per active fork;
+            // pushed before entering a branch, popped by the Join at its end
+            branching: &mut Vec<(usize, bool)>,
         ) -> fmt::Result {
             let fmt_newline =
                 |f: &mut fmt::Formatter, level: usize, condition: bool| -> fmt::Result {
@@ -848,32 +796,22 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
                             fmt_newline(f, indent + 1, br_idx > 0)?;
                             write!(f, "~ ")?;
 
-                            let mut updated_branching = branching.clone();
-                            updated_branching.push((index, br_idx == next.len() - 1));
-
-                            fmt_node(
-                                f,
-                                &*branch_head.read().unwrap(),
-                                indent + 2,
-                                0,
-                                updated_branching,
-                            )?;
+                            branching.push((index, br_idx == next.len() - 1));
+                            fmt_node(f, &*branch_head.read().unwrap(), indent + 2, 0, branching)?;
                         }
                     }
                 }
                 Node::Join { next } => {
-                    let mut branching = branching;
-                    if let Some((index, is_last)) = branching.pop() {
-                        if is_last {
-                            if let Some(next_rc) = next {
-                                fmt_node(
-                                    f,
-                                    &*next_rc.read().unwrap(),
-                                    indent - 2,
-                                    index + 1,
-                                    branching,
-                                )?;
-                            }
+                    // if this is the last branch
+                    if let Some((index, true)) = branching.pop() {
+                        if let Some(next_rc) = next {
+                            fmt_node(
+                                f,
+                                &*next_rc.read().unwrap(),
+                                indent - 2,
+                                index + 1,
+                                branching,
+                            )?;
                         }
                     }
                 }
@@ -882,13 +820,7 @@ impl<T: fmt::Display> fmt::Display for Dag<T> {
         }
 
         if let Some(root) = &self.head {
-            fmt_node(
-                f,
-                &*root.read().unwrap(),
-                0,          // Initial indent level
-                0,          // Initial index
-                Vec::new(), // Initial branching
-            )?
+            fmt_node(f, &*root.read().unwrap(), 0, 0, &mut Vec::new())?
         }
         Ok(())
     }
@@ -1887,26 +1819,85 @@ mod tests {
     }
 
     #[test]
-    fn test_reverse_dag() {
-        let dag: Dag<i32> = Dag::default()
-            .prepend(1)
-            .prepend(2)
-            .prepend(3)
-            .prepend(par!(4, 5))
-            .prepend(6)
-            .reverse();
+    fn test_reverse_dag_with_interleaved_fork() {
+        let dag: Dag<i32> = seq!(6) + par!(4, 5) + seq!(3, 2, 1);
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 1
+                - 2
+                - 3
+                + ~ - 4
+                  ~ - 5
+                - 6
+                "#
+            )
+        );
+    }
 
-        let elems: Vec<i32> = dag
-            .iter()
-            .filter(is_item)
-            .map(|node| match &*node.read().unwrap() {
-                Node::Item { value, .. } => *value,
+    #[test]
+    fn test_reverse_single_node_dag() {
+        let dag: Dag<i32> = seq!(1);
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 1
+                "#
+            )
+        );
+    }
 
-                _ => unreachable!(),
-            })
-            .collect();
+    #[test]
+    fn test_reverse_single_node_dag_is_well_formed() {
+        let dag: Dag<i32> = seq!(1);
+        let reversed = dag.reverse() + 0;
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 1
+                - 0
+                "#
+            )
+        );
+    }
 
-        assert_eq!(elems, vec![1, 2, 3, 4, 5, 6])
+    #[test]
+    fn test_reverse_dag_result_is_well_formed() {
+        let dag: Dag<i32> = seq!(1, 2);
+        let reversed = dag.reverse() + 0;
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 2
+                - 1
+                - 0
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_linear_dag() {
+        let dag: Dag<i32> = seq!(1, 2, 3, 4, 5);
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 5
+                - 4
+                - 3
+                - 2
+                - 1
+                "#
+            )
+        );
     }
 
     #[test]
@@ -1929,6 +1920,38 @@ mod tests {
                     - B
                   ~ - D
                 - A
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_dag_with_basic_fork() {
+        let dag: Dag<char> = par!('A', 'B');
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                + ~ - A
+                  ~ - B
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_dag_with_double_fork() {
+        let dag: Dag<char> = dag!(seq!('A', 'B'), seq!('C', 'D'));
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                + ~ - B
+                    - A
+                  ~ - D
+                    - C
                 "#
             )
         );
@@ -1991,6 +2014,32 @@ mod tests {
                       ~ - D
                     - B
                   ~ - E
+                - A
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_more_nested_forks() {
+        let dag: Dag<char> = seq!('A')
+            + par!('B', 'C')
+            + dag!(seq!('D'), seq!('E', 'F'), par!('G', 'H'))
+            + seq!('I');
+
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - I
+                + ~ - D
+                  ~ - F
+                    - E
+                  ~ + ~ - G
+                      ~ - H
+                + ~ - B
+                  ~ - C
                 - A
                 "#
             )

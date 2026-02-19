@@ -451,7 +451,7 @@ where
                         },
 
                         // ignore if changes is empty
-                        _ => trace!(task=%task, "ignored empty task"),
+                        _ => {}
                     }
                 }
             }
