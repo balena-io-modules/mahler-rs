@@ -681,105 +681,69 @@ impl<T> Dag<T> {
     ///     + - f - e - +
     /// ```
     pub fn reverse(self) -> Dag<T> {
-        let Dag { head, .. } = self;
+        let Dag { head: head_in, .. } = self;
 
-        // The tail will be determined during reversal: it's the node that
-        // receives prev=None (the outermost head becomes the tail)
-        let mut tail: Link<T> = None;
+        let mut tail_out: Link<T> = None;
+        let mut head_out: Link<T> = None;
 
-        // Stack format: (current_node, previous_node, branch_path)
-        // - current_node: The node we're currently processing
-        // - previous_node: What this node should point to after reversal
-        // - branch_path: Track nested fork positions for join reconstruction
-        let mut stack = vec![(head, None as Link<T>, Vec::<usize>::new())];
+        // Stack entries: (current_node, previous_node).
+        let mut stack: Vec<(Link<T>, Link<T>)> = vec![(head_in, None)];
 
-        // Accumulates branch results until we can construct a fork node
-        let mut results: Vec<Link<T>> = Vec::new();
+        // One accumulator per active fork, collecting the reversed branch heads.
+        let mut results: Vec<Vec<Link<T>>> = Vec::new();
 
-        // Depth-first traversal that rewires nodes to point backward
-        while let Some((head, prev, branching)) = stack.pop() {
+        // Remaining branch count per active fork. Decremented at each Join;
+        // when it reaches zero all branches for that fork have been collected.
+        let mut pending: Vec<usize> = Vec::new();
+
+        while let Some((head, prev)) = stack.pop() {
             if let Some(node_rc) = head.clone() {
                 match *node_rc.write().unwrap() {
                     Node::Item { ref mut next, .. } => {
-                        // Store the current next node before rewiring
-                        let newhead = next.clone();
-
-                        // If prev is None, this is the original head becoming the new tail
+                        let next_head = next.clone();
                         if prev.is_none() {
-                            tail = head.clone();
+                            tail_out = head.clone();
                         }
-
-                        // Rewire this node to point backward (to previous node)
                         *next = prev;
-
-                        // Continue processing the original next node
-                        // This node becomes the "previous" for the next iteration
-                        stack.push((newhead, head, branching));
+                        stack.push((next_head, head));
                     }
 
                     Node::Fork { ref next } => {
-                        // In reversal, a fork becomes a join point that branches converge to
-                        // If prev is None, this fork is the original head, and the join
-                        // replacing it becomes the new tail
                         let is_outermost = prev.is_none();
-                        let prev = Node::join(prev).into_link();
-
+                        let new_join = Node::join(prev).into_link();
                         if is_outermost {
-                            tail = prev.clone();
+                            tail_out = new_join.clone();
                         }
-
-                        // Process branches in reverse order to preserve their relative positioning
-                        // after reversal (branch 0 stays branch 0, etc.)
-                        for (i, br_head) in next.iter().rev().enumerate() {
-                            // Track this branch's position in the fork for later join reconstruction
-                            let mut branching = branching.clone();
-                            branching.push(i);
-
-                            // Each branch will be processed independently and converge at prev
-                            stack.push((br_head.clone(), prev.clone(), branching));
+                        pending.push(next.len());
+                        results.push(Vec::new());
+                        for br_head in next.iter().rev() {
+                            stack.push((br_head.clone(), new_join.clone()));
                         }
                     }
 
                     Node::Join { ref next } => {
-                        // In reversal, a join becomes a fork point that branches diverge from
-                        // Accumulate the branch result for later fork construction
-                        results.push(prev);
-
-                        let mut branching = branching;
-                        if let Some(branch) = branching.pop() {
-                            // Only construct the fork when we've processed all branches
-                            // Branch 0 is processed last (due to reverse iteration)
-                            if branch == 0 {
-                                // Create a fork node from all accumulated branch results
-                                let head = Node::fork(results).into_link();
-                                stack.push((next.clone(), head, branching));
-
-                                // Reset for next potential fork construction
-                                results = Vec::new();
+                        if let Some(acc) = results.last_mut() {
+                            acc.push(prev);
+                        }
+                        if let Some(count) = pending.last_mut() {
+                            *count -= 1;
+                            if *count == 0 {
+                                pending.pop();
+                                let branches = results.pop().unwrap_or_default();
+                                let fork_head = Node::fork(branches).into_link();
+                                stack.push((next.clone(), fork_head));
                             }
                         }
                     }
                 }
             } else {
-                // Handle None nodes (end of a branch) by storing the previous node
-                results.push(prev);
+                head_out = prev;
             }
         }
 
-        // Construct the final reversed DAG from accumulated results
-        if results.is_empty() {
-            // Empty DAG case
-            Dag::default()
-        } else {
-            // Should have exactly one result representing the new head
-            debug_assert!(
-                results.len() == 1,
-                "Expected exactly one result after reversal"
-            );
-
-            let head = results.pop().unwrap();
-
-            Dag { head, tail }
+        Dag {
+            head: head_out,
+            tail: tail_out,
         }
     }
 }
