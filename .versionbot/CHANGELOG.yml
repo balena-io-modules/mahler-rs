@@ -1,4 +1,24 @@
 - commits:
+    - subject: Add `SystemTarget` extractor
+      hash: a2f3b8a8e2eaf7fd9fd2d8519eabed601b17aa57
+      body: |
+        The `SystemTarget` extractor provides access to the target passed to the
+        worker/planner to be used by tasks when validating applicability.
+
+        A new `target_override` property has been added to `Context`, which
+        tells the planner and existing extractors that the target has been
+        explicitly overridden by the user.
+
+        This change is backwards compatible
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.25.3
+  title: ""
+  date: 2026-02-19T18:12:58.761Z
+- commits:
     - subject: Allow Worker::find_workflow to receive both a reference and a value
       hash: 53a252febecc468d9f22f1beb4b448b63b6654c2
       body: ""
