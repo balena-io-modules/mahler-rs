@@ -1,4 +1,46 @@
 - commits:
+    - subject: Remove tracing information from planning on empty task
+      hash: c74e6549d6d1e3a2467d6cef1b78bdfbef00efa1
+      body: |
+        This introduces too much noise for a condition that is expected.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Simplify DAG Display and Iterator implementations
+      hash: 01518c33bfeb58544f59027ab1e86a41572b9bfd
+      body: |
+        Makes the operations a bit more memory efficient by avoiding unnecessary
+        cloning of the branching state.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+    - subject: Fix bug with DAG::reverse merging fork branches
+      hash: c634a01ea8662b205261657cae6afe7b23904b5b
+      body: >
+        The issue was with the branch accumulator that could include branches
+
+        from nested forks, meaning that on reverse these branches would get
+        merged
+
+        into the inner dag.
+
+
+        The method now uses a stack of accumulators that gets a new entry each
+
+        time a new fork is entered.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.25.4
+  title: ""
+  date: 2026-02-19T18:43:36.495Z
+- commits:
     - subject: Add `SystemTarget` extractor
       hash: a2f3b8a8e2eaf7fd9fd2d8519eabed601b17aa57
       body: |
