@@ -1887,26 +1887,85 @@ mod tests {
     }
 
     #[test]
-    fn test_reverse_dag() {
-        let dag: Dag<i32> = Dag::default()
-            .prepend(1)
-            .prepend(2)
-            .prepend(3)
-            .prepend(par!(4, 5))
-            .prepend(6)
-            .reverse();
+    fn test_reverse_dag_with_interleaved_fork() {
+        let dag: Dag<i32> = seq!(6) + par!(4, 5) + seq!(3, 2, 1);
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 1
+                - 2
+                - 3
+                + ~ - 4
+                  ~ - 5
+                - 6
+                "#
+            )
+        );
+    }
 
-        let elems: Vec<i32> = dag
-            .iter()
-            .filter(is_item)
-            .map(|node| match &*node.read().unwrap() {
-                Node::Item { value, .. } => *value,
+    #[test]
+    fn test_reverse_single_node_dag() {
+        let dag: Dag<i32> = seq!(1);
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 1
+                "#
+            )
+        );
+    }
 
-                _ => unreachable!(),
-            })
-            .collect();
+    #[test]
+    fn test_reverse_single_node_dag_is_well_formed() {
+        let dag: Dag<i32> = seq!(1);
+        let reversed = dag.reverse() + 0;
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 1
+                - 0
+                "#
+            )
+        );
+    }
 
-        assert_eq!(elems, vec![1, 2, 3, 4, 5, 6])
+    #[test]
+    fn test_reverse_dag_result_is_well_formed() {
+        let dag: Dag<i32> = seq!(1, 2);
+        let reversed = dag.reverse() + 0;
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 2
+                - 1
+                - 0
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_linear_dag() {
+        let dag: Dag<i32> = seq!(1, 2, 3, 4, 5);
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - 5
+                - 4
+                - 3
+                - 2
+                - 1
+                "#
+            )
+        );
     }
 
     #[test]
@@ -1929,6 +1988,38 @@ mod tests {
                     - B
                   ~ - D
                 - A
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_dag_with_basic_fork() {
+        let dag: Dag<char> = par!('A', 'B');
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                + ~ - A
+                  ~ - B
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_dag_with_double_fork() {
+        let dag: Dag<char> = dag!(seq!('A', 'B'), seq!('C', 'D'));
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                + ~ - B
+                    - A
+                  ~ - D
+                    - C
                 "#
             )
         );
@@ -1991,6 +2082,32 @@ mod tests {
                       ~ - D
                     - B
                   ~ - E
+                - A
+                "#
+            )
+        );
+    }
+
+    #[test]
+    fn test_reverse_more_nested_forks() {
+        let dag: Dag<char> = seq!('A')
+            + par!('B', 'C')
+            + dag!(seq!('D'), seq!('E', 'F'), par!('G', 'H'))
+            + seq!('I');
+
+        let reversed = dag.reverse();
+        assert_str_eq!(
+            reversed.to_string(),
+            dedent!(
+                r#"
+                - I
+                + ~ - D
+                  ~ - F
+                    - E
+                  ~ + ~ - G
+                      ~ - H
+                + ~ - B
+                  ~ - C
                 - A
                 "#
             )
