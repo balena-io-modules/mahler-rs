@@ -1,4 +1,21 @@
 - commits:
+    - subject: Allow exceptions on the last iteration of the planner
+      hash: ff016c4662aa8afb8c7758a9030fb409ecec6252
+      body: |
+        This fixes a bug where an exception happening on the last iteration of
+        the planner would be discovered but the planning would still fail as no
+        further state comparisons would take place. This adds one last check
+        before terminating the search to identify if the target is considered
+        reached with the new exceptions.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: felipe
+      nested: []
+  version: 0.25.5
+  title: ""
+  date: 2026-02-23T22:43:03.111Z
+- commits:
     - subject: Remove tracing information from planning on empty task
       hash: c74e6549d6d1e3a2467d6cef1b78bdfbef00efa1
       body: |
