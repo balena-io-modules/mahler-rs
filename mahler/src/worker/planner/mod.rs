@@ -563,6 +563,22 @@ where
         }
 
         if stack.is_empty() {
+            // Compute the difference between current and target state
+            // one last time in case some new paths were ignored in the
+            // last iteration
+            let distance = Distance::new(&cur, tgt, &skipped_state_paths);
+
+            // If there are no more operations, we’ve reached the goal
+            if distance.is_empty() {
+                // we need to reverse the plan before returning
+                let mut workflow = Workflow::new(cur_plan.reverse());
+                workflow.ignored = distance.ignored;
+
+                // update the system
+                *system = cur_state;
+                return Ok(Some(workflow));
+            }
+
             trace!(last_evaluated_state=%cur_state, "no plan was found");
         }
     }
@@ -2363,6 +2379,95 @@ mod tests {
             Operation::Update {
                 path: Path::from_static("/containers/a/name"),
                 value: json!("still-disabled")
+            }
+        );
+    }
+
+    #[test]
+    fn test_exception_last_iteration() {
+        #[derive(Serialize, Deserialize, PartialEq, Eq)]
+        enum AppInstallStatus {
+            Created,
+            Installed,
+            Running,
+        }
+
+        impl State for AppInstallStatus {
+            type Target = Self;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct App {
+            cmd: String,
+            status: AppInstallStatus,
+        }
+
+        impl State for App {
+            type Target = Self;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct MySys {
+            apps: Map<String, App>,
+        }
+
+        impl State for MySys {
+            type Target = Self;
+        }
+
+        fn create_app(app: View<Option<App>>, Target(t_app): Target<App>) -> View<App> {
+            app.create(App {
+                status: AppInstallStatus::Created,
+                ..t_app
+            })
+        }
+
+        fn install_app(mut app: View<App>) -> View<App> {
+            app.status = AppInstallStatus::Installed;
+            app
+        }
+
+        let domain = Domain::new()
+            .jobs(
+                "/apps/{app_name}",
+                [
+                    create(create_app)
+                        .with_description(|Args(name): Args<String>| format!("create app {name}")),
+                    update(install_app)
+                        .with_description(|Args(name): Args<String>| format!("install app {name}")),
+                ],
+            )
+            .exception(
+                "/apps/{app_name}",
+                crate::exception::update(|app: View<App>| {
+                    app.status == AppInstallStatus::Installed
+                }),
+            );
+
+        let initial = serde_json::from_value::<MySys>(json!({"apps": {}})).unwrap();
+        let target = serde_json::from_value::<MySys>(json!({
+            "apps": {
+                "my-app": {
+                    "cmd": "sleep infinity",
+                    "status": "Running",
+                }
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
+
+        // my-app should be installed, but it won't be started until an external
+        // event happens (like a reboot), so it should find a workflow
+        let expected: Dag<&str> = seq!("create app my-app", "install app my-app");
+        assert_eq!(expected.to_string(), workflow.to_string());
+
+        // The status update should be in the ignored list
+        assert_eq!(
+            workflow.ignored[0],
+            Operation::Update {
+                path: Path::from_static("/apps/my-app/status"),
+                value: json!("Running")
             }
         );
     }
