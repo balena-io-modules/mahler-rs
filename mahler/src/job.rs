@@ -2,9 +2,10 @@
 
 use std::cmp::Ordering;
 
+pub use crate::description::Description;
 use crate::json::OperationMatcher;
 use crate::runtime::Context;
-use crate::task::{Description, Handler, Id, Task};
+use crate::task::{Handler, Id, Task};
 
 /// Encodes a generic repeatable system operation
 ///
@@ -36,7 +37,7 @@ impl Job {
 
     /// Set a human readable description for the Job
     ///
-    /// A [description](`crate::task::Description`) is any function that accepts zero or more context
+    /// A [description](`crate::job::Description`) is any function that accepts zero or more context
     /// extractors and returns a String. A context extractor is a type that implements
     /// [FromContext](`crate::runtime::FromContext`)
     ///
