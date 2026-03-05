@@ -147,6 +147,26 @@ impl Task for WorkUnit {
     }
 }
 
+/// An ignored operation during planning
+///
+/// Ignored operations are created when exceptions happen. They may provide
+/// an optional reason coming from the exception description
+#[derive(Clone, Debug)]
+pub struct Ignored {
+    pub operation: Operation,
+    pub reason: Option<String>,
+}
+
+impl fmt::Display for Ignored {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.operation.fmt(f)?;
+        if let Some(reason) = self.reason.as_ref() {
+            write!(f, "(reason: {reason})")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default, Clone)]
 /// Encodes a graph of tasks to performed by the Worker after planning
 ///
@@ -171,8 +191,8 @@ pub struct Workflow {
     /// The internal DAG that the workflow implements
     pub(super) dag: Dag<WorkUnit>,
 
-    /// List of skipped paths/operations during planning due to a halted state
-    pub(super) ignored: Vec<Operation>,
+    /// List of ignored operations during planning due to exceptions
+    pub(super) ignored: Vec<Ignored>,
 
     /// The worker that created this workflow
     pub(super) worker_id: u64,
@@ -207,7 +227,7 @@ impl Workflow {
 
     /// Return the list of skipped operations during planning
     /// due to matching exceptions
-    pub fn exceptions(&self) -> Vec<&Operation> {
+    pub fn exceptions(&self) -> Vec<&Ignored> {
         self.ignored.iter().collect()
     }
 

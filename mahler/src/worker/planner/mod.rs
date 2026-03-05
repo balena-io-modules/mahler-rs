@@ -14,7 +14,7 @@ use crate::system_ext::SystemExt;
 use crate::task::Task;
 
 use super::domain::Domain;
-use super::workflow::{WorkUnit, Workflow};
+use super::workflow::{Ignored, WorkUnit, Workflow};
 
 mod distance;
 use distance::Distance;
@@ -318,6 +318,61 @@ fn try_task_into_workflow(
     }
 }
 
+fn prepare_workflow(
+    cur_plan: Dag<WorkUnit>,
+    distance: Distance,
+    path_exceptions: &[(Path, Option<String>)],
+) -> Workflow {
+    // we need to reverse the plan before returning
+    let mut workflow = Workflow::new(cur_plan.reverse());
+    let mut exceptions = Vec::new();
+    for op in distance.ignored {
+        let ex = if let Some((_, reason)) = path_exceptions
+            .iter()
+            .find(|(p, _)| p.is_prefix_of(op.path()))
+        {
+            Ignored {
+                operation: op,
+                reason: reason.clone(),
+            }
+        } else {
+            Ignored {
+                operation: op,
+                reason: None,
+            }
+        };
+
+        exceptions.push(ex);
+    }
+
+    workflow.ignored = exceptions;
+    workflow
+}
+
+fn skipped_paths(path_exceptions: &[(Path, Option<String>)]) -> Vec<Path> {
+    path_exceptions
+        .iter()
+        .map(|(path, _)| Path::new(path.as_ref()))
+        .collect()
+}
+
+/// Find the first element that matches the predicate or return
+/// the first error
+///
+/// Alternative to [`std::iter::Iterator::try_find`] while that is
+/// experimental
+fn try_find<T, I: Iterator<Item = T>>(
+    iter: I,
+    f: impl Fn(&T) -> Result<bool>,
+) -> Result<Option<T>> {
+    for t in iter {
+        if f(&t)? {
+            return Ok(Some(t));
+        }
+    }
+    Ok(None)
+}
+
 /// Find a workflow that takes the system from its current state
 /// to the target state using the tasks in the provided Domain
 ///
@@ -337,7 +392,9 @@ where
     let mut stack = vec![(system.clone(), Dag::default(), 0)];
 
     let find_workflow_span = Span::current();
-    let mut skipped_state_paths: Vec<Path> = Vec::new();
+
+    // path exceptions and the corresponding reason
+    let mut path_exceptions: Vec<(Path, Option<String>)> = Vec::new();
 
     // Keep track of visited states
     let mut visited_states = HashSet::new();
@@ -358,13 +415,11 @@ where
         visited_states.insert(hash_state(&cur_state));
 
         // Compute the difference between current and target state
-        let distance = Distance::new(&cur, tgt, &skipped_state_paths);
+        let distance = Distance::new(&cur, tgt, &skipped_paths(&path_exceptions));
 
         // If there are no more operations, we’ve reached the goal
         if distance.is_empty() {
-            // we need to reverse the plan before returning
-            let mut workflow = Workflow::new(cur_plan.reverse());
-            workflow.ignored = distance.ignored;
+            let workflow = prepare_workflow(cur_plan, distance, &path_exceptions);
 
             // update the system
             *system = cur_state;
@@ -386,7 +441,7 @@ where
             let path = op.path();
 
             // skip the path if any parent path has been halted
-            if skipped_state_paths.iter().any(|p| p.is_prefix_of(path)) {
+            if path_exceptions.iter().any(|(p, _)| p.is_prefix_of(path)) {
                 continue;
             }
 
@@ -401,14 +456,11 @@ where
 
                 // if there are any exceptions that apply to the context, add the path to
                 // the list and skip the path
-                if exceptions.filter(|j| j.operation().matches(&op)).any(|exception| {
-                    exception.test(&cur_state, &context)
-                        .inspect_err(
-                            |e| warn!(parent: &find_workflow_span, "cannot evaluate {exception}: {e}"),
-                        )
-                        .unwrap_or(false)
-                }) {
-                    skipped_state_paths.push(path.clone());
+                if let Some(exception) = try_find(
+                    exceptions.filter(|j| j.operation().matches(&op)),
+                    |exception| exception.test(&cur_state, &context),
+                )? {
+                    path_exceptions.push((path.clone(), exception.description(&context)?));
                     continue;
                 }
             }
@@ -446,7 +498,7 @@ where
                             ErrorKind::ConditionNotMet => {}
                             // Critical internal errors terminate the search
                             ErrorKind::Internal => return Err(e),
-                            // Other job errors are ignored unless debugging
+                            // Other job errors also terminate the search
                             _ => return Err(e),
                         },
 
@@ -566,13 +618,11 @@ where
             // Compute the difference between current and target state
             // one last time in case some new paths were ignored in the
             // last iteration
-            let distance = Distance::new(&cur, tgt, &skipped_state_paths);
+            let distance = Distance::new(&cur, tgt, &skipped_paths(&path_exceptions));
 
             // If there are no more operations, we’ve reached the goal
             if distance.is_empty() {
-                // we need to reverse the plan before returning
-                let mut workflow = Workflow::new(cur_plan.reverse());
-                workflow.ignored = distance.ignored;
+                let workflow = prepare_workflow(cur_plan, distance, &path_exceptions);
 
                 // update the system
                 *system = cur_state;
@@ -1821,7 +1871,7 @@ mod tests {
         // Verify that the ignored paths include service two
         assert_eq!(workflow.ignored.len(), 1);
         assert_eq!(
-            workflow.ignored[0],
+            workflow.ignored[0].operation,
             Operation::Update {
                 path: Path::from_static("/services/two/running"),
                 value: json!(true)
@@ -1910,7 +1960,7 @@ mod tests {
         assert_eq!(expected.to_string(), workflow.to_string());
         assert_eq!(workflow.ignored.len(), 1);
         assert_eq!(
-            workflow.ignored[0],
+            workflow.ignored[0].operation,
             Operation::Update {
                 path: Path::from_static("/apps/foo/version"),
                 value: json!("2.0")
@@ -2152,7 +2202,8 @@ mod tests {
             workflow
                 .ignored
                 .iter()
-                .find(|op| op.path().starts_with("/services/web")),
+                .find(|op| op.operation.path().starts_with("/services/web"))
+                .map(|op| &op.operation),
             Some(&Operation::Update {
                 path: Path::from_static("/services/web/running"),
                 value: json!(true)
@@ -2162,7 +2213,8 @@ mod tests {
             workflow
                 .ignored
                 .iter()
-                .find(|op| op.path().starts_with("/config/host")),
+                .find(|op| op.operation.path().starts_with("/config/host"))
+                .map(|op| &op.operation),
             Some(&Operation::Update {
                 path: Path::from_static("/config/host/value"),
                 value: json!("new")
@@ -2265,7 +2317,7 @@ mod tests {
         assert_eq!(expected.to_string(), workflow.to_string());
         assert_eq!(workflow.ignored.len(), 1);
         assert_eq!(
-            workflow.ignored[0],
+            workflow.ignored[0].operation,
             Operation::Update {
                 path: Path::from_static("/apps/api/image"),
                 value: json!("node:16")
@@ -2375,7 +2427,7 @@ mod tests {
 
         // The parent path /containers/a should be on the ignore list
         assert_eq!(
-            workflow.ignored[0],
+            workflow.ignored[0].operation,
             Operation::Update {
                 path: Path::from_static("/containers/a/name"),
                 value: json!("still-disabled")
@@ -2464,11 +2516,281 @@ mod tests {
 
         // The status update should be in the ignored list
         assert_eq!(
-            workflow.ignored[0],
+            workflow.ignored[0].operation,
             Operation::Update {
                 path: Path::from_static("/apps/my-app/status"),
                 value: json!("Running")
             }
+        );
+    }
+
+    #[test]
+    fn test_exception_description_populates_reason() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct Service {
+            running: bool,
+            #[serde(default)]
+            failed: bool,
+        }
+
+        impl State for Service {
+            type Target = ServiceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct ServiceTarget {
+            running: bool,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Device {
+            services: Map<String, Service>,
+        }
+
+        impl State for Device {
+            type Target = DeviceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct DeviceTarget {
+            services: Map<String, ServiceTarget>,
+        }
+
+        fn start_service(mut service: View<Service>) -> View<Service> {
+            service.running = true;
+            service
+        }
+
+        fn skip_failed(view: View<Service>) -> bool {
+            view.failed
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/services/{service}",
+                update(start_service)
+                    .with_description(|Args(s): Args<String>| format!("start service {s}")),
+            )
+            .exception(
+                "/services/{service}",
+                crate::exception::update(skip_failed).with_description(
+                    |Args(s): Args<String>| format!("service '{s}' is failed"),
+                ),
+            );
+
+        let initial = serde_json::from_value::<Device>(json!({
+            "services": {
+                "one": { "running": false, "failed": false },
+                "two": { "running": false, "failed": true },
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<DeviceTarget>(json!({
+            "services": {
+                "one": { "running": true },
+                "two": { "running": true },
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
+
+        // Service "one" should be started, service "two" should be skipped
+        let expected: Dag<&str> = seq!("start service one");
+        assert_eq!(expected.to_string(), workflow.to_string());
+
+        assert_eq!(workflow.ignored.len(), 1);
+        assert_eq!(
+            workflow.ignored[0].operation,
+            Operation::Update {
+                path: Path::from_static("/services/two/running"),
+                value: json!(true)
+            }
+        );
+        // The reason should be populated from with_description
+        assert_eq!(
+            workflow.ignored[0].reason,
+            Some("service 'two' is failed".to_string())
+        );
+    }
+
+    #[test]
+    fn test_exception_without_description_has_no_reason() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct Service {
+            running: bool,
+            #[serde(default)]
+            failed: bool,
+        }
+
+        impl State for Service {
+            type Target = ServiceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct ServiceTarget {
+            running: bool,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Device {
+            services: Map<String, Service>,
+        }
+
+        impl State for Device {
+            type Target = DeviceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct DeviceTarget {
+            services: Map<String, ServiceTarget>,
+        }
+
+        fn start_service(mut service: View<Service>) -> View<Service> {
+            service.running = true;
+            service
+        }
+
+        fn skip_failed(view: View<Service>) -> bool {
+            view.failed
+        }
+
+        // Exception without with_description
+        let domain = Domain::new()
+            .job(
+                "/services/{service}",
+                update(start_service)
+                    .with_description(|Args(s): Args<String>| format!("start service {s}")),
+            )
+            .exception("/services/{service}", crate::exception::update(skip_failed));
+
+        let initial = serde_json::from_value::<Device>(json!({
+            "services": {
+                "one": { "running": false, "failed": false },
+                "two": { "running": false, "failed": true },
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<DeviceTarget>(json!({
+            "services": {
+                "one": { "running": true },
+                "two": { "running": true },
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
+
+        assert_eq!(workflow.ignored.len(), 1);
+        // reason should be None when no description is set
+        assert_eq!(workflow.ignored[0].reason, None);
+    }
+
+    #[test]
+    fn test_multiple_skipped_services_each_get_correct_reason() {
+        init();
+
+        #[derive(Serialize, Deserialize)]
+        struct Service {
+            running: bool,
+            #[serde(default)]
+            failed: bool,
+        }
+
+        impl State for Service {
+            type Target = ServiceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct ServiceTarget {
+            running: bool,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct Device {
+            services: Map<String, Service>,
+        }
+
+        impl State for Device {
+            type Target = DeviceTarget;
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct DeviceTarget {
+            services: Map<String, ServiceTarget>,
+        }
+
+        fn start_service(mut service: View<Service>) -> View<Service> {
+            service.running = true;
+            service
+        }
+
+        fn skip_failed(view: View<Service>) -> bool {
+            view.failed
+        }
+
+        let domain = Domain::new()
+            .job(
+                "/services/{service}",
+                update(start_service)
+                    .with_description(|Args(s): Args<String>| format!("start service {s}")),
+            )
+            .exception(
+                "/services/{service}",
+                crate::exception::update(skip_failed).with_description(
+                    |Args(s): Args<String>| format!("service '{s}' is failed"),
+                ),
+            );
+
+        let initial = serde_json::from_value::<Device>(json!({
+            "services": {
+                "one": { "running": false, "failed": false },
+                "two": { "running": false, "failed": true },
+                "three": { "running": false, "failed": true },
+            }
+        }))
+        .unwrap();
+
+        let target = serde_json::from_value::<DeviceTarget>(json!({
+            "services": {
+                "one": { "running": true },
+                "two": { "running": true },
+                "three": { "running": true },
+            }
+        }))
+        .unwrap();
+
+        let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
+
+        // Only service "one" should be started
+        let expected: Dag<&str> = seq!("start service one");
+        assert_eq!(expected.to_string(), workflow.to_string());
+
+        assert_eq!(workflow.ignored.len(), 2);
+
+        // Each skipped service must have its own reason, not the other service's reason
+        let two = workflow
+            .ignored
+            .iter()
+            .find(|op| op.operation.path().starts_with("/services/two"));
+        assert_eq!(
+            two.and_then(|op| op.reason.as_deref()),
+            Some("service 'two' is failed")
+        );
+
+        let three = workflow
+            .ignored
+            .iter()
+            .find(|op| op.operation.path().starts_with("/services/three"));
+        assert_eq!(
+            three.and_then(|op| op.reason.as_deref()),
+            Some("service 'three' is failed")
         );
     }
 }
