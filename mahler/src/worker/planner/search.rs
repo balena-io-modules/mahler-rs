@@ -160,6 +160,12 @@ fn select_best_candidate(
         ..
     } in candidates.into_iter().rev()
     {
+        // Check for DAG cycles before cloning the system state (cheap check first)
+        if cur_plan.any(|unit| partial_plan.any(|u| u.id == unit.id)) {
+            // skip this candidate because it is creating a loop
+            continue;
+        }
+
         let mut new_state = cur_state.clone();
         new_state.patch(&Patch(changes))?;
 
@@ -168,12 +174,6 @@ fn select_best_candidate(
         // looping forever jumping between a few visited states
         let state_hash = hash_state(&new_state);
         if visited_states.contains(&state_hash) {
-            continue;
-        }
-
-        // Check if the new workflow contains any visited tasks
-        if cur_plan.any(|unit| partial_plan.any(|u| u.id == unit.id)) {
-            // skip this candidate because it is creating a loop
             continue;
         }
 
@@ -244,10 +244,9 @@ where
         }
 
         let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
-        next_span.in_scope(|| {
-            // make a copy of the plan for the logs if in the tracing scope
+        if !next_span.is_disabled() {
             next_span.record("cur_plan", field::display(cur_plan.clone().reverse()));
-        });
+        }
         let _enter = next_span.enter();
 
         let candidates = build_candidates(

@@ -133,7 +133,7 @@ fn expand_method_tasks(
             .ok_or(Error::internal(format!("should find a job for {path}")))?;
 
         // Get a copy of the task for the final list
-        let task = job.new_task(t.context().to_owned()).with_path(path.clone());
+        let task = job.new_task(t.context().to_owned()).with_path(path);
 
         extended_tasks.push(task);
     }
@@ -174,15 +174,20 @@ fn build_method_plan(
             partial_plan
         };
 
+        // move task changes temporarily to a patch
+        let patch = Patch(task_changes);
+
         // Apply the task changes
-        cur_state.patch(&Patch(task_changes.to_vec()))?;
+        cur_state.patch(&patch)?;
+
+        let Patch(task_changes) = patch;
+
+        // Append the changes to the parent list, then move task_changes into the patch
+        changes.extend(task_changes);
 
         // Add the new dag to the list of branches and update the cumulative domain
         plan_branches.push(partial_plan);
         cumulative_domain.extend(task_domain);
-
-        // Append the changes to the parent list
-        changes.extend(task_changes);
     }
 
     // After all tasks are evaluated, join remaining branches
