@@ -497,7 +497,7 @@ impl<O> Worker<O, Uninitialized> {
     ///     enforce!(state.needs_sync);
     ///     state.needs_sync = false;
     ///
-    ///     with_io(state, async |state| {
+    ///     with_io(state, move |state| async {
     ///         todo!("perform state cleanup tasks")
     ///     })
     /// }
