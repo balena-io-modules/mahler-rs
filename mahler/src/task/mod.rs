@@ -1,5 +1,4 @@
 //! Types and traits for declaring and operating with Tasks
-mod description;
 mod effect;
 mod handler;
 mod id;
@@ -12,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tracing::warn;
 
+use crate::description::Description;
 use crate::json::{Patch, Path};
 use crate::result::Result;
 use crate::runtime::{Channel, Context, System};
@@ -19,7 +19,6 @@ use crate::serde::Serialize;
 
 pub(crate) use into_result::*;
 
-pub use description::*;
 pub use handler::*;
 pub use id::*;
 pub use io::*;

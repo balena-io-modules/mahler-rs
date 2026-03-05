@@ -31,7 +31,7 @@ use auto_interrupt::AutoInterrupt;
 use domain::Domain;
 use workflow::WorkflowStatus as InnerWorkflowStatus;
 
-pub use workflow::Workflow;
+pub use workflow::{Ignored, Workflow};
 
 /// Events emitted during workflow execution
 ///
@@ -497,7 +497,7 @@ impl<O> Worker<O, Uninitialized> {
     ///     enforce!(state.needs_sync);
     ///     state.needs_sync = false;
     ///
-    ///     with_io(state, async |state| {
+    ///     with_io(state, move |state| async {
     ///         todo!("perform state cleanup tasks")
     ///     })
     /// }
@@ -974,8 +974,11 @@ impl<O: State> Worker<O, Ready> {
 
         if tracing::enabled!(tracing::Level::WARN) && !workflow.exceptions().is_empty() {
             warn!("the following operations were ignored during planning");
-            for path in workflow.exceptions() {
-                warn!("{path}");
+            for ignored in workflow.exceptions() {
+                warn!("{}", ignored.operation);
+                if let Some(reason) = ignored.reason.as_ref() {
+                    warn!("    reason: {reason}");
+                }
             }
         }
         if tracing::enabled!(tracing::Level::DEBUG) {

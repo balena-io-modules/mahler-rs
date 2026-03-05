@@ -90,7 +90,7 @@
 //!
 //! Some extractors implement [FromContext](`crate::runtime::FromContext`), this means that these
 //! extractors can be initialized without need to access to the system and can thus be used as part
-//! of [Job description](`crate::task::Description`).
+//! of [Job description](`crate::job::Description`).
 //!
 //! ```rust,no_run
 //! use mahler::extract::Args;
