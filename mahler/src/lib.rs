@@ -438,6 +438,7 @@ pub use mahler_core::serde;
 
 use mahler_core::runtime;
 
+mod description;
 mod system_ext;
 
 pub mod exception;

@@ -54,6 +54,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
+pub use crate::description::Description;
 use crate::json::OperationMatcher;
 use crate::result::Result;
 use crate::runtime::{Context, System};
@@ -63,6 +64,7 @@ mod handler;
 pub use handler::*;
 
 type ExceptionFn = Arc<dyn Fn(&System, &Context) -> Result<bool> + Send + Sync>;
+type DescriptionFn = Arc<dyn Fn(&Context) -> Result<String> + Send + Sync>;
 
 /// An atomic task
 #[derive(Clone)]
@@ -70,6 +72,7 @@ pub struct Exception {
     id: &'static str,
     operation: OperationMatcher,
     exception: ExceptionFn,
+    description: Option<DescriptionFn>,
 }
 
 impl Exception {
@@ -84,12 +87,36 @@ impl Exception {
             exception: Arc::new(move |system: &System, context: &Context| {
                 exception.call(system, context)
             }),
+            description: None,
         }
     }
 
     /// Test if the exception applies to the given state and context
-    pub fn test(&self, system: &System, context: &Context) -> Result<bool> {
+    pub(crate) fn test(&self, system: &System, context: &Context) -> Result<bool> {
         (self.exception)(system, context)
+    }
+
+    pub(crate) fn description(&self, context: &Context) -> Result<Option<String>> {
+        self.description
+            .as_ref()
+            .map(|description| (description)(context))
+            .transpose()
+    }
+
+    /// Set a human readable description for the Exception
+    ///
+    /// A [description](`crate::exception::Description`) is any function that accepts zero or more context
+    /// extractors and returns a String. A context extractor is a type that implements
+    /// [FromContext](`crate::runtime::FromContext`)
+    ///
+    /// The description will be returned with the workflow as a reason for the exception
+    pub fn with_description<D, T>(mut self, description: D) -> Self
+    where
+        D: Description<T>,
+    {
+        let description: DescriptionFn = Arc::new(move |ctx| description.call(ctx));
+        self.description = Some(description);
+        self
     }
 
     /// Get the operation assigned to the exception
