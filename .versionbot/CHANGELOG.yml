@@ -1,4 +1,37 @@
 - commits:
+    - subject: Refactor the planner module
+      hash: 12a220c450d38caf42dbdb0b7ba3d6cc4acb06ec
+      body: |
+        Break it up into smaller files and break large functions optimizing for
+        readability
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Add `description` field to Exceptions
+      hash: 6fb58da2561dfa3287320fac294082687728d17b
+      body: |
+        The description is used as part of the returned reason for skipped
+        operations on the returning workflow.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Move Descripton to mahler crate root
+      hash: 5608055064c3016a4e3250e6031a6aa179b952a3
+      body: |
+        This should make it re-usable by Exceptions as well as Tasks
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.25.6
+  title: ""
+  date: 2026-03-09T21:15:18.034Z
+- commits:
     - subject: Allow exceptions on the last iteration of the planner
       hash: ff016c4662aa8afb8c7758a9030fb409ecec6252
       body: |
