@@ -1,6 +1,6 @@
 use super::effect::Effect;
-use super::id::Id;
 use super::{Action, Method, Task};
+use crate::runtime::Id;
 
 use crate::error::Error;
 use crate::json::Patch;
@@ -26,7 +26,7 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     /// This is used accross the library to search for tasks for tracing purposes and human
     /// readable logs.
     fn id(&self) -> Id {
-        Id::from(std::any::type_name::<Self>())
+        Id::of::<Self>()
     }
 
     /// Create a task from the handler using the default [Context](`crate::runtime::Context`)

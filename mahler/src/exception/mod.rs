@@ -57,7 +57,7 @@ use std::sync::Arc;
 pub use crate::description::Description;
 use crate::json::OperationMatcher;
 use crate::result::Result;
-use crate::runtime::{Context, System};
+use crate::runtime::{Context, Id, System};
 
 mod handler;
 
@@ -69,7 +69,7 @@ type DescriptionFn = Arc<dyn Fn(&Context) -> Result<String> + Send + Sync>;
 /// An atomic task
 #[derive(Clone)]
 pub struct Exception {
-    id: &'static str,
+    id: Id,
     operation: OperationMatcher,
     exception: ExceptionFn,
     description: Option<DescriptionFn>,
@@ -82,7 +82,7 @@ impl Exception {
         H: ExceptionHandler<T>,
     {
         Self {
-            id: std::any::type_name::<H>(),
+            id: Id::of::<H>(),
             operation,
             exception: Arc::new(move |system: &System, context: &Context| {
                 exception.call(system, context)
@@ -156,7 +156,7 @@ impl PartialOrd for Exception {
 impl Ord for Exception {
     fn cmp(&self, other: &Self) -> Ordering {
         self.id
-            .cmp(other.id)
+            .cmp(&other.id)
             .then(self.operation.cmp(&other.operation))
     }
 }

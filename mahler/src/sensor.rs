@@ -69,7 +69,7 @@ use tokio_stream::{Stream, StreamExt};
 use crate::error::Error;
 use crate::json::{PathArgs, Value};
 use crate::result::Result;
-use crate::runtime::{Channel, Context, FromSystem, System};
+use crate::runtime::{Channel, Context, FromSystem, Id, System};
 use crate::serde::Serialize;
 
 /// A boxed stream of JSON values that sensors produce
@@ -170,7 +170,7 @@ type SensorBuilderRef = Arc<dyn Fn(&System, &Context) -> Result<SensorStream> + 
 /// Sensors are created using the [`sensor`] function and registered with a Worker.
 #[derive(Clone)]
 pub(crate) struct Sensor {
-    pub id: &'static str,
+    pub id: Id,
     builder: SensorBuilderRef,
 }
 
@@ -181,7 +181,7 @@ impl Sensor {
         H: SensorBuilder<T, U>,
     {
         Sensor {
-            id: std::any::type_name::<H>(),
+            id: Id::of::<H>(),
             builder: Arc::new(move |system, context| handler.call(system, context)),
         }
     }

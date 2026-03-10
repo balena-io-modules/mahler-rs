@@ -1,7 +1,6 @@
 //! Types and traits for declaring and operating with Tasks
 mod effect;
 mod handler;
-mod id;
 mod into_result;
 mod io;
 
@@ -19,8 +18,8 @@ use crate::serde::Serialize;
 
 pub(crate) use into_result::*;
 
+pub use crate::runtime::Id;
 pub use handler::*;
-pub use id::*;
 pub use io::*;
 
 // Re-export the enforce macro
@@ -438,7 +437,26 @@ mod tests {
 
     #[test]
     fn it_gets_metadata_from_function() {
-        assert_eq!(plus_one.id(), "mahler::task::tests::plus_one".into());
+        assert_eq!(plus_one.id().to_string(), "mahler::task::tests::plus_one");
+    }
+
+    #[test]
+    fn identical_closures_have_different_ids() {
+        let closure_a = |mut counter: View<i32>, Target(tgt): Target<i32>| -> View<i32> {
+            if *counter < tgt {
+                *counter += 1;
+            }
+            counter
+        };
+        let closure_b = |mut counter: View<i32>, Target(tgt): Target<i32>| -> View<i32> {
+            if *counter < tgt {
+                *counter += 1;
+            }
+            counter
+        };
+
+        // Each closure is a distinct type in Rust, so TypeId-based Id must differ
+        assert_ne!(closure_a.id(), closure_b.id());
     }
 
     #[test]
