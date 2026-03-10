@@ -1,4 +1,20 @@
 - commits:
+    - subject: Create runtime::Id type for handler id uniqueness
+      hash: fa386bac11d7a6ff0c7cf335bdf43c6f7f68308c
+      body: |
+        Previously the type name would be use as the id for handlers
+        (exceptions, tasks, sensors). This id is not guaranteed to be unique and
+        can fail when using closures. This introduce a new `runtime::Id` type
+        that is based on `TypeId`, keeping the type name for displaying the id.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.25.7
+  title: ""
+  date: 2026-03-10T23:36:01.233Z
+- commits:
     - subject: Refactor the planner module
       hash: 12a220c450d38caf42dbdb0b7ba3d6cc4acb06ec
       body: |
