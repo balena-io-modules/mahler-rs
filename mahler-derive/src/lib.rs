@@ -40,23 +40,38 @@ type UnnamedTargetFields = Vec<proc_macro2::TokenStream>;
 // Parsing functions
 // ============================================================================
 
-/// Parse whether a field has the #[mahler(internal)] attribute
-fn has_mahler_internal_attribute(attrs: &[Attribute]) -> Result<bool> {
+/// Parsed mahler field attributes
+struct MahlerFieldAttrs {
+    internal: bool,
+    default: bool,
+}
+
+/// Parse mahler field attributes, returning which flags are present
+fn parse_mahler_field_attrs(attrs: &[Attribute]) -> Result<MahlerFieldAttrs> {
+    let mut result = MahlerFieldAttrs {
+        internal: false,
+        default: false,
+    };
     for attr in attrs {
         if attr.path().is_ident("mahler") {
-            match &attr.meta {
-                Meta::List(meta_list) => {
-                    let tokens = &meta_list.tokens;
-                    if tokens.to_string().trim() == "internal" {
-                        return Ok(true);
+            if let Meta::List(meta_list) = &attr.meta {
+                let tokens_str = meta_list.tokens.to_string();
+                for part in tokens_str.split(',') {
+                    match part.trim() {
+                        "internal" => result.internal = true,
+                        "default" => result.default = true,
+                        other => {
+                            return Err(Error::new_spanned(
+                                &meta_list.tokens,
+                                format!("unknown mahler field attribute: `{other}`"),
+                            ));
+                        }
                     }
                 }
-                Meta::Path(_) => {}
-                Meta::NameValue(_) => {}
             }
         }
     }
-    Ok(false)
+    Ok(result)
 }
 
 /// Extract additional derives from #[mahler(derive(...))] attribute
@@ -139,9 +154,9 @@ fn process_named_fields(
         let field_type = &field.ty;
         let field_vis = &field.vis;
 
-        let is_internal = has_mahler_internal_attribute(&field.attrs)?;
+        let attrs = parse_mahler_field_attrs(&field.attrs)?;
 
-        if !is_internal {
+        if !attrs.internal {
             let target_attrs = filter_field_attributes(&field.attrs);
 
             target_fields.push(quote! {
@@ -163,9 +178,9 @@ fn process_unnamed_fields(
     for field in fields.iter() {
         let field_type = &field.ty;
 
-        let is_internal = has_mahler_internal_attribute(&field.attrs)?;
+        let attrs = parse_mahler_field_attrs(&field.attrs)?;
 
-        if is_internal {
+        if attrs.internal {
             return Err(Error::new_spanned(
                 field,
                 "#[mahler(internal)] is only supported on named struct fields, not tuple struct fields",
@@ -221,7 +236,7 @@ fn generate_serialize_impl(
     let relevant_fields: Vec<_> = if exclude_internal {
         all_fields
             .iter()
-            .filter(|f| !has_mahler_internal_attribute(&f.attrs).unwrap_or(false))
+            .filter(|f| !parse_mahler_field_attrs(&f.attrs).map(|a| a.internal).unwrap_or(false))
             .copied()
             .collect()
     } else {
@@ -281,7 +296,7 @@ fn generate_deserialize_impl(
     let relevant_fields: Vec<_> = if exclude_internal {
         all_fields
             .iter()
-            .filter(|f| !has_mahler_internal_attribute(&f.attrs).unwrap_or(false))
+            .filter(|f| !parse_mahler_field_attrs(&f.attrs).map(|a| a.internal).unwrap_or(false))
             .copied()
             .collect()
     } else {
@@ -295,14 +310,15 @@ fn generate_deserialize_impl(
     let field_strs: Vec<_> = field_names.iter().map(|n| n.to_string()).collect();
     let struct_name_str = struct_name.to_string();
 
-    // Generate field assignments based on whether they're Option or collection types
+    // Generate field assignments based on whether they're Option, collection, or #[mahler(default)] types
     let field_assignments: Vec<_> = relevant_fields
         .iter()
         .filter_map(|field| {
             let field_name = field.ident.as_ref()?;
             let field_str = field_name.to_string();
+            let attrs = parse_mahler_field_attrs(&field.attrs).ok()?;
 
-            if is_option_type(&field.ty) || is_collection_type(&field.ty) {
+            if is_option_type(&field.ty) || is_collection_type(&field.ty) || attrs.default {
                 Some(quote! {
                     #field_name: #field_name.unwrap_or_default()
                 })
@@ -801,6 +817,9 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 ///
 /// - `#[mahler(internal)]` - Marks a struct field as internal-only, excluding it from the target type.
 ///   Only supported on named struct fields, not tuple struct, unit struct, or enum fields.
+/// - `#[mahler(default)]` - Uses `Default::default()` when the field is missing during deserialization,
+///   instead of returning an error. The field's type must implement `Default`. Can be combined
+///   with `internal`: `#[mahler(internal, default)]`.
 /// - `#[mahler(derive(Trait1, Trait2, ...))]` - Adds additional derives to the generated target struct.
 ///   Only applies when a new target struct is created (i.e. when the source structure is not an
 ///   enum or a unit type).

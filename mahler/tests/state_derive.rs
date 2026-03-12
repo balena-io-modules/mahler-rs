@@ -455,3 +455,81 @@ fn test_collection_default_deserialization() {
     assert_eq!(config2.env.len(), 2);
     assert_eq!(config2.env.get("PORT"), Some(&"8080".to_string()));
 }
+
+#[test]
+fn test_mahler_default_attribute() {
+    #[derive(State, Debug, PartialEq)]
+    struct ServerConfig {
+        name: String,
+        #[mahler(default)]
+        host: String,
+        #[mahler(default)]
+        port: u16,
+        #[mahler(default)]
+        enabled: bool,
+    }
+
+    // Missing fields with #[mahler(default)] should use Default::default()
+    let json_str = r#"{"name": "my-server"}"#;
+    let config: ServerConfig = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(config.name, "my-server");
+    assert_eq!(config.host, String::default());
+    assert_eq!(config.port, 0);
+    assert!(!config.enabled);
+
+    // When fields are present, they should be used normally
+    let json_str2 = r#"{"name": "prod", "host": "localhost", "port": 8080, "enabled": true}"#;
+    let config2: ServerConfig = serde_json::from_str(json_str2).unwrap();
+
+    assert_eq!(config2.name, "prod");
+    assert_eq!(config2.host, "localhost");
+    assert_eq!(config2.port, 8080);
+    assert!(config2.enabled);
+}
+
+#[test]
+fn test_mahler_internal_and_default_combined() {
+    #[derive(State, Debug, PartialEq)]
+    struct Worker {
+        name: String,
+        #[mahler(internal, default)]
+        retry_count: u32,
+        #[mahler(internal)]
+        session_id: Option<String>,
+    }
+
+    // Internal + default field should default when missing
+    let json_str = r#"{"name": "worker-1"}"#;
+    let worker: Worker = serde_json::from_str(json_str).unwrap();
+
+    assert_eq!(worker.name, "worker-1");
+    assert_eq!(worker.retry_count, 0);
+    assert_eq!(worker.session_id, None);
+
+    // Internal + default field present in JSON should deserialize normally
+    let json_str2 = r#"{"name": "worker-2", "retry_count": 5, "session_id": "abc"}"#;
+    let worker2: Worker = serde_json::from_str(json_str2).unwrap();
+
+    assert_eq!(worker2.name, "worker-2");
+    assert_eq!(worker2.retry_count, 5);
+    assert_eq!(worker2.session_id, Some("abc".to_string()));
+
+    // Target should not include internal fields
+    let target: WorkerTarget = to_target(&worker).unwrap();
+    assert_eq!(target.name, "worker-1");
+}
+
+#[test]
+fn test_required_field_still_errors_when_missing() {
+    #[derive(State, Debug, PartialEq)]
+    struct StrictConfig {
+        name: String,
+        port: u16,
+    }
+
+    // Missing required field should still error
+    let json_str = r#"{"name": "test"}"#;
+    let result: Result<StrictConfig, _> = serde_json::from_str(json_str);
+    assert!(result.is_err());
+}
