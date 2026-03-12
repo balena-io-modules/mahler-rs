@@ -31,10 +31,10 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Attribute, Data, DeriveInput, Error, Field, Fields, Meta, Result};
-
-type NamedTargetFields = Vec<proc_macro2::TokenStream>;
-type UnnamedTargetFields = Vec<proc_macro2::TokenStream>;
+use syn::{
+    parse::Parser, parse_macro_input, punctuated::Punctuated, Attribute, Data, DeriveInput, Error,
+    Field, Fields, Ident, Meta, Result, Token,
+};
 
 // ============================================================================
 // Parsing functions
@@ -55,17 +55,18 @@ fn parse_mahler_field_attrs(attrs: &[Attribute]) -> Result<MahlerFieldAttrs> {
     for attr in attrs {
         if attr.path().is_ident("mahler") {
             if let Meta::List(meta_list) = &attr.meta {
-                let tokens_str = meta_list.tokens.to_string();
-                for part in tokens_str.split(',') {
-                    match part.trim() {
-                        "internal" => result.internal = true,
-                        "default" => result.default = true,
-                        other => {
-                            return Err(Error::new_spanned(
-                                &meta_list.tokens,
-                                format!("unknown mahler field attribute: `{other}`"),
-                            ));
-                        }
+                let parser = Punctuated::<Ident, Token![,]>::parse_terminated;
+                let idents = parser.parse2(meta_list.tokens.clone())?;
+                for ident in &idents {
+                    if ident == "internal" {
+                        result.internal = true;
+                    } else if ident == "default" {
+                        result.default = true;
+                    } else {
+                        return Err(Error::new_spanned(
+                            ident,
+                            format!("unknown mahler field attribute: `{ident}`"),
+                        ));
                     }
                 }
             }
@@ -79,29 +80,13 @@ fn extract_mahler_derives(attrs: &[Attribute]) -> Result<Option<proc_macro2::Tok
     for attr in attrs {
         if attr.path().is_ident("mahler") {
             if let Meta::List(meta_list) = &attr.meta {
-                let tokens_str = meta_list.tokens.to_string();
-
-                if let Some(derives_part) = tokens_str.strip_prefix("derive") {
-                    let derives_part = derives_part.trim();
-                    if derives_part.starts_with('(') && derives_part.ends_with(')') {
-                        let inner = &derives_part[1..derives_part.len() - 1];
-
-                        let traits: Vec<_> = inner
-                            .split(',')
-                            .map(|s| s.trim())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-
+                let inner_meta: Meta = syn::parse2(meta_list.tokens.clone())?;
+                if let Meta::List(inner_list) = inner_meta {
+                    if inner_list.path.is_ident("derive") {
+                        let parser = Punctuated::<Ident, Token![,]>::parse_terminated;
+                        let traits = parser.parse2(inner_list.tokens.clone())?;
                         if !traits.is_empty() {
-                            let trait_tokens: Vec<proc_macro2::TokenStream> = traits
-                                .iter()
-                                .map(|t| {
-                                    let ident = syn::Ident::new(t, proc_macro2::Span::call_site());
-                                    quote! { #ident }
-                                })
-                                .collect();
-
-                            return Ok(Some(quote! { #(#trait_tokens),* }));
+                            return Ok(Some(quote! { #traits }));
                         }
                     }
                 }
@@ -145,12 +130,12 @@ fn validate_enum_variants(data_enum: &syn::DataEnum) -> Result<()> {
 
 /// Process named fields to generate target field definitions
 fn process_named_fields(
-    fields: &syn::punctuated::Punctuated<Field, syn::Token![,]>,
-) -> Result<NamedTargetFields> {
-    let mut target_fields = NamedTargetFields::new();
+    fields: &Punctuated<Field, Token![,]>,
+) -> Result<Vec<proc_macro2::TokenStream>> {
+    let mut target_fields = Vec::new();
 
     for field in fields {
-        let field_name = field.ident.as_ref().unwrap();
+        let field_name = field.ident.as_ref().expect("named field has ident");
         let field_type = &field.ty;
         let field_vis = &field.vis;
 
@@ -171,9 +156,9 @@ fn process_named_fields(
 
 /// Process unnamed fields to generate target field definitions
 fn process_unnamed_fields(
-    fields: &syn::punctuated::Punctuated<Field, syn::Token![,]>,
-) -> Result<UnnamedTargetFields> {
-    let mut target_fields = UnnamedTargetFields::new();
+    fields: &Punctuated<Field, Token![,]>,
+) -> Result<Vec<proc_macro2::TokenStream>> {
+    let mut target_fields = Vec::new();
 
     for field in fields.iter() {
         let field_type = &field.ty;
@@ -219,6 +204,41 @@ fn is_collection_type(ty: &syn::Type) -> bool {
     false
 }
 
+/// Build `impl<'de, ...>` generics and where clause for Deserialize impls
+fn de_generics(generics: &syn::Generics) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let (_, _, where_clause) = generics.split_for_impl();
+    let de_impl_generics = if generics.params.is_empty() {
+        quote! { <'de> }
+    } else {
+        let params = &generics.params;
+        quote! { <'de, #params> }
+    };
+    let de_where_clause = if let Some(wc) = where_clause {
+        quote! { #wc }
+    } else {
+        quote! {}
+    };
+    (de_impl_generics, de_where_clause)
+}
+
+/// Filter fields, optionally excluding those marked `#[mahler(internal)]`
+fn relevant_fields<'a>(
+    fields: impl Iterator<Item = &'a Field>,
+    exclude_internal: bool,
+) -> Vec<&'a Field> {
+    if exclude_internal {
+        fields
+            .filter(|f| {
+                !parse_mahler_field_attrs(&f.attrs)
+                    .map(|a| a.internal)
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        fields.collect()
+    }
+}
+
 // ============================================================================
 // Code generation functions
 // ============================================================================
@@ -231,22 +251,12 @@ fn generate_serialize_impl(
     exclude_internal: bool,
 ) -> proc_macro2::TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let all_fields: Vec<_> = fields.iter().collect();
+    let relevant = relevant_fields(fields.iter(), exclude_internal);
 
-    let relevant_fields: Vec<_> = if exclude_internal {
-        all_fields
-            .iter()
-            .filter(|f| !parse_mahler_field_attrs(&f.attrs).map(|a| a.internal).unwrap_or(false))
-            .copied()
-            .collect()
-    } else {
-        all_fields
-    };
-
-    let field_count = relevant_fields.len();
+    let field_count = relevant.len();
     let struct_name_str = struct_name.to_string();
 
-    let field_serializations: Vec<_> = relevant_fields
+    let field_serializations: Vec<_> = relevant
         .iter()
         .filter_map(|field| {
             let field_name = field.ident.as_ref()?;
@@ -291,27 +301,14 @@ fn generate_deserialize_impl(
     exclude_internal: bool,
 ) -> proc_macro2::TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let all_fields: Vec<_> = fields.iter().collect();
+    let relevant = relevant_fields(fields.iter(), exclude_internal);
 
-    let relevant_fields: Vec<_> = if exclude_internal {
-        all_fields
-            .iter()
-            .filter(|f| !parse_mahler_field_attrs(&f.attrs).map(|a| a.internal).unwrap_or(false))
-            .copied()
-            .collect()
-    } else {
-        all_fields
-    };
-
-    let field_names: Vec<_> = relevant_fields
-        .iter()
-        .filter_map(|f| f.ident.as_ref())
-        .collect();
+    let field_names: Vec<_> = relevant.iter().filter_map(|f| f.ident.as_ref()).collect();
     let field_strs: Vec<_> = field_names.iter().map(|n| n.to_string()).collect();
     let struct_name_str = struct_name.to_string();
 
     // Generate field assignments based on whether they're Option, collection, or #[mahler(default)] types
-    let field_assignments: Vec<_> = relevant_fields
+    let field_assignments: Vec<_> = relevant
         .iter()
         .filter_map(|field| {
             let field_name = field.ident.as_ref()?;
@@ -330,19 +327,7 @@ fn generate_deserialize_impl(
         })
         .collect();
 
-    // Handle generics with the de lifetime
-    let de_impl_generics = if generics.params.is_empty() {
-        quote! { <'de> }
-    } else {
-        let params = &generics.params;
-        quote! { <'de, #params> }
-    };
-
-    let de_where_clause = if let Some(wc) = where_clause {
-        quote! { #wc }
-    } else {
-        quote! {}
-    };
+    let (de_impl_generics, de_where_clause) = de_generics(generics);
 
     quote! {
         impl #de_impl_generics ::mahler::serde::Deserialize<'de> for #struct_name #ty_generics #de_where_clause {
@@ -510,18 +495,7 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                     let target_fields = process_unnamed_fields(&fields.unnamed)?;
                     let struct_attrs = filter_attributes(&input.attrs);
                     let field_type = &fields.unnamed.iter().next().unwrap().ty;
-                    let de_impl_generics = if generics.params.is_empty() {
-                        quote! { <'de> }
-                    } else {
-                        let params = &generics.params;
-                        quote! { <'de, #params> }
-                    };
-
-                    let de_where_clause = if let Some(wc) = where_clause {
-                        quote! { #wc }
-                    } else {
-                        quote! {}
-                    };
+                    let (de_impl_generics, de_where_clause) = de_generics(generics);
 
                     let expanded = quote! {
                         impl #impl_generics ::mahler::serde::Serialize for #struct_name #ty_generics #where_clause {
@@ -580,19 +554,7 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
                     }
 
                     let struct_name_str = struct_name.to_string();
-
-                    let de_impl_generics = if generics.params.is_empty() {
-                        quote! { <'de> }
-                    } else {
-                        let params = &generics.params;
-                        quote! { <'de, #params> }
-                    };
-
-                    let de_where_clause = if let Some(wc) = where_clause {
-                        quote! { #wc }
-                    } else {
-                        quote! {}
-                    };
+                    let (de_impl_generics, de_where_clause) = de_generics(generics);
 
                     let expanded = quote! {
                         impl #impl_generics ::mahler::serde::Serialize for #struct_name #ty_generics #where_clause {
@@ -655,19 +617,7 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
             let variants: Vec<_> = data_enum.variants.iter().collect();
             let variant_names: Vec<_> = variants.iter().map(|v| &v.ident).collect();
             let variant_strs: Vec<_> = variant_names.iter().map(|n| n.to_string()).collect();
-
-            let de_impl_generics = if generics.params.is_empty() {
-                quote! { <'de> }
-            } else {
-                let params = &generics.params;
-                quote! { <'de, #params> }
-            };
-
-            let de_where_clause = if let Some(wc) = where_clause {
-                quote! { #wc }
-            } else {
-                quote! {}
-            };
+            let (de_impl_generics, de_where_clause) = de_generics(generics);
 
             let expanded = quote! {
                 impl #impl_generics ::mahler::serde::Serialize for #struct_name #ty_generics #where_clause {
@@ -818,7 +768,8 @@ fn expand_state_derive(input: DeriveInput) -> Result<TokenStream> {
 /// - `#[mahler(internal)]` - Marks a struct field as internal-only, excluding it from the target type.
 ///   Only supported on named struct fields, not tuple struct, unit struct, or enum fields.
 /// - `#[mahler(default)]` - Uses `Default::default()` when the field is missing during deserialization,
-///   instead of returning an error. The field's type must implement `Default`. Can be combined
+///   instead of returning an error. This attribute only affects deserialization; during serialization,
+///   the field is always emitted. The field's type must implement `Default`. Can be combined
 ///   with `internal`: `#[mahler(internal, default)]`.
 /// - `#[mahler(derive(Trait1, Trait2, ...))]` - Adds additional derives to the generated target struct.
 ///   Only applies when a new target struct is created (i.e. when the source structure is not an
