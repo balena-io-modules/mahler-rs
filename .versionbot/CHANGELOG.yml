@@ -1,4 +1,31 @@
 - commits:
+    - subject: "Refactor derive macro: use syn APIs, extract helpers, remove aliases"
+      hash: 2742048f6f9da80b77e7ba7469d90d45170ac9e7
+      body: |
+        Replace string-based attribute parsing with proper syn
+        Punctuated/Meta parsing, extract de_generics and relevant_fields
+        helpers to eliminate duplication, remove redundant type aliases,
+        use expect() over unwrap(), and document #[mahler(default)]
+        serialization behavior.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: "Add #[mahler(default)] attribute to derive crate"
+      hash: 65906bf2fb8a6db947247bb63276fe071da2c6b0
+      body: |
+        The attribute works as #[serde(default)] in that it uses the default
+        property value when deserializing from JSON
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.25.8
+  title: ""
+  date: 2026-03-13T18:26:03.536Z
+- commits:
     - subject: Create runtime::Id type for handler id uniqueness
       hash: fa386bac11d7a6ff0c7cf335bdf43c6f7f68308c
       body: |
