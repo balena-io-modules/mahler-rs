@@ -223,6 +223,32 @@ impl<T> View<T> {
         Ok(())
     }
 
+    /// Commit the current state changes, updating the rollback point.
+    ///
+    /// Like [`flush`](View::flush), this sends changes to the worker immediately.
+    /// Additionally, it marks the current state as the new rollback point — if
+    /// the task fails after this call, only changes made *after* the commit
+    /// are reverted.
+    ///
+    /// # Warning
+    ///
+    /// Committed changes persist in the global state even if the task fails
+    /// later. For example, a `create` task that calls `commit()` will leave
+    /// the entity in the state even if subsequent IO steps fail. Use only
+    /// when partial progress must survive task failure.
+    pub async fn commit(&mut self) -> Result<()>
+    where
+        T: Serialize,
+    {
+        if !self.channel.is_detached() {
+            let after = serde_json::to_value(&self.state)?;
+            let changes = self.create_patch(after.clone());
+            self.initial = after.clone();
+            self.channel.send_and_commit(changes, after).await?;
+        }
+        Ok(())
+    }
+
     /// Delete the value at the path pointed by the view.
     ///
     /// Takes ownership of the view and returns a `View<Option<T>>`
@@ -748,33 +774,33 @@ mod tests {
 
     #[tokio::test]
     async fn it_flush_is_noop_with_detached_channel() {
-        let mut numbers = HashMap::new();
-        numbers.insert("one".to_string(), 1);
+        let system = System::try_from(StateVec {
+            numbers: Vec::new(),
+        })
+        .unwrap();
 
-        let state = MyState { numbers };
-        let system = System::try_from(state).unwrap();
-
-        let mut view: View<i32> = View::from_system(
+        let mut view: View<Vec<String>> = View::from_system(
             &system,
-            &Context::new().with_path("/numbers/one"),
+            &Context::new().with_path("/numbers"),
             &Channel::detached(),
         )
         .unwrap();
 
-        *view = 10;
+        view.push("one".into());
 
-        // Commit should return Ok with detached channel
+        // Flush should return Ok with detached channel
         view.flush().await.unwrap();
 
-        // Initial state should not be updated
-        *view = 20;
+        // Initial state should not be updated (detached channel skips the body)
+        view.push("two".into());
 
         // The final patch should contain all changes from the original state
         let changes = view.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
-              { "op": "replace", "path": "/numbers/one", "value": 20 },
+              { "op": "add", "path": "/numbers/0", "value": "one" },
+              { "op": "add", "path": "/numbers/1", "value": "two" },
             ]))
             .unwrap()
         );
@@ -785,60 +811,52 @@ mod tests {
         use crate::sync;
         use std::sync::Arc;
 
-        let mut numbers = HashMap::new();
-        numbers.insert("one".to_string(), 1);
-        numbers.insert("two".to_string(), 2);
-
-        let state = MyState { numbers };
-        let system = System::try_from(state).unwrap();
+        let system = System::try_from(StateVec {
+            numbers: Vec::new(),
+        })
+        .unwrap();
 
         let (tx, mut rx) = sync::channel::<Patch>(1);
         let channel = Channel::from(tx);
 
-        // Spawn a task to receive and acknowledge messages
-        let received_patches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let received_patches_clone = received_patches.clone();
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
         let ack_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                received_patches_clone.lock().await.push(msg.data.clone());
+                received_clone.lock().await.push(msg.data.clone());
                 msg.ack();
             }
         });
 
-        let mut view: View<i32> =
-            View::from_system(&system, &Context::new().with_path("/numbers/one"), &channel)
-                .unwrap();
+        let mut view: View<Vec<String>> =
+            View::from_system(&system, &Context::new().with_path("/numbers"), &channel).unwrap();
 
-        // Modify the value
-        *view = 10;
-
-        // Commit the changes
+        view.push("one".into());
         view.flush().await.unwrap();
 
-        // Wait for the message to be received
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        // Check that the patch was received
-        let patches = received_patches.lock().await;
+        // Check that the flush patch was received
+        let patches = received.lock().await;
         assert_eq!(patches.len(), 1);
         assert_eq!(
             patches[0],
             serde_json::from_value::<Patch>(json!([
-              { "op": "replace", "path": "/numbers/one", "value": 10 },
+              { "op": "add", "path": "/numbers/0", "value": "one" },
             ]))
             .unwrap()
         );
         drop(patches);
 
-        // Modify again
-        *view = 20;
+        // Modify again after flush
+        view.push("two".into());
 
         // The final patch should only contain changes after the last flush
         let changes = view.into_result().unwrap();
         assert_eq!(
             changes,
             serde_json::from_value::<Patch>(json!([
-              { "op": "replace", "path": "/numbers/one", "value": 20 },
+              { "op": "add", "path": "/numbers/1", "value": "two" },
             ]))
             .unwrap()
         );
@@ -852,50 +870,42 @@ mod tests {
         use crate::sync;
         use std::sync::Arc;
 
-        let mut numbers = HashMap::new();
-        numbers.insert("counter".to_string(), 0);
-
-        let state = MyState { numbers };
-        let system = System::try_from(state).unwrap();
+        let system = System::try_from(StateVec {
+            numbers: Vec::new(),
+        })
+        .unwrap();
 
         let (tx, mut rx) = sync::channel::<Patch>(10);
         let channel = Channel::from(tx);
 
-        // Spawn a task to receive and acknowledge messages
-        let received_patches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let received_patches_clone = received_patches.clone();
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
         let ack_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                received_patches_clone.lock().await.push(msg.data.clone());
+                received_clone.lock().await.push(msg.data.clone());
                 msg.ack();
             }
         });
 
-        let mut view: View<i32> = View::from_system(
-            &system,
-            &Context::new().with_path("/numbers/counter"),
-            &channel,
-        )
-        .unwrap();
+        let mut view: View<Vec<String>> =
+            View::from_system(&system, &Context::new().with_path("/numbers"), &channel).unwrap();
 
-        // Simulate multiple increments with flushes
-        for i in 1..=5 {
-            *view = i;
+        // Push items one at a time with flushes
+        for i in 0..3 {
+            view.push(format!("item_{i}"));
             view.flush().await.unwrap();
         }
 
-        // Wait for all messages to be received
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Verify all patches were received
-        let patches = received_patches.lock().await;
-        assert_eq!(patches.len(), 5);
+        // Each flush should only contain the new element
+        let patches = received.lock().await;
+        assert_eq!(patches.len(), 3);
         for (idx, patch) in patches.iter().enumerate() {
-            let i = idx + 1;
             assert_eq!(
                 *patch,
                 serde_json::from_value::<Patch>(json!([
-                  { "op": "replace", "path": "/numbers/counter", "value": i },
+                  { "op": "add", "path": format!("/numbers/{idx}"), "value": format!("item_{idx}") },
                 ]))
                 .unwrap()
             );
@@ -1021,6 +1031,146 @@ mod tests {
         // No more changes after flush
         let changes = view.into_result().unwrap();
         assert_eq!(changes, Patch(vec![]));
+
+        drop(channel);
+        ack_task.abort();
+    }
+
+    #[tokio::test]
+    async fn it_commit_is_noop_with_detached_channel() {
+        let system = System::try_from(StateVec {
+            numbers: Vec::new(),
+        })
+        .unwrap();
+
+        let mut view: View<Vec<i32>> = View::from_system(
+            &system,
+            &Context::new().with_path("/numbers"),
+            &Channel::detached(),
+        )
+        .unwrap();
+
+        view.push(10);
+
+        // Commit should return Ok with detached channel
+        view.commit().await.unwrap();
+
+        // Initial state should not be updated (detached channel skips the body)
+        view.push(20);
+
+        // The final patch should contain all changes from the original state
+        let changes = view.into_result().unwrap();
+        assert_eq!(
+            changes,
+            serde_json::from_value::<Patch>(json!([
+              { "op": "add", "path": "/numbers/0", "value": 10 },
+              { "op": "add", "path": "/numbers/1", "value": 20 },
+            ]))
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn it_commits_view_changes_with_attached_channel() {
+        use crate::sync;
+        use std::sync::Arc;
+
+        let system = System::try_from(StateVec {
+            numbers: Vec::new(),
+        })
+        .unwrap();
+
+        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let channel = Channel::from(tx);
+
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let ack_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                received_clone.lock().await.push(msg.data.clone());
+                msg.ack();
+            }
+        });
+
+        let mut view: View<Vec<i32>> =
+            View::from_system(&system, &Context::new().with_path("/numbers"), &channel).unwrap();
+
+        view.push(10);
+        view.commit().await.unwrap();
+        view.push(20);
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let patches = received.lock().await;
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0],
+            serde_json::from_value::<Patch>(json!([
+              { "op": "add", "path": "/numbers/0", "value": 10 },
+            ]))
+            .unwrap()
+        );
+        drop(patches);
+
+        assert_eq!(channel.checkpoint().await, Some(json!([10])));
+
+        drop(channel);
+        ack_task.abort();
+
+        // The final patch should contain only changes after the commit
+        let changes = view.into_result().unwrap();
+        assert_eq!(
+            changes,
+            serde_json::from_value::<Patch>(json!([
+              { "op": "add", "path": "/numbers/1", "value": 20 },
+            ]))
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn it_commits_optional_view_creation() {
+        use crate::sync;
+        use std::sync::Arc;
+
+        let state = MyState {
+            numbers: HashMap::new(),
+        };
+        let system = System::try_from(state).unwrap();
+
+        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let channel = Channel::from(tx);
+
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let received_clone = received.clone();
+        let ack_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                received_clone.lock().await.push(msg.data.clone());
+                msg.ack();
+            }
+        });
+
+        let mut view: View<Option<i32>> =
+            View::from_system(&system, &Context::new().with_path("/numbers/new"), &channel)
+                .unwrap();
+
+        view.replace(42);
+        view.commit().await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let patches = received.lock().await;
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0],
+            serde_json::from_value::<Patch>(json!([
+              { "op": "add", "path": "/numbers/new", "value": 42 },
+            ]))
+            .unwrap()
+        );
+        drop(patches);
+
+        assert_eq!(channel.checkpoint().await, Some(json!(42)));
 
         drop(channel);
         ack_task.abort();
