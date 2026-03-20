@@ -1,4 +1,23 @@
 - commits:
+    - subject: Add View::commit method
+      hash: 6b6d72ca1e1e1c0ee1e6bd3e5362d759b6887fc2
+      body: |
+        The method, like `View::flush` communicates changes back to the worker,
+        however, it also created a new rollback checkpoint at the commit state.
+        This is useful for creating changes that must persist after failure of a
+        given task.
+
+        This also fixes some flush tests that were not correctly checking
+        changes before and after the flush boundary.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.25.9
+  title: ""
+  date: 2026-03-20T18:09:45.569Z
+- commits:
     - subject: "Refactor derive macro: use syn APIs, extract helpers, remove aliases"
       hash: 2742048f6f9da80b77e7ba7469d90d45170ac9e7
       body: |
