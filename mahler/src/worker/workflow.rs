@@ -112,35 +112,28 @@ impl Task for WorkUnit {
         let initial_state = system
             .inner_state()
             .pointer(path.as_str())
-            .unwrap_or(&Value::Null);
+            .unwrap_or(&Value::Null)
+            .clone();
 
-        match self
-            .action
-            .run(system, &Channel::from(sender.clone()))
-            .await
-        {
-            Ok(patch) => {
-                // Task succeeded, return the patch as normal
-                Ok(patch)
-            }
+        let channel = Channel::from(sender.clone());
+        match self.action.run(system, &channel).await {
+            Ok(patch) => Ok(patch),
             Err(e) => {
-                // Task failed, create rollback patch
-                let rollback_patch = if initial_state == &Value::Null {
-                    // Path didn't exist before, remove it
+                // Task failed, roll-back to checkpoint
+                let committed = channel.checkpoint().await;
+                let rollback_state = committed.as_ref().unwrap_or(&initial_state);
+                let rollback_patch = if *rollback_state == Value::Null {
                     Patch(vec![PatchOperation::Remove(RemoveOperation {
                         path: path.into(),
                     })])
                 } else {
-                    // Path existed, restore to initial value
                     Patch(vec![PatchOperation::Replace(ReplaceOperation {
                         path: path.into(),
-                        value: initial_state.clone(),
+                        value: rollback_state.clone(),
                     })])
                 };
 
-                // Apply rollback patch immediately
                 sender.send(rollback_patch).await.map_err(Error::internal)?;
-
                 Err(e)
             }
         }
