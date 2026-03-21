@@ -816,14 +816,14 @@ mod tests {
         })
         .unwrap();
 
-        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let (tx, mut rx) = sync::channel::<(Patch, Option<Value>)>(1);
         let channel = Channel::from(tx);
 
         let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let received_clone = received.clone();
         let ack_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                received_clone.lock().await.push(msg.data.clone());
+                received_clone.lock().await.push(msg.data.0.clone());
                 msg.ack();
             }
         });
@@ -875,14 +875,14 @@ mod tests {
         })
         .unwrap();
 
-        let (tx, mut rx) = sync::channel::<Patch>(10);
+        let (tx, mut rx) = sync::channel::<(Patch, Option<Value>)>(10);
         let channel = Channel::from(tx);
 
         let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let received_clone = received.clone();
         let ack_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                received_clone.lock().await.push(msg.data.clone());
+                received_clone.lock().await.push(msg.data.0.clone());
                 msg.ack();
             }
         });
@@ -930,7 +930,7 @@ mod tests {
         };
         let system = System::try_from(state).unwrap();
 
-        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let (tx, mut rx) = sync::channel::<(Patch, Option<Value>)>(1);
         let channel = Channel::from(tx);
 
         // Spawn a task to receive and acknowledge messages
@@ -938,7 +938,7 @@ mod tests {
         let received_patches_clone = received_patches.clone();
         let ack_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                received_patches_clone.lock().await.push(msg.data.clone());
+                received_patches_clone.lock().await.push(msg.data.0.clone());
                 msg.ack();
             }
         });
@@ -987,7 +987,7 @@ mod tests {
         let state = MyState { numbers };
         let system = System::try_from(state).unwrap();
 
-        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let (tx, mut rx) = sync::channel::<(Patch, Option<Value>)>(1);
         let channel = Channel::from(tx);
 
         // Spawn a task to receive and acknowledge messages
@@ -995,7 +995,7 @@ mod tests {
         let received_patches_clone = received_patches.clone();
         let ack_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                received_patches_clone.lock().await.push(msg.data.clone());
+                received_patches_clone.lock().await.push(msg.data.0.clone());
                 msg.ack();
             }
         });
@@ -1080,7 +1080,7 @@ mod tests {
         })
         .unwrap();
 
-        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let (tx, mut rx) = sync::channel::<(Patch, Option<Value>)>(1);
         let channel = Channel::from(tx);
 
         let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -1101,18 +1101,19 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        let patches = received.lock().await;
-        assert_eq!(patches.len(), 1);
+        let messages = received.lock().await;
+        assert_eq!(messages.len(), 1);
+        let (patch, checkpoint) = &messages[0];
         assert_eq!(
-            patches[0],
+            *patch,
             serde_json::from_value::<Patch>(json!([
               { "op": "add", "path": "/numbers/0", "value": 10 },
             ]))
             .unwrap()
         );
-        drop(patches);
-
-        assert_eq!(channel.checkpoint().await, Some(json!([10])));
+        // commit() sends the new state value as the checkpoint
+        assert_eq!(*checkpoint, Some(json!([10])));
+        drop(messages);
 
         drop(channel);
         ack_task.abort();
@@ -1138,7 +1139,7 @@ mod tests {
         };
         let system = System::try_from(state).unwrap();
 
-        let (tx, mut rx) = sync::channel::<Patch>(1);
+        let (tx, mut rx) = sync::channel::<(Patch, Option<Value>)>(1);
         let channel = Channel::from(tx);
 
         let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -1159,18 +1160,19 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        let patches = received.lock().await;
-        assert_eq!(patches.len(), 1);
+        let messages = received.lock().await;
+        assert_eq!(messages.len(), 1);
+        let (patch, checkpoint) = &messages[0];
         assert_eq!(
-            patches[0],
+            *patch,
             serde_json::from_value::<Patch>(json!([
               { "op": "add", "path": "/numbers/new", "value": 42 },
             ]))
             .unwrap()
         );
-        drop(patches);
-
-        assert_eq!(channel.checkpoint().await, Some(json!(42)));
+        // commit() sends the committed value as the checkpoint
+        assert_eq!(*checkpoint, Some(json!(42)));
+        drop(messages);
 
         drop(channel);
         ack_task.abort();
