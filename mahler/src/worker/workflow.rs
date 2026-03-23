@@ -1,6 +1,8 @@
 //! Types and utilities to generate and execute task Workflows
 
 use async_trait::async_trait;
+use json_patch::AddOperation;
+use jsonptr::resolve::ResolveError;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
@@ -10,7 +12,8 @@ use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
 use crate::error::{AggregateError, Error, ErrorKind};
 use crate::json::{Operation, Patch, PatchOperation, RemoveOperation, ReplaceOperation, Value};
 use crate::runtime::{Channel, System};
-use crate::sync::{Interrupt, Reader, Sender};
+use crate::sync::{channel, Interrupt, Reader, Sender};
+use crate::system_ext::SystemExt;
 use crate::task::{Action, Id};
 
 /// Unique representation of a task acting on a specific path and system state.
@@ -90,11 +93,11 @@ impl Task for WorkUnit {
     type Error = Error;
 
     #[instrument(name = "run_task", skip_all, fields(task=%self.action), err)]
-    async fn run(&self, system: &System, sender: &Sender<Patch>) -> Result<Patch, Self::Error> {
+    async fn run(&self, input: &System, sender: &Sender<Patch>) -> Result<Patch, Self::Error> {
         info!("starting");
         // dry-run the task to test that conditions hold
         // before executing the action should not really fail at this point
-        let Patch(changes) = self.action.dry_run(system)?;
+        let Patch(changes) = self.action.dry_run(input)?;
         if changes != self.output {
             // If the result is different then we assume it's because the
             // conditions changed since planning
@@ -108,35 +111,96 @@ impl Task for WorkUnit {
         }
 
         // Take snapshot of the path before execution
-        let path = self.action.context().path.clone();
-        let initial_state = system
-            .inner_state()
-            .pointer(path.as_str())
-            .unwrap_or(&Value::Null)
-            .clone();
+        let ptr = self.action.context().path.as_ref();
+        let mut initial_state = match ptr.resolve(input.inner_state()) {
+            Ok(value) => Some(value.clone()),
+            Err(ResolveError::NotFound { .. } | ResolveError::OutOfBounds { .. }) => None,
+            // this should not happen at this point
+            Err(e) => return Err(Error::internal(e)),
+        };
+        // Track state locally to compute rollback. Safe because the DAG
+        // guarantees non-overlapping paths between concurrent tasks.
+        let mut updated_state = input.clone();
 
-        let channel = Channel::from(sender.clone());
-        match self.action.run(system, &channel).await {
-            Ok(patch) => Ok(patch),
-            Err(e) => {
-                // Task failed, roll-back to checkpoint
-                let committed = channel.checkpoint().await;
-                let rollback_state = committed.as_ref().unwrap_or(&initial_state);
-                let rollback_patch = if *rollback_state == Value::Null {
-                    Patch(vec![PatchOperation::Remove(RemoveOperation {
-                        path: path.into(),
-                    })])
-                } else {
-                    Patch(vec![PatchOperation::Replace(ReplaceOperation {
-                        path: path.into(),
-                        value: rollback_state.clone(),
-                    })])
-                };
+        let (proxy_tx, mut proxy_rx) = channel::<(Patch, Option<Value>)>(1);
 
-                sender.send(rollback_patch).await.map_err(Error::internal)?;
-                Err(e)
+        // create the task future
+        // NOTE: tracking the state changes in the local copy of the system would not be necessary if
+        // `run()` received a Reader<System>, like Dag does. However that is a breaking change and it
+        // also risks that one `run` implementation blocks writes creating a deadlock. We might
+        // still do it eventually through some other helper struct
+        let channel = Channel::from(proxy_tx);
+        let mut task_fut = std::pin::pin!(self.action.run(input, &channel));
+        let task_res = loop {
+            // Task completion is checked first. This is safe because the ack'd
+            // channel guarantees no message can be pending when the task completes
+            // (the task blocks on ack before it can return).
+            let checkpoint = tokio::select! {
+                biased;
+                res = &mut task_fut => {
+                    break res
+                },
+                res = proxy_rx.recv() => match res {
+                    Some(mut msg) => {
+                        let (changes, checkpoint) = std::mem::take(&mut msg.data);
+                        updated_state.patch(&changes)?;
+                        sender.send(changes).await.map_err(Error::internal)?;
+                        msg.ack();
+
+                        checkpoint
+                    },
+                    None => break Err(Error::internal("task channel closed")),
+                },
+            };
+
+            // update the initial state if a checkpoint was provided
+            if let Some(value) = checkpoint {
+                initial_state = Some(value);
             }
+        };
+
+        let err = match task_res {
+            Ok(patch) => return Ok(patch),
+            Err(e) => e,
+        };
+
+        let final_state = match ptr.resolve(updated_state.inner_state()) {
+            Ok(value) => Some(value),
+            Err(ResolveError::NotFound { .. } | ResolveError::OutOfBounds { .. }) => None,
+            // this should not happen at this point
+            Err(e) => return Err(Error::internal(e)),
+        };
+
+        // Prepare rollback: compare final state against the rollback target
+        // (checkpoint or initial). Check equality first so we can move
+        // initial_state into the patch without cloning.
+        let rollback = if final_state == initial_state.as_ref() {
+            vec![]
+        } else {
+            match (final_state, initial_state) {
+                (Some(_), None) => vec![PatchOperation::Remove(RemoveOperation {
+                    path: ptr.to_buf(),
+                })],
+                (None, Some(value)) => vec![PatchOperation::Add(AddOperation {
+                    path: ptr.to_buf(),
+                    value,
+                })],
+                (Some(_), Some(value)) => vec![PatchOperation::Replace(ReplaceOperation {
+                    path: ptr.to_buf(),
+                    value,
+                })],
+                _ => unreachable!(),
+            }
+        };
+
+        if !rollback.is_empty() {
+            sender
+                .send(Patch(rollback))
+                .await
+                .map_err(Error::internal)?;
         }
+
+        Err(err)
     }
 }
 
@@ -250,5 +314,269 @@ impl Workflow {
 impl Display for Workflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.dag.fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the proxy-loop and rollback logic inside `WorkUnit::run`.
+    //!
+    //! Strategy: drive `WorkUnit::run` through the public `Worker::run_task` entry point.
+    //! Each test constructs a handler that performs a specific sequence of flush / commit
+    //! calls before either succeeding or failing, then asserts the final observed state
+    //! sequence (including any rollback patch) matches expectations.
+
+    use std::pin::pin;
+
+    use crate::error::Error;
+    use crate::extract::{Target, View};
+    use crate::job::{create, update};
+    use crate::state::State;
+    use crate::task::{with_io, IO};
+    use crate::worker::{Worker, WorkerEvent, WorkflowStatus};
+
+    // Collect every `StateUpdated` value emitted by a `run_workflow` stream and
+    // return the final `WorkflowStatus`.
+    async fn collect_stream<T: State + Send + Unpin + 'static>(
+        worker: Worker<T, crate::worker::Ready>,
+        workflow: crate::worker::Workflow,
+    ) -> (Vec<T>, WorkflowStatus) {
+        let mut states = Vec::new();
+        let mut final_status = WorkflowStatus::Success;
+        {
+            let mut stream = pin!(worker.run_workflow(workflow));
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    WorkerEvent::StateUpdated(s) => states.push(s),
+                    WorkerEvent::WorkflowFinished(status) => {
+                        final_status = status;
+                        break;
+                    }
+                }
+            }
+        }
+        (states, final_status)
+    }
+
+    use tokio_stream::StreamExt;
+
+    // -----------------------------------------------------------------------
+    // 1. Task fails without any intermediate sends → no rollback patch emitted,
+    //    state stays at its initial value.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_no_send_failure_no_rollback() {
+        fn successful_task(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32, Error> {
+            if *counter < tgt {
+                *counter += 1;
+            }
+            with_io(
+                counter,
+                |_| async move { Err(Error::runtime("internal error")) },
+            )
+        }
+
+        let worker = Worker::new()
+            .job("", update(successful_task))
+            .initial_state(0)
+            .unwrap();
+
+        let workflow = worker.find_workflow(1).unwrap().unwrap();
+        let (states, status) = collect_stream(worker, workflow).await;
+
+        assert!(matches!(status, WorkflowStatus::Aborted(_)));
+        // The only state update should be the rollback. Because the task never flushed
+        // anything, final_state == initial_state so no rollback patch is emitted at all.
+        assert!(
+            states.is_empty(),
+            "expected no state updates, got: {:?}",
+            states
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Task calls flush() then fails → rollback restores original state.
+    //    Flush sends `None` as checkpoint, so rollback target must remain the
+    //    pre-task initial state, not None.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_flush_then_failure_rolls_back_to_initial() {
+        fn flush_then_fail(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32, Error> {
+            if *counter < tgt {
+                *counter = tgt;
+            }
+            with_io(counter, |mut counter| async move {
+                // Flush an intermediate change (sends None checkpoint)
+                counter.flush().await?;
+                Err(Error::runtime("failure after flush"))
+            })
+        }
+
+        let worker = Worker::new()
+            .job("", update(flush_then_fail))
+            .initial_state(0)
+            .unwrap();
+
+        let workflow = worker.find_workflow(5).unwrap().unwrap();
+        let (states, status) = collect_stream(worker, workflow).await;
+
+        assert!(matches!(status, WorkflowStatus::Aborted(_)));
+        // Sequence: flush emits 5, then rollback emits 0
+        assert!(
+            states.len() >= 2,
+            "expected at least 2 state updates, got {:?}",
+            states
+        );
+        let flushed = states[0];
+        let rolled_back = states[1];
+        assert_eq!(flushed, 5, "flush should have sent 5");
+        assert_eq!(rolled_back, 0, "rollback should restore 0");
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Task calls commit() then flush() then fails → rollback to the
+    //    committed checkpoint, NOT to initial. Regression: the old code did
+    //    `initial_state = checkpoint` so a subsequent flush (sending None)
+    //    would clobber the rollback target back to None.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_commit_flush_failure_rolls_back_to_checkpoint() {
+        fn commit_flush_fail(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32, Error> {
+            if *counter < tgt {
+                *counter = tgt;
+            }
+            with_io(counter, |mut counter| async move {
+                counter.commit().await?;
+                *counter += 3;
+                counter.flush().await?;
+                Err(Error::runtime("failure after commit then flush"))
+            })
+        }
+
+        let worker = Worker::new()
+            .job("", update(commit_flush_fail))
+            .initial_state(0)
+            .unwrap();
+
+        let workflow = worker.find_workflow(5).unwrap().unwrap();
+        let (states, status) = collect_stream(worker, workflow).await;
+
+        assert!(matches!(status, WorkflowStatus::Aborted(_)));
+        // Sequence: commit 5, flush 8, rollback to 5
+        assert_eq!(
+            states,
+            vec![5, 8, 5],
+            "expected [commit 5, flush 8, rollback 5], got {:?}",
+            states
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Create operation: path didn't exist before, task sends Add then fails
+    //    → rollback removes the path.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_create_flush_then_failure_removes_path() {
+        use crate::state::Map;
+
+        fn create_entry(
+            mut view: View<Option<i32>>,
+            Target(tgt): Target<i32>,
+        ) -> IO<Option<i32>, Error> {
+            *view = Some(tgt);
+            with_io(view, |mut view| async move {
+                view.flush().await?;
+                Err(Error::runtime("create failed after flush"))
+            })
+        }
+
+        let worker = Worker::new()
+            .job("/{key}", create(create_entry))
+            .initial_state(Map::<String, i32>::new())
+            .unwrap();
+
+        let target = Map::from([("foo".to_string(), 0)]);
+        let workflow = worker.find_workflow(target).unwrap().unwrap();
+        let (states, status) = collect_stream(worker, workflow).await;
+
+        assert!(matches!(status, WorkflowStatus::Aborted(_)));
+        let final_state = states.last().expect("expected at least one state update");
+        assert!(
+            !final_state.contains_key("foo"),
+            "rollback should have removed the created key, but state is {:?}",
+            final_state
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Delete operation: path existed, task removes it then fails
+    //    → rollback re-creates the path with the original value (Add).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_delete_flush_then_failure_recreates_path() {
+        use crate::state::Map;
+
+        fn delete_entry(view: View<i32>) -> IO<Option<i32>, Error> {
+            let view = view.delete();
+            with_io(view, |mut view| async move {
+                view.flush().await?;
+                Err(Error::runtime("delete failed after flush"))
+            })
+        }
+
+        let worker = Worker::new()
+            .job("/{key}", crate::job::delete(delete_entry))
+            .initial_state(Map::from([("foo".to_string(), 42)]))
+            .unwrap();
+
+        let target = Map::<String, i32>::new();
+        let workflow = worker.find_workflow(target).unwrap().unwrap();
+        let (states, status) = collect_stream(worker, workflow).await;
+
+        assert!(matches!(status, WorkflowStatus::Aborted(_)));
+        let final_state = states.last().expect("expected at least one state update");
+        assert_eq!(
+            final_state.get("foo").copied(),
+            Some(42),
+            "rollback should have re-created the deleted key with original value, but state is {:?}",
+            final_state
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. List state: task flushes a modification then fails → rollback restores
+    //    the original list.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn test_list_flush_then_failure_restores_original() {
+        use crate::state::List;
+
+        fn append_then_fail(
+            mut view: View<List<i32>>,
+            Target(tgt): Target<List<i32>>,
+        ) -> IO<List<i32>, Error> {
+            *view = tgt;
+            with_io(view, |mut view| async move {
+                view.flush().await?;
+                Err(Error::runtime("failure after list modification"))
+            })
+        }
+
+        let initial = List::from(vec![1, 2, 3]);
+        let worker = Worker::new()
+            .job("", update(append_then_fail))
+            .initial_state(initial.clone())
+            .unwrap();
+
+        let target = List::from(vec![1, 2, 3, 4, 5]);
+        let workflow = worker.find_workflow(target).unwrap().unwrap();
+        let (states, status) = collect_stream(worker, workflow).await;
+
+        assert!(matches!(status, WorkflowStatus::Aborted(_)));
+        let rolled_back = states.last().expect("expected at least one state update");
+        assert_eq!(
+            *rolled_back, initial,
+            "rollback should restore the original list [1, 2, 3]"
+        );
     }
 }
