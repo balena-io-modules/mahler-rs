@@ -1,4 +1,23 @@
 - commits:
+    - subject: Fix task error rollback
+      hash: 01366ac503d8fff809be1b6057a78c5043b5bda8
+      body: |
+        Task execution implementation was not correctly implementing roll-back,
+        as it was failing to account for a failure with no patches, a roll-back
+        after removal and other cases.
+
+        This refactors runtime::Channel to send both a patch and a checkpoint
+        and modifies workflow to keep track of changes to be able to correctly
+        roll-back to the last checkpoint.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.25.10
+  title: ""
+  date: 2026-03-23T21:49:52.185Z
+- commits:
     - subject: Add View::commit method
       hash: 6b6d72ca1e1e1c0ee1e6bd3e5362d759b6887fc2
       body: |
