@@ -7,11 +7,6 @@
 
 More information about this crate can be found in the [crate documentation](https://docs.rs/mahler/latest/mahler/).
 
-> [!WARNING]  
-> This project is still quite experimental, while the API is reaching a relatively stable state, it may still be subjected to change.
-> Same thing with the internal planning and execution model, it is very much still in a _make it work_ stage and there are still
-> a lot of optimizations that can be made.
-
 ## Overview
 
 Modern infrastructure requires intelligent automation that can adapt to changing conditions. Traditional static workflows become unmanageable as system complexity grows - you end up with brittle scripts that break when conditions change.
