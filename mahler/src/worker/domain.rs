@@ -382,9 +382,7 @@ mod tests {
     }
 
     // See: https://github.com/ibraheemdev/matchit/issues/75
-    // we ignore it for now until matchit releases a new version
     #[test]
-    #[ignore]
     fn test_finds_jobs_for_empty_paths() {
         let func = |view: View<()>| view;
         let domain = Domain::new()

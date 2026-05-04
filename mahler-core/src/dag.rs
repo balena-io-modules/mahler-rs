@@ -916,8 +916,6 @@ where
     /// Run the DAG
     ///
     /// This is only available for DAG items that implement Task
-    ///
-    /// NOTE: this is not public to avoid exposing external crate types
     pub async fn execute(
         self,
         input: &Reader<T::Input>,
