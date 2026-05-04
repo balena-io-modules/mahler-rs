@@ -1,4 +1,16 @@
 - commits:
+    - subject: Update dependencies
+      hash: 6d11d4c9f9db7164690f098505b12eb174288f35
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.25.11
+  title: ""
+  date: 2026-05-04T21:16:52.628Z
+- commits:
     - subject: Fix task error rollback
       hash: 01366ac503d8fff809be1b6057a78c5043b5bda8
       body: |
