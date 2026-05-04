@@ -125,10 +125,6 @@ impl Task for WorkUnit {
         let (proxy_tx, mut proxy_rx) = channel::<(Patch, Option<Value>)>(1);
 
         // create the task future
-        // NOTE: tracking the state changes in the local copy of the system would not be necessary if
-        // `run()` received a Reader<System>, like Dag does. However that is a breaking change and it
-        // also risks that one `run` implementation blocks writes creating a deadlock. We might
-        // still do it eventually through some other helper struct
         let channel = Channel::from(proxy_tx);
         let mut task_fut = std::pin::pin!(self.action.run(input, &channel));
         let task_res = loop {
