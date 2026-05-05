@@ -1,4 +1,17 @@
 - commits:
+    - subject: Fix publishing issue
+      hash: 520ca0f190dfb3eb6a0b0b243a535eec7c505258
+      body: |
+        crates.io allows at most 5 tags per crate
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.25.12
+  title: ""
+  date: 2026-05-05T19:23:56.548Z
+- commits:
     - subject: Update dependencies
       hash: 6d11d4c9f9db7164690f098505b12eb174288f35
       body: ""
