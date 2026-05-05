@@ -1,7 +1,7 @@
 [package]
 name = "mahler"
 description = "An automated job orchestration library that builds and executes dynamic workflows"
-keywords = ["planning", "htn", "job", "orchestration", "workflow", "automation"]
+keywords = ["planning", "htn", "orchestration", "workflow", "automation"]
 documentation = "https://docs.rs/mahler"
 version.workspace = true
 edition.workspace = true

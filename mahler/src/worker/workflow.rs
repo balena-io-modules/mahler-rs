@@ -110,7 +110,8 @@ impl Task for WorkUnit {
             ));
         }
 
-        // Take snapshot of the path before execution
+        // Take snapshot of the state at the task path before execution
+        // this is the initial state passed to the task
         let ptr = self.action.context().path.as_ref();
         let mut initial_state = match ptr.resolve(input.inner_state()) {
             Ok(value) => Some(value.clone()),
@@ -118,13 +119,14 @@ impl Task for WorkUnit {
             // this should not happen at this point
             Err(e) => return Err(Error::internal(e)),
         };
-        // Track state locally to compute rollback. Safe because the DAG
+
+        // Track global state locally to compute rollback. Safe because the DAG
         // guarantees non-overlapping paths between concurrent tasks.
-        let mut updated_state = input.clone();
+        let mut system_state = input.clone();
 
         let (proxy_tx, mut proxy_rx) = channel::<(Patch, Option<Value>)>(1);
 
-        // create the task future
+        // create the task future passing in our proxy channel
         let channel = Channel::from(proxy_tx);
         let mut task_fut = std::pin::pin!(self.action.run(input, &channel));
         let task_res = loop {
@@ -139,8 +141,14 @@ impl Task for WorkUnit {
                 res = proxy_rx.recv() => match res {
                     Some(mut msg) => {
                         let (changes, checkpoint) = std::mem::take(&mut msg.data);
-                        updated_state.patch(&changes)?;
+
+                        // patch our local copy of the global state
+                        system_state.patch(&changes)?;
+
+                        // propagate changes upstream
                         sender.send(changes).await.map_err(Error::internal)?;
+
+                        // tell the task to continue
                         msg.ack();
 
                         checkpoint
@@ -155,12 +163,14 @@ impl Task for WorkUnit {
             }
         };
 
+        // if the task terminated successfully just return the changes
         let err = match task_res {
             Ok(patch) => return Ok(patch),
             Err(e) => e,
         };
 
-        let final_state = match ptr.resolve(updated_state.inner_state()) {
+        // otherwise look for the final state at the path
+        let final_state = match ptr.resolve(system_state.inner_state()) {
             Ok(value) => Some(value),
             Err(ResolveError::NotFound { .. } | ResolveError::OutOfBounds { .. }) => None,
             // this should not happen at this point
