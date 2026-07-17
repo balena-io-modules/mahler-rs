@@ -17,11 +17,18 @@ use super::{Domain, WorkUnit, Workflow};
 /// for composite tasks, the workflow will create a Dag with concurrent branches
 /// depending on the operational domain of each sub-task.
 ///
+/// If a workflow is found, the function will also return a [`crate::json::Patch`] with the
+/// cumulative changes performed by the task.
+///
 /// # Arguments
 /// * `db` - a reference to the worker [`Domain`]
 /// * `task` - the task to convert to a workflow
-/// * `cur_state` - the state of the system before running the task
-pub fn find_workflow_for_task(mut task: Task, db: &Domain, cur_state: &System) -> Result<Workflow> {
+/// * `system` - the state of the system before running the task
+pub fn find_workflow_for_task(
+    mut task: Task,
+    db: &Domain,
+    system: &System,
+) -> Result<(Workflow, Patch)> {
     // Look-up the task on the domain to find its path
     let task_id = task.id();
     let Context { args, .. } = task.context_mut();
@@ -32,9 +39,9 @@ pub fn find_workflow_for_task(mut task: Task, db: &Domain, cur_state: &System) -
 
     let mut task_domain = BTreeSet::new();
     let mut task_changes = Vec::new();
-    let dag = try_task_into_workflow(&task, db, cur_state, &mut task_domain, &mut task_changes)?;
+    let dag = try_task_into_workflow(&task, db, system, &mut task_domain, &mut task_changes)?;
 
-    Ok(Workflow::new(dag.reverse()))
+    Ok((Workflow::new(dag.reverse()), Patch(task_changes)))
 }
 
 /// Convert the task into a workflow if possible

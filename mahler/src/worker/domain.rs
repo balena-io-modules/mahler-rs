@@ -69,29 +69,6 @@ impl Domain {
         }
     }
 
-    /// Remove all jobs with the given id
-    pub fn remove_job(&mut self, id: TaskId) -> bool {
-        let Self {
-            ref mut jobs,
-            ref mut index,
-            ..
-        } = self;
-
-        // find the route from the index
-        if let Some(route) = index.remove(&id) {
-            // Remove the route from the router if it exists
-            if let Some(mut queue) = jobs.remove(&route) {
-                queue.retain(|job| job.id() != id);
-                // (re)insert the queue to the router
-                jobs.insert(route, queue).expect("route should be valid");
-
-                return true;
-            }
-        }
-
-        false
-    }
-
     /// Add an exception to the domain
     pub fn exception(self, route: &'static str, exception: Exception) -> Self {
         let Self { mut exceptions, .. } = self;
