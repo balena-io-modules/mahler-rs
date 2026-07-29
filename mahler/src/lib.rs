@@ -358,6 +358,57 @@
 //! method. Failing to do this will result on an error during planning.
 //! </div>
 //!
+//! ## Hooks
+//!
+//! A task [Handler](`task::Handler`) can also be registered as a hook with a [Worker](`worker::Worker`).
+//! Hooks are registered as `none` jobs in the worker domain for the top level route (`""`).
+//! All registered hooks are evaluated in registration order by
+//! [find_workflow](`worker::Worker::find_workflow`) after a plan has been found, and appended to
+//! the workflow if applicable (that is, if their condition clears). Note that this means that
+//! failure to find a plan will also skip hooks. This is by design to prevent a system in an
+//! unexpected state from being tampered with by a hook being triggered.
+//!
+//! A compound task can also be used as a hook.
+//!
+//! ```rust
+//! use mahler::extract::View;
+//! use mahler::state::State;
+//! use mahler::worker::{Worker, Uninitialized};
+//! use mahler::task::{IO, with_io, enforce};
+//!
+//! #[derive(State)]
+//! struct MyState {
+//!     value: i32,
+//!     #[mahler(internal)]
+//!     needs_reboot: bool,
+//!     #[mahler(internal)]
+//!     needs_sync: bool,
+//! }
+//!
+//! fn reboot(mut state: View<MyState>) -> IO<MyState> {
+//!     enforce!(state.needs_reboot);
+//!     // clear the trigger so the hook only runs on this apply
+//!     state.needs_reboot = false;
+//!
+//!     with_io(state, move |state| async {
+//!         todo!("trigger a system reboot")
+//!     })
+//! }
+//!
+//! fn sync_state(mut state: View<MyState>) -> IO<MyState> {
+//!     enforce!(state.needs_sync);
+//!     state.needs_sync = false;
+//!
+//!     with_io(state, move |state| async {
+//!         todo!("sync state with a backend service")
+//!     })
+//! }
+//!
+//! let worker: Worker<MyState, Uninitialized> = Worker::new()
+//!     .hook(reboot)      // runs first
+//!     .hook(sync_state); // runs last
+//! ```
+//!
 //! # Error handling
 //!
 //! All possible errors by Mahler operations are defined by the [ErrorKind](`error::ErrorKind`)
@@ -392,11 +443,16 @@
 //!
 //! # Testing
 //!
-//! The [find_workflow](`worker::Worker::find_workflow`) and [run_task](`worker::Worker::run_task`)
-//! methods of [Worker](`worker::Worker`) can also be used for respectively testing the configuration of the
-//! workerby comparing the generated plans against some expectations and implementation of tasks.
+//! The [Worker](`worker::Worker`) exposed methods can also be useful in testing
 //!
-//! The library exposes the following workflow types and macros for this purpose
+//! - [find_plan](`worker::Worker::find_plan`) returns a plan to the target and can be used to
+//!   compare against an expected workflow.
+//! - [find_workflow](`worker::Worker::find_workflow`) works as `find_plan`, but also includes post
+//!   workflow hooks defined by the worker.
+//! - [run_task](`worker::Worker::run_task`) can be used to test the implementation of a specific
+//!   task when applied to a state.
+//!
+//! The library also exposes the following workflow types and macros for workflow validation
 //!
 //! - [Dag](`struct@dag::Dag`) an DAG implementation used internally by mahler.
 //! - [dag](`dag::dag!`) a declarative macro to combine DAGs into branches

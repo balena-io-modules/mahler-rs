@@ -108,7 +108,7 @@ pub struct Uninitialized {
     domain: Domain,
     sensors: SensorRouter,
     resources: Resources,
-    cleanup_hook: Option<TaskId>,
+    hooks: Vec<TaskId>,
 }
 
 /// Initialized worker state
@@ -120,7 +120,7 @@ pub struct Ready {
     domain: Domain,
     system: System,
     sensor_router: SensorRouter,
-    cleanup_hook: Option<TaskId>,
+    hooks: Vec<TaskId>,
     worker_id: u64,
 }
 
@@ -367,7 +367,7 @@ impl<O> Worker<O, Uninitialized> {
             domain: Domain::new(),
             resources: Resources::new(),
             sensors: SensorRouter::new(),
-            cleanup_hook: None,
+            hooks: Vec::new(),
         })
     }
 }
@@ -456,28 +456,24 @@ impl<O> Worker<O, Uninitialized> {
         self
     }
 
-    /// Register a post-workflow (cleanup) hook.
+    /// Register a post-workflow hook.
     ///
     /// The handler is registered as a [`none`](`crate::job::none`) job for the default route (`""`),
-    /// meaning it is not considered during planning. Instead, [`find_workflow`](Worker::find_workflow)
-    /// appends the task at the end of every successfully planned workflow.
+    /// meaning it is not considered during planning. Instead, hooks are planned to run at the
+    /// end of every apply: [`find_workflow`](Worker::find_workflow) (and by
+    /// extension [`seek_target`](Worker::seek_target)) appends each pending hook after all planned
+    /// tasks, even when the main workflow is empty.
     ///
-    /// During planning, the handler is evaluated against the **post-workflow state**
-    /// (the state after all main workflow tasks have been simulated) and receives the
-    /// **target state** given to [find_workflow](`Worker::find_workflow`).
+    /// During planning, each hook is evaluated once in registration order against the **post-workflow state**.
     ///
-    /// If the handler's condition is not met
-    /// ([`ConditionNotMet`](`crate::error::ErrorKind::ConditionNotMet`)), the task
-    /// is silently skipped.
+    /// If a hook's condition is not met
+    /// ([`ConditionNotMet`](`crate::error::ErrorKind::ConditionNotMet`)), it is silently
+    /// skipped; other hooks are still evaluated.
     ///
-    /// Only one cleanup task may be registered. Calling this method again
-    /// replaces the previous one.
-    ///
-    /// Note: this task is only appended by [`find_workflow`](Worker::find_workflow)
-    /// (and by extension [`seek_target`](Worker::seek_target)).
-    /// [`run_task`](Worker::run_task) does not include it, since it executes a
-    /// specific task outside the normal planning cycle.
-    ///
+    /// Each hook is evaluated only once per apply. A hook whose pure state effect clears its
+    /// own trigger condition (as `reboot` does below) runs only on the apply where the trigger
+    /// is pending; a hook whose condition still holds after its state changes is planned again
+    /// on every subsequent apply, which is valid if the hook is meant to run on every apply.
     ///
     /// # Example
     ///
@@ -490,7 +486,20 @@ impl<O> Worker<O, Uninitialized> {
     /// #[derive(State)]
     /// struct MyState {
     ///     value: i32,
+    ///     #[mahler(internal)]
+    ///     needs_reboot: bool,
+    ///     #[mahler(internal)]
     ///     needs_sync: bool,
+    /// }
+    ///
+    /// fn reboot(mut state: View<MyState>) -> IO<MyState> {
+    ///     enforce!(state.needs_reboot);
+    ///     // clear the trigger so the hook only runs on this apply
+    ///     state.needs_reboot = false;
+    ///
+    ///     with_io(state, move |state| async {
+    ///         todo!("trigger a system reboot")
+    ///     })
     /// }
     ///
     /// fn sync_state(mut state: View<MyState>) -> IO<MyState> {
@@ -498,16 +507,17 @@ impl<O> Worker<O, Uninitialized> {
     ///     state.needs_sync = false;
     ///
     ///     with_io(state, move |state| async {
-    ///         todo!("perform state cleanup tasks")
+    ///         todo!("sync state with a backend service")
     ///     })
     /// }
     ///
     /// let worker: Worker<MyState, Uninitialized> = Worker::new()
-    ///     .with_cleanup(sync_state);
+    ///     .hook(reboot)      // runs first
+    ///     .hook(sync_state); // runs last
     /// ```
     ///
     /// <div class="warning">
-    /// The post-workflow hook is registered to the default route, meaning all extractors for the handler
+    /// Hooks are registered to the default route, meaning all extractors for the handler
     /// must use the top level state model.
     /// </div>
     ///
@@ -527,35 +537,29 @@ impl<O> Worker<O, Uninitialized> {
     ///
     /// // registering this as a post-workflow hook will fail when trying
     /// // to deserialize MyState into a Service
-    /// fn bad_cleanup(mut service: View<Service>) -> IO<MyState> {
+    /// fn bad_hook(mut service: View<Service>) -> IO<MyState> {
     ///     todo!()
     /// }
     ///
     /// let worker: Worker<MyState, Uninitialized> = Worker::new()
-    ///     .with_cleanup(bad_cleanup);
+    ///     .hook(bad_hook);
     /// ```
-    pub fn with_cleanup<H, T, U, I>(mut self, handler: H) -> Self
+    pub fn hook<H, T, U, I>(mut self, handler: H) -> Self
     where
         H: crate::task::Handler<T, U, I>,
         I: 'static,
     {
         let Uninitialized {
-            ref mut cleanup_hook,
+            ref mut hooks,
             ref mut domain,
             ..
         } = self.inner;
 
-        let job = crate::job::none(handler).with_description(|| "clean-up");
+        let job = crate::job::none(handler);
+        hooks.retain(|id| *id != job.id());
 
-        // remove any old jobs from the domain
-        if let Some(oldjob) = cleanup_hook.replace(job.id()) {
-            domain.remove_job(oldjob);
-        }
-
-        // also remove any other references to the job in the domain
-        domain.remove_job(job.id());
-
-        // finally add the new job to the domain at the default route
+        // add the job to the domain at the default route
+        hooks.push(job.id());
         domain.insert_job("", job);
 
         self
@@ -677,7 +681,7 @@ impl<O> Worker<O, Uninitialized> {
             domain,
             resources,
             sensors,
-            cleanup_hook,
+            hooks,
         } = self.inner;
 
         // Create a new system with an initial state and resources
@@ -693,7 +697,7 @@ impl<O> Worker<O, Uninitialized> {
             domain,
             system,
             sensor_router: sensors,
-            cleanup_hook,
+            hooks,
             worker_id,
         }))
     }
@@ -760,6 +764,25 @@ impl<O: State> FindWorkflow<O> for Result<Worker<O, Ready>> {
     }
 }
 
+/// Utility trait to allow chaining operations from a workflow created
+/// by calling `initial_state`
+pub trait FindPlan<O: State> {
+    fn find_plan<T>(self, target: T) -> Result<(Worker<O, Ready>, Option<Workflow>)>
+    where
+        T: Borrow<O::Target>;
+}
+
+impl<O: State> FindPlan<O> for Result<Worker<O, Ready>> {
+    fn find_plan<T>(self, target: T) -> Result<(Worker<O, Ready>, Option<Workflow>)>
+    where
+        T: Borrow<O::Target>,
+    {
+        let worker = self?;
+        let workflow = worker.find_plan(target)?;
+        Ok((worker, workflow))
+    }
+}
+
 // -- Worker is ready to receive a target state
 
 impl<O: State> Worker<O, Ready> {
@@ -815,9 +838,13 @@ impl<O: State> Worker<O, Ready> {
         }
     }
 
-    /// Find a workflow to reach a target state
+    /// Find a plan to reach a target state
     ///
-    /// Returns a workflow that can be executed with [`run_workflow`](Self::run_workflow).
+    /// This is a convenience method that returns a workflow that can be executed with [`run_workflow`](Self::run_workflow).
+    ///
+    /// The returned workflow does not include any [hooks](`Worker::hook`).
+    /// Use [`find_workflow`](Worker::find_workflow) to plan hooks as
+    /// part of the workflow.
     ///
     /// # Return values
     ///
@@ -832,6 +859,59 @@ impl<O: State> Worker<O, Ready> {
     /// that doesn't make progress toward the target.
     ///
     /// See [`ErrorKind`](`crate::error::ErrorKind`) for other possible error conditions.
+    pub fn find_plan<T>(&self, tgt: T) -> Result<Option<Workflow>>
+    where
+        T: Borrow<O::Target>,
+    {
+        let tgt = serde_json::to_value(tgt.borrow()).map_err(Error::from)?;
+
+        let Ready {
+            domain,
+            system,
+            worker_id,
+            ..
+        } = &self.inner;
+
+        let mut system = system.clone();
+        let mut workflow = planner::find_workflow_to_target::<O>(domain, &mut system, &tgt)?;
+
+        // Attach worker metadata
+        if let Some(w) = workflow.as_mut() {
+            w.worker_id = *worker_id;
+        }
+
+        Ok(workflow)
+    }
+
+    /// Search for the full workflow to apply for the given target: the convergence plan to get
+    /// the system from the current state to the target, plus any pending [hooks](`Worker::hook`)
+    /// appended at the end
+    ///
+    /// This is the plan executed by [`seek_target`](Worker::seek_target). It behaves like
+    /// [`find_plan`](Worker::find_workflow), except that registered hooks
+    /// are evaluated in registration order against the simulated post-workflow state and
+    /// concatenated sequentially after all planned tasks. Hooks are planned even when the main
+    /// workflow is empty, so a pending hook trigger (e.g. from a previous interrupted run) still
+    /// results in a non-empty workflow.
+    ///
+    /// Since hooks are planned against the *simulated* post-workflow state, a hook whose
+    /// condition no longer holds when it actually executes (e.g. because execution aborted
+    /// midway) will fail at runtime with
+    /// [`ConditionNotMet`](`crate::error::ErrorKind::ConditionNotMet`), and be planned again
+    /// on the next apply if its trigger is still pending.
+    ///
+    /// Returns a workflow that can be executed with [`run_workflow`](Self::run_workflow).
+    ///
+    /// # Return values
+    ///
+    /// - `Ok(Some(workflow))` - A valid workflow was found
+    /// - `Ok(None)` - No combination of registered jobs can reach the target state.
+    ///   No hooks are planned in this case.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if planning fails, with the same error conditions as
+    /// [`find_workflow`](Worker::find_workflow).
     pub fn find_workflow<T>(&self, tgt: T) -> Result<Option<Workflow>>
     where
         T: Borrow<O::Target>,
@@ -842,32 +922,69 @@ impl<O: State> Worker<O, Ready> {
             domain,
             system,
             worker_id,
-            cleanup_hook,
             ..
         } = &self.inner;
 
         let mut system = system.clone();
         let mut workflow = planner::find_workflow_to_target::<O>(domain, &mut system, &tgt)?;
 
-        // Attach worker metadata and after-workflow task
+        // Attach worker metadata and pending hooks
         if let Some(w) = workflow.as_mut() {
             w.worker_id = *worker_id;
 
-            if !w.is_empty() {
-                if let Some(job) = cleanup_hook.and_then(|id| domain.find_job("", id)) {
-                    let task = job.new_task(Context::new().with_target(tgt).with_path(""));
-                    let Workflow { dag: c_dag, .. } =
-                        match planner::find_workflow_for_task(task, domain, &system) {
-                            Ok(plan) => plan,
-                            Err(e) if e.kind() == ErrorKind::ConditionNotMet => Workflow::default(),
-                            Err(e) => return Err(e),
-                        };
+            // concatenate pending hooks at the end of the plan
+            let Workflow { dag: h_dag, .. } = self.find_hooks(&mut system, &tgt)?;
+            let w_dag = std::mem::take(&mut w.dag);
+            w.dag = w_dag.concat(h_dag);
+        }
 
-                    // concatenate the after-workflow task at the end of the plan
-                    let w_dag = std::mem::take(&mut w.dag);
-                    w.dag = w_dag.concat(c_dag);
-                }
+        Ok(workflow)
+    }
+
+    /// Plan registered hooks in registration order against the given state
+    ///
+    /// Each hook is evaluated once against `system`, which accumulates the simulated
+    /// changes of every planned hook. Hooks whose condition is not met are skipped.
+    ///
+    /// The returned workflow may be empty if no hook conditions are pending.
+    fn find_hooks(&self, system: &mut System, tgt: &Value) -> Result<Workflow> {
+        let Ready {
+            domain,
+            hooks,
+            worker_id,
+            ..
+        } = &self.inner;
+
+        let mut workflow = Workflow {
+            worker_id: *worker_id,
+            ..Default::default()
+        };
+
+        for hook_id in hooks {
+            let job = domain
+                .find_job("", *hook_id)
+                .ok_or(Error::internal("hook job not found in worker domain"))?;
+
+            let task = job.new_task(Context::new().with_target(tgt.clone()).with_path(""));
+
+            let (hook_wf, patch) = match planner::find_workflow_for_task(task, domain, system) {
+                Ok(wf) => wf,
+                // skip the hook if its condition is not met
+                Err(e) if e.kind() == ErrorKind::ConditionNotMet => continue,
+                Err(e) => return Err(e),
+            };
+
+            if hook_wf.is_empty() {
+                continue;
             }
+
+            // apply hook changes
+            system.patch(&patch)?;
+
+            // concatenate the hook at the end of the plan
+            let Workflow { dag: h_dag, .. } = hook_wf;
+            let w_dag = std::mem::take(&mut workflow.dag);
+            workflow.dag = w_dag.concat(h_dag);
         }
 
         Ok(workflow)
@@ -902,10 +1019,17 @@ impl<O: State> Worker<O, Ready> {
         workflow_stream(self, workflow)
     }
 
-    /// Trigger system changes by providing a new target state and interrupt signal
+    /// Trigger system changes by providing a new target state
     ///
-    /// This is a convenience method that looks for a workflow for the given state and
-    /// runs it waiting for the return status.
+    /// This is a convenience method that looks for a workflow for the given state via
+    /// [`find_workflow`](Worker::find_workflow) and runs it waiting
+    /// for the return status.
+    ///
+    /// Any pending [hooks](`Worker::hook`) are planned at the end of the workflow, even
+    /// when there are no other changes to perform, so a pending hook trigger (e.g. from a
+    /// previous interrupted run) fires on a no-op apply. If the workflow is interrupted before
+    /// reaching the hooks, they will be planned again on the next apply as long as their
+    /// trigger condition still holds.
     ///
     /// It returns the updated state and the status after running the workflow.
     ///
@@ -1068,8 +1192,8 @@ impl<O: State> Worker<O, Ready> {
         info!("searching workflow");
         let now = Instant::now();
 
-        // look for a workflow for the task
-        let mut workflow = match planner::find_workflow_for_task(task, domain, system) {
+        // look for a workflow for the task, the simulated state is discarded
+        let (mut workflow, _) = match planner::find_workflow_for_task(task, domain, system) {
             Ok(w) => w,
             Err(e) => {
                 warn!(time = ?now.elapsed(), "workflow not found");
@@ -2015,7 +2139,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stream_continues_reporting_sensors_cleanup_hookcomplete() {
+    async fn test_stream_continues_reporting_sensors_after_workflow_completes() {
         use std::pin::pin;
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -2238,10 +2362,10 @@ mod tests {
         vec![plus_one.with_target(*tgt), plus_one.with_target(*tgt)]
     }
 
-    // ==================== Cleanup Tests ====================
+    // ==================== Hook Tests ====================
 
     #[test]
-    fn test_cleanup_hook_appended_to_workflow() {
+    fn test_hooks_appended_in_registration_order() {
         use crate::dag::{seq, Dag};
 
         init();
@@ -2250,6 +2374,7 @@ mod tests {
         struct MyState {
             value: i32,
             needs_cleanup: bool,
+            needs_sync: bool,
         }
 
         impl State for MyState {
@@ -2263,19 +2388,31 @@ mod tests {
             state
         }
 
-        fn do_cleanup(mut state: View<MyState>) -> View<MyState> {
-            if state.needs_cleanup {
-                state.needs_cleanup = false;
+        fn do_cleanup(mut state: View<MyState>) -> Option<View<MyState>> {
+            if !state.needs_cleanup {
+                // Return None to signal ConditionNotMet
+                return None;
             }
-            state
+            state.needs_cleanup = false;
+            Some(state)
+        }
+
+        fn do_sync(mut state: View<MyState>) -> Option<View<MyState>> {
+            if !state.needs_sync {
+                return None;
+            }
+            state.needs_sync = false;
+            Some(state)
         }
 
         let worker = Worker::new()
             .job("", update(increment))
-            .with_cleanup(do_cleanup)
+            .hook(do_cleanup)
+            .hook(do_sync)
             .initial_state(MyState {
                 value: 0,
                 needs_cleanup: true,
+                needs_sync: true,
             })
             .unwrap();
 
@@ -2283,114 +2420,48 @@ mod tests {
             .find_workflow(MyState {
                 value: 2,
                 needs_cleanup: true,
+                needs_sync: true,
             })
             .unwrap()
             .unwrap();
 
-        // The after-workflow task should appear after the main workflow tasks
+        // The hooks should appear after the main workflow tasks, in registration order
         let expected: Dag<&str> = seq!(
-            "mahler::worker::tests::test_cleanup_hook_appended_to_workflow::increment()",
-            "mahler::worker::tests::test_cleanup_hook_appended_to_workflow::increment()",
-            "clean-up",
+            "mahler::worker::tests::test_hooks_appended_in_registration_order::increment()",
+            "mahler::worker::tests::test_hooks_appended_in_registration_order::increment()",
+            "mahler::worker::tests::test_hooks_appended_in_registration_order::do_cleanup()",
+            "mahler::worker::tests::test_hooks_appended_in_registration_order::do_sync()",
         );
 
         assert_eq!(workflow.to_string(), expected.to_string());
     }
 
     #[test]
-    fn test_cleanup_hook_skipped_when_condition_not_met() {
+    fn test_hook_skipped_when_condition_not_met() {
         init();
 
-        fn do_cleanup(mut counter: View<i32>) -> Option<View<i32>> {
+        // condition is never met for a positive counter
+        fn skipped_hook(mut counter: View<i32>) -> Option<View<i32>> {
+            if *counter >= 0 {
+                // Return None to signal ConditionNotMet
+                return None;
+            }
+            *counter = 0;
+            Some(counter)
+        }
+
+        fn reset(mut counter: View<i32>) -> Option<View<i32>> {
             if *counter > 0 {
                 *counter = 0;
                 return Some(counter);
             }
-            // Return None to signal ConditionNotMet
             None
         }
 
         let worker = Worker::new()
             .job("", update(plus_one))
-            .with_cleanup(do_cleanup)
-            .initial_state(0)
-            .unwrap();
-
-        let workflow = worker.find_workflow(2).unwrap().unwrap();
-
-        // The condition is met (counter > 0 after incrementing)
-        // so the after-workflow task should appear
-        let has_cleanup_hook = workflow
-            .to_string()
-            .lines()
-            .any(|line| line.trim().trim_start_matches("- ").ends_with("clean-up"));
-        assert!(
-            has_cleanup_hook,
-            "cleanup_hook task should appear: {}",
-            workflow,
-        );
-
-        // Now test when condition is NOT met.
-        // After decrementing from 2 to 0, the handler's condition (*counter > 0)
-        // is false, so it returns None and gets skipped.
-        fn decrement(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
-            if *counter > tgt {
-                *counter -= 1;
-            }
-            counter
-        }
-
-        let worker = Worker::new()
-            .job("", update(decrement))
-            .with_cleanup(do_cleanup)
-            .initial_state(2)
-            .unwrap();
-
-        let workflow = worker.find_workflow(0).unwrap().unwrap();
-
-        // After decrementing to 0, the handler's condition (*counter > 0) is false,
-        // so it should be skipped.
-        let has_cleanup_hook = workflow
-            .to_string()
-            .lines()
-            .any(|line| line.trim().trim_start_matches("- ").ends_with("clean-up"));
-        assert!(
-            !has_cleanup_hook,
-            "cleanup_hook task should not appear when condition is not met: {}",
-            workflow
-        );
-    }
-
-    #[test]
-    fn test_cleanup_hook_skipped_when_workflow_is_empty() {
-        init();
-
-        fn do_cleanup() {}
-
-        let worker = Worker::new()
-            .job("", update(plus_one))
-            .with_cleanup(do_cleanup)
-            .initial_state(2)
-            .unwrap();
-
-        let workflow = worker.find_workflow(2).unwrap().unwrap();
-        let has_cleanup_hook = workflow
-            .to_string()
-            .lines()
-            .any(|line| line.trim().trim_start_matches("- ").ends_with("clean-up"));
-        assert!(
-            !has_cleanup_hook,
-            "cleanup_hook should not appear if the target has already been reached: {}",
-            workflow
-        );
-    }
-
-    #[test]
-    fn test_no_cleanup_hook_when_not_configured() {
-        init();
-
-        let worker = Worker::new()
-            .job("", update(plus_one))
+            .hook(skipped_hook)
+            .hook(reset)
             .initial_state(0)
             .unwrap();
 
@@ -2398,18 +2469,138 @@ mod tests {
 
         let workflow_str = workflow.to_string();
         assert!(
-            !workflow_str.contains("clean-up"),
-            "no cleanup should appear: {workflow_str}",
+            !workflow_str.contains("skipped_hook"),
+            "hook with unmet condition should be skipped: {workflow_str}",
+        );
+        assert!(
+            workflow_str.contains("reset"),
+            "hook with met condition should still be planned: {workflow_str}",
         );
     }
 
     #[test]
-    fn test_no_cleanup_hook_when_no_plan_found() {
+    fn test_hook_that_does_not_clear_trigger_is_planned_on_every_apply() {
+        init();
+
+        // the condition is met and the hook state changes do not clear it,
+        // so the hook runs on every apply
+        fn every_apply_hook(counter: View<i32>) -> Option<View<i32>> {
+            if *counter > 0 {
+                return Some(counter);
+            }
+            None
+        }
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .hook(every_apply_hook)
+            .initial_state(1)
+            .unwrap();
+
+        // the hook is planned exactly once per apply, even on a no-op apply
+        let workflow = worker.find_workflow(1).unwrap().unwrap();
+        let workflow_str = workflow.to_string();
+        assert_eq!(
+            workflow_str.matches("every_apply_hook").count(),
+            1,
+            "hook should be planned exactly once per apply: {workflow_str}",
+        );
+
+        // a subsequent apply plans the hook again
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+        let workflow_str = workflow.to_string();
+        assert_eq!(
+            workflow_str.matches("every_apply_hook").count(),
+            1,
+            "hook should be planned again on the next apply: {workflow_str}",
+        );
+    }
+
+    #[test]
+    fn test_hooks_planned_when_workflow_is_empty() {
+        init();
+
+        fn reset(mut counter: View<i32>) -> Option<View<i32>> {
+            if *counter > 0 {
+                *counter = 0;
+                return Some(counter);
+            }
+            None
+        }
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .hook(reset)
+            .initial_state(2)
+            .unwrap();
+
+        // the target is already met, but the pending hook is still planned
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+        let workflow_str = workflow.to_string();
+        assert!(
+            workflow_str.contains("reset"),
+            "pending hook should be planned on an empty workflow: {workflow_str}",
+        );
+
+        // find_plan does not include hooks
+        let workflow = worker.find_plan(2).unwrap().unwrap();
+        assert!(workflow.is_empty());
+    }
+
+    #[test]
+    fn test_find_plan_does_not_include_hooks() {
+        init();
+
+        fn reset(mut counter: View<i32>) -> Option<View<i32>> {
+            if *counter > 0 {
+                *counter = 0;
+                return Some(counter);
+            }
+            None
+        }
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .hook(reset)
+            .initial_state(0)
+            .unwrap();
+
+        let workflow = worker.find_plan(2).unwrap().unwrap();
+
+        let workflow_str = workflow.to_string();
+        assert!(
+            !workflow_str.contains("reset"),
+            "find_workflow should not include hooks: {workflow_str}",
+        );
+    }
+
+    #[test]
+    fn test_no_hooks_when_not_configured() {
+        use crate::dag::{seq, Dag};
+
+        init();
+
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .initial_state(0)
+            .unwrap();
+
+        let workflow = worker.find_workflow(2).unwrap().unwrap();
+
+        let expected: Dag<&str> = seq!(
+            "mahler::worker::tests::plus_one()",
+            "mahler::worker::tests::plus_one()",
+        );
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_no_hooks_when_no_plan_found() {
         init();
 
         fn noop() {}
 
-        let worker: Worker<i32, _> = Worker::new().with_cleanup(noop).initial_state(0).unwrap();
+        let worker: Worker<i32, _> = Worker::new().hook(noop).initial_state(0).unwrap();
 
         // No jobs registered, so no workflow can reach the target
         let workflow = worker.find_workflow(1).unwrap();
@@ -2417,21 +2608,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cleanup_hook_executed() {
-        use std::pin::pin;
-
+    async fn test_hooks_executed_in_registration_order() {
         init();
 
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-        struct Counter {
+        struct MyState {
             value: i32,
+            needs_cleanup: bool,
+            needs_sync: bool,
         }
 
-        impl State for Counter {
+        impl State for MyState {
             type Target = Self;
         }
 
-        fn increment(mut state: View<Counter>, Target(tgt): Target<Counter>) -> IO<Counter> {
+        fn increment(mut state: View<MyState>, Target(tgt): Target<MyState>) -> IO<MyState> {
             if state.value < tgt.value {
                 state.value += 1;
             }
@@ -2439,38 +2630,78 @@ mod tests {
             with_io(state, |state| async { Ok(state) })
         }
 
-        // Cleanup always bumps value by 100 to make its execution observable
-        fn mark_clean(mut state: View<Counter>) -> View<Counter> {
+        fn add_hundred(mut state: View<MyState>) -> Option<View<MyState>> {
+            if !state.needs_cleanup {
+                return None;
+            }
+            state.needs_cleanup = false;
             state.value += 100;
-            state
+            Some(state)
+        }
+
+        fn double(mut state: View<MyState>) -> Option<View<MyState>> {
+            if !state.needs_sync {
+                return None;
+            }
+            state.needs_sync = false;
+            state.value *= 2;
+            Some(state)
         }
 
         let worker = Worker::new()
             .job("", update(increment))
-            .with_cleanup(mark_clean)
-            .initial_state(Counter { value: 0 })
+            .hook(add_hundred)
+            .hook(double)
+            .initial_state(MyState {
+                value: 0,
+                needs_cleanup: true,
+                needs_sync: true,
+            })
             .unwrap();
 
-        let workflow = worker.find_workflow(Counter { value: 2 }).unwrap().unwrap();
+        let (state, status) = worker
+            .seek_target(MyState {
+                value: 2,
+                needs_cleanup: true,
+                needs_sync: true,
+            })
+            .await
+            .unwrap();
 
-        let mut state = worker.state().unwrap();
-        let mut status = WorkflowStatus::Success;
-        {
-            let mut stream = pin!(worker.run_workflow(workflow));
-            while let Some(event) = stream.next().await {
-                match event.unwrap() {
-                    WorkerEvent::StateUpdated(new_state) => state = new_state,
-                    WorkerEvent::WorkflowFinished(s) => {
-                        status = s;
-                        break;
-                    }
-                }
+        assert_eq!(status, SeekStatus::Success);
+        // hooks run after the main tasks and in registration order: (2 + 100) * 2
+        assert_eq!(
+            state,
+            MyState {
+                value: 204,
+                needs_cleanup: false,
+                needs_sync: false,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hooks_run_on_noop_apply() {
+        init();
+
+        fn reset(mut counter: View<i32>) -> Option<View<i32>> {
+            if *counter > 0 {
+                *counter = 0;
+                return Some(counter);
+            }
+            None
         }
 
-        assert_eq!(status, WorkflowStatus::Success);
-        // The cleanup added 100 to the value after incrementing to 2
-        assert_eq!(state, Counter { value: 102 });
+        let worker = Worker::new()
+            .job("", update(plus_one))
+            .hook(reset)
+            .initial_state(2)
+            .unwrap();
+
+        // the target is already met, but the pending hook still runs
+        let (state, status) = worker.seek_target(2).await.unwrap();
+        assert_eq!(status, SeekStatus::Success);
+        assert_eq!(state, 0);
     }
 
     #[tokio::test]
