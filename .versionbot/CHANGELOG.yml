@@ -1,4 +1,35 @@
 - commits:
+    - subject: Add support for post workflow hooks
+      hash: 7f38f8c79bb67d07ffab6add63bfe025102e0b76
+      body: >
+        This replaces the single `cleanup` hook allowing to define multiple
+
+        hooks. Hooks don't depend on changes on the target state and will fire
+        every
+
+        time their condition applies, and included in the workflow returned by
+        `find_workflow`
+
+        after the plan to reach the target state. Hooks will be appended every
+        time a plan is
+
+        found, even if the plan is empty, but will be skipped if a plan cannot
+
+        be found.
+
+
+        Worker also has a new `find_plan` method that looks for a plan to the
+
+        target state excluding hooks.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.26.0
+  title: ""
+  date: 2026-07-29T08:04:00.761Z
+- commits:
     - subject: Fix publishing issue
       hash: 520ca0f190dfb3eb6a0b0b243a535eec7c505258
       body: |
