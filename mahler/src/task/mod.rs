@@ -354,8 +354,8 @@ impl Task {
 
     /// Set a description for the task
     ///
-    /// This is for internal use only, task descriptions must be defined using
-    /// [Job::with_description](`crate::job::Job::with_description`)
+    /// Task descriptions are set via [Job::with_description](`crate::job::Job::with_description`)
+    /// or [Handler::with_description](`crate::task::Handler::with_description`)
     pub(crate) fn with_description<D, T>(self, description: D) -> Self
     where
         D: Description<T>,
