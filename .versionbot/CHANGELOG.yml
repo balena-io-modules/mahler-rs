@@ -1,4 +1,26 @@
 - commits:
+    - subject: Add support for hook descriptions
+      hash: 8f9712f73b10b01dafe7fb6f2b0578629d110a97
+      body: >
+        `Worker::hook` receives a handler directly instead of a Job. As such, it
+
+        provided no way to define a description for the hook. This now adds
+
+        support for setting task description directly from a handler and updates
+
+        the `Worker::hook` method to receive anything implementing `IntoHook`,
+
+        allowing to keep backwards compatibility but also receive a task
+        directly.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.26.1
+  title: ""
+  date: 2026-08-21T19:08:00.266Z
+- commits:
     - subject: Add support for post workflow hooks
       hash: 7f38f8c79bb67d07ffab6add63bfe025102e0b76
       body: >
