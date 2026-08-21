@@ -2,6 +2,7 @@ use super::effect::Effect;
 use super::{Action, Method, Task};
 use crate::runtime::Id;
 
+use crate::description::Description;
 use crate::error::Error;
 use crate::json::Patch;
 use crate::runtime::{Channel, Context, FromSystem, System};
@@ -70,6 +71,23 @@ pub trait Handler<T, O, I = O>: Clone + Sync + Send + 'static {
     /// ```
     fn with_arg(self, key: impl AsRef<str>, value: impl Into<String>) -> Task {
         self.into_task().with_arg(key, value)
+    }
+
+    /// Create a task from the handler with a given description
+    ///
+    /// ```rust
+    /// use mahler::task::Handler;
+    ///
+    /// fn plus_one() {}
+    ///
+    /// // create a task with a human readable description
+    /// let task = plus_one.with_description(|| "+1");
+    /// ```
+    fn with_description<D, T1>(self, description: D) -> Task
+    where
+        D: Description<T1>,
+    {
+        self.into_task().with_description(description)
     }
 }
 

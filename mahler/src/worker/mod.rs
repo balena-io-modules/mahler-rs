@@ -12,7 +12,7 @@ use tracing::{debug, info, trace, warn, Instrument, Span};
 use crate::error::{AggregateError, Error, ErrorKind};
 use crate::exception::Exception;
 use crate::job::Job;
-use crate::json::{Operation, Patch, PatchOperation, ReplaceOperation, Value};
+use crate::json::{Operation, OperationMatcher, Patch, PatchOperation, ReplaceOperation, Value};
 use crate::result::Result;
 use crate::runtime::{Context, Resources, System};
 use crate::sensor::{Sensor, SensorBuilder, SensorRouter, SensorStream};
@@ -32,6 +32,46 @@ use domain::Domain;
 use workflow::WorkflowStatus as InnerWorkflowStatus;
 
 pub use workflow::{Ignored, Workflow};
+
+/// Private supertrait to prevent [`IntoHook`] implementations outside the crate
+mod sealed {
+    pub trait Sealed<M> {}
+}
+
+/// Types that can be registered as a post-workflow [hook](`Worker::hook`)
+///
+/// This is implemented for any [Handler](`crate::task::Handler`), and for a
+/// [Task](`crate::task::Task`), which allows assigning the hook a
+/// [description](`crate::job::Description`).
+pub trait IntoHook<M>: sealed::Sealed<M> {
+    /// Create the [`none`](`crate::job::none`) job to register as a hook
+    fn into_hook(self) -> Job;
+}
+
+impl<H, T, U, I> sealed::Sealed<(T, U, I)> for H
+where
+    H: crate::task::Handler<T, U, I>,
+    I: 'static,
+{
+}
+
+impl<H, T, U, I> IntoHook<(T, U, I)> for H
+where
+    H: crate::task::Handler<T, U, I>,
+    I: 'static,
+{
+    fn into_hook(self) -> Job {
+        crate::job::none(self)
+    }
+}
+
+impl sealed::Sealed<()> for Task {}
+
+impl IntoHook<()> for Task {
+    fn into_hook(self) -> Job {
+        Job::new(self, OperationMatcher::None)
+    }
+}
 
 /// Events emitted during workflow execution
 ///
@@ -458,6 +498,9 @@ impl<O> Worker<O, Uninitialized> {
 
     /// Register a post-workflow hook.
     ///
+    /// Accepts either a handler, or a [Task](`crate::task::Task`), which allows assigning the
+    /// hook a human readable [description](`crate::job::Description`). See [`IntoHook`].
+    ///
     /// The handler is registered as a [`none`](`crate::job::none`) job for the default route (`""`),
     /// meaning it is not considered during planning. Instead, hooks are planned to run at the
     /// end of every apply: [`find_workflow`](Worker::find_workflow) (and by
@@ -481,7 +524,7 @@ impl<O> Worker<O, Uninitialized> {
     /// use mahler::extract::View;
     /// use mahler::state::State;
     /// use mahler::worker::{Worker, Uninitialized};
-    /// use mahler::task::{IO, with_io, enforce};
+    /// use mahler::task::{Handler, IO, with_io, enforce};
     ///
     /// #[derive(State)]
     /// struct MyState {
@@ -512,8 +555,10 @@ impl<O> Worker<O, Uninitialized> {
     /// }
     ///
     /// let worker: Worker<MyState, Uninitialized> = Worker::new()
-    ///     .hook(reboot)      // runs first
-    ///     .hook(sync_state); // runs last
+    ///     // runs first
+    ///     .hook(reboot)
+    ///     // runs last, with a description
+    ///     .hook(sync_state.with_description(|| "sync state with backend"));
     /// ```
     ///
     /// <div class="warning">
@@ -544,21 +589,26 @@ impl<O> Worker<O, Uninitialized> {
     /// let worker: Worker<MyState, Uninitialized> = Worker::new()
     ///     .hook(bad_hook);
     /// ```
-    pub fn hook<H, T, U, I>(mut self, handler: H) -> Self
+    pub fn hook<K, M>(mut self, hook: K) -> Self
     where
-        H: crate::task::Handler<T, U, I>,
-        I: 'static,
+        K: IntoHook<M>,
     {
+        let job = hook.into_hook();
+
+        // sanity check to avoid regressions
+        debug_assert!(
+            job.operation() == &OperationMatcher::None,
+            "hooks can only be defined for `none` operations"
+        );
+
         let Uninitialized {
             ref mut hooks,
             ref mut domain,
             ..
         } = self.inner;
 
-        let job = crate::job::none(handler);
+        // re-registering a hook only keeps its last position
         hooks.retain(|id| *id != job.id());
-
-        // add the job to the domain at the default route
         hooks.push(job.id());
         domain.insert_job("", job);
 
@@ -2432,6 +2482,32 @@ mod tests {
             "mahler::worker::tests::test_hooks_appended_in_registration_order::do_cleanup()",
             "mahler::worker::tests::test_hooks_appended_in_registration_order::do_sync()",
         );
+
+        assert_eq!(workflow.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn test_hook_with_description() {
+        use crate::dag::{seq, Dag};
+
+        init();
+
+        fn do_sync(mut counter: View<i32>) -> Option<View<i32>> {
+            if *counter == 0 {
+                return None;
+            }
+            *counter = 0;
+            Some(counter)
+        }
+
+        let worker = Worker::new()
+            .hook(do_sync.with_description(|| "sync the counter"))
+            .initial_state(1)
+            .unwrap();
+
+        let workflow = worker.find_workflow(1).unwrap().unwrap();
+
+        let expected: Dag<&str> = seq!("sync the counter");
 
         assert_eq!(workflow.to_string(), expected.to_string());
     }
