@@ -959,41 +959,16 @@ mod tests {
     use super::*;
     use crate::sync::{channel, rw_lock};
 
-    fn is_item<T>(node: &Arc<RwLock<Node<T>>>) -> bool {
-        if let Node::Item { .. } = &*node.read().unwrap() {
-            return true;
-        }
-        false
-    }
-
     #[test]
     fn test_empty_dag() {
         let dag: Dag<i32> = Dag::default();
-        assert!(dag.head.is_none());
+        assert!(dag.is_empty());
     }
 
     #[test]
     fn test_dag_from_list() {
-        let elements = vec![1, 2, 3, 4];
-        let dag = Dag::<i32>::seq(elements.clone());
-        let mut head = dag.head;
-
-        for &value in &elements {
-            assert!(head.is_some());
-            if let Some(head_rc) = head {
-                if let Node::Item {
-                    value: node_value,
-                    next,
-                } = &*head_rc.read().unwrap()
-                {
-                    assert_eq!(*node_value, value);
-                    head = next.clone();
-                } else {
-                    panic!("expected an item node");
-                }
-            }
-        }
-        assert!(head.is_none());
+        let dag = Dag::<i32>::seq(vec![1, 2, 3, 4]);
+        assert_eq!(dag.to_string(), "- 1\n- 2\n- 3\n- 4");
     }
 
     #[test]
@@ -1008,30 +983,15 @@ mod tests {
 
     #[test]
     fn test_dag_from_single_branch() {
+        // a dag from a single branch is just a list
         let dag: Dag<i32> = dag!(seq!(1, 2, 3));
-        assert!(dag.head.is_some());
-        // a dag from single branch is just a list
-        if let Some(head_rc) = dag.head {
-            let node = &*head_rc.read().unwrap();
-            assert!(matches!(node, Node::Item { value: 1, .. }));
-        }
+        assert_eq!(dag.to_string(), "- 1\n- 2\n- 3");
     }
 
     #[test]
     fn test_dag_construction() {
-        let dag: Dag<i32> = seq!(1, 2, 3, 4);
-
-        assert!(dag.head.is_some());
-        if let Some(head_rc) = dag.head {
-            let node = &*head_rc.read().unwrap();
-            assert!(matches!(node, Node::Item { value: 1, .. }));
-        }
-
-        assert!(dag.tail.is_some());
-        if let Some(tail_rc) = dag.tail {
-            let node = &*tail_rc.read().unwrap();
-            assert!(matches!(node, Node::Item { value: 4, .. }));
-        }
+        let dag: Dag<i32> = seq!(1) + par!(2, 3) + seq!(4);
+        assert_eq!(dag.to_string(), "- 1\n+ ~ - 2\n  ~ - 3\n- 4");
     }
 
     #[test]
@@ -1079,43 +1039,30 @@ mod tests {
     }
 
     #[test]
-    fn test_iterate_linear_graph() {
-        let elements = vec![1, 2, 3];
-        let dag = Dag::<i32>::seq(elements.clone());
+    fn test_visit_linear_graph() {
+        let dag = Dag::<i32>::seq(vec![1, 2, 3]);
 
-        // Collect the values in the order they are returned by the iterator
-        let mut result = Vec::new();
-
-        for node in dag.iter() {
-            let node_ref = node.read().unwrap();
-            match &*node_ref {
-                Node::Item { value, .. } => result.push(*value), // Collect the value
-                Node::Fork { .. } => panic!("unexpected fork node in a linear graph"),
-                Node::Join { .. } => panic!("unexpected join node in a linear graph"),
-            }
+        for value in 1..=3 {
+            assert!(dag.any(|v| *v == value), "{value} was not visited");
         }
-
-        // Ensure the order is correct
-        assert_eq!(result, elements);
+        assert!(dag.all(|v| (1..=3).contains(v)));
+        assert!(!dag.any(|v| *v == 4));
     }
 
     #[test]
-    fn test_iterate_forked_graph() {
+    fn test_visit_forked_graph() {
         let dag: Dag<i32> = seq!(1, 2)
             + dag!(
                 seq!(3) + dag!(seq!(4, 5), dag!(seq!(6), seq!(7)) + seq!(8)) + seq!(9),
                 seq!(10) + dag!(seq!(11), seq!(12)),
             )
             + seq!(13);
-        let elems: Vec<i32> = dag
-            .iter()
-            .filter(is_item)
-            .map(|node| match &*node.read().unwrap() {
-                Node::Item { value, .. } => *value,
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(elems, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+        // every value is reachable, including inside nested branches
+        for value in 1..=13 {
+            assert!(dag.any(|v| *v == value), "{value} was not visited");
+        }
+        assert!(dag.all(|v| (1..=13).contains(v)));
+        assert!(!dag.any(|v| *v == 14));
     }
 
     #[test]
