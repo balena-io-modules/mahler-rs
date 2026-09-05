@@ -3,98 +3,30 @@
 use async_trait::async_trait;
 use std::fmt;
 use std::ops::Add;
-use std::sync::{Arc, RwLock};
 
 use crate::error::AggregateError;
 use crate::sync::{Interrupt, Reader, Sender};
 
-type Link<T> = Option<Arc<RwLock<Node<T>>>>;
-
-/// DAG node type
-///
-/// A node in a DAG is a recursive data structure that
-/// can represent either a value, a fork in the graph,
-/// or a joining of paths.
-///
-/// For instance, the DAG below (reading from left to right)
-///
-/// ```text
-///         + - c - d - +
-/// a - b - +           + - g
-///         + - e - f - +
-/// ```
-///
-/// will contain 7 value nodes (a-g), one fork node (after b) and one join node
-/// (before g)
+/// A node in the graph
+#[derive(Clone, PartialEq, Eq)]
 enum Node<T> {
-    Item { value: T, next: Link<T> },
-    Fork { next: Vec<Link<T>> },
-    Join { next: Link<T> },
+    /// A single element
+    Item(T),
+
+    /// Branches that run concurrently and reconverge at this node
+    ///
+    /// Branches are never empty and there are always at least two of them.
+    /// [`Dag::new`] is the only constructor that establishes this.
+    Fork(Vec<Dag<T>>),
 }
-
-impl<T> Node<T> {
-    pub fn item(value: T, next: Link<T>) -> Self {
-        Node::Item { value, next }
-    }
-
-    pub fn join(next: Link<T>) -> Self {
-        Node::Join { next }
-    }
-
-    pub fn fork(next: Vec<Link<T>>) -> Self {
-        Node::Fork { next }
-    }
-
-    pub fn into_link(self) -> Link<T> {
-        Some(Arc::new(RwLock::new(self)))
-    }
-}
-
-struct Iter<T> {
-    stack: Vec<Link<T>>,
-    pending: Vec<usize>,
-}
-
-impl<T> Iterator for Iter<T> {
-    type Item = Arc<RwLock<Node<T>>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(link) = self.stack.pop() {
-            if let Some(node_rc) = link {
-                let node_ref = node_rc.read().unwrap();
-                match &*node_ref {
-                    Node::Item { next, .. } => {
-                        self.stack.push(next.clone());
-                        return Some(node_rc.clone());
-                    }
-                    Node::Fork { next } => {
-                        self.pending.push(next.len());
-                        for branch_head in next.iter().rev() {
-                            self.stack.push(branch_head.clone());
-                        }
-                        return Some(node_rc.clone());
-                    }
-                    Node::Join { next } => {
-                        if let Some(count) = self.pending.last_mut() {
-                            *count -= 1;
-                            if *count == 0 {
-                                self.pending.pop();
-                                self.stack.push(next.clone());
-                                return Some(node_rc.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-}
-
 /// Utility type to operate with Directed Acyclic Graphs (DAG)
 ///
 /// This type is exported as a testing utility, to allow review of generated workflows using
-/// automated tests.
+/// automated tests. It is also the type the planner builds and the runtime executes.
+///
+/// A `Dag` is built out of sequences and parallel branches, so it can represent any graph
+/// where every set of parallel branches reconverges at a single point. Graphs where branches
+/// reconverge at different points, e.g. `A -> C`, `A -> D` and `B -> D`, cannot be expressed.
 ///
 ///    ```rust
 /// use mahler::extract::{View, Target};
@@ -152,6 +84,12 @@ impl<T> Iterator for Iter<T> {
 /// // All DAGs can be concatenated
 /// let dag = dag + pr;
 /// ```
+///
+/// # Equality
+///
+/// Two DAGs are equal when they have the same shape and the same values in the same
+/// positions. Parallel branches are compared in order, so `par!(1, 2)` and `par!(2, 1)`
+/// are not equal even though both describe the same set of concurrent work.
 ///
 /// # String representation of a DAG
 ///
@@ -293,139 +231,20 @@ impl<T> Iterator for Iter<T> {
 ///         )
 ///     );
 /// ```
-pub struct Dag<T> {
-    head: Link<T>,
-    tail: Link<T>,
-}
-
-impl<T: Clone> Clone for Dag<T> {
-    /// Implements a deep clone of the DAG
-    ///
-    /// It creates full copy of the DAG structure and nodes, where each node is a clone of
-    /// the corresponding copy of the original DAG
-    fn clone(&self) -> Self {
-        fn deep_clone<T: Clone>(head: Link<T>) -> (Link<T>, Link<T>) {
-            if let Some(node_rc) = head {
-                let node_ref = node_rc.read().unwrap();
-                match &*node_ref {
-                    Node::Item { value, next } => {
-                        let (next, tail) = deep_clone(next.clone());
-                        let node = Node::Item {
-                            value: (*value).clone(),
-                            next,
-                        }
-                        .into_link();
-
-                        // use this node as the tail if there is no tail
-                        let tail = tail.or(node.clone());
-
-                        (node, tail)
-                    }
-                    Node::Fork { next } => {
-                        let mut heads: Vec<Link<T>> = Vec::new();
-                        let mut tails: Vec<Link<T>> = Vec::new();
-                        for branch in next {
-                            let (h, t) = deep_clone(branch.clone());
-                            heads.push(h);
-                            tails.push(t);
-                        }
-
-                        // use one of the tails to proceed with the recursion
-                        if let Some(tail) = tails.last() {
-                            // If the tail exists use its `next` property
-                            let (join, tail) = if let Some(tail_rc) = tail {
-                                let next = match &*tail_rc.read().unwrap() {
-                                    Node::Item { next, .. } => next.clone(),
-                                    Node::Join { next, .. } => next.clone(),
-                                    _ => unreachable!("tail cannot be a fork"),
-                                };
-
-                                // follow the next node of the tail to create the join node
-                                let (next, tail) = deep_clone(next);
-
-                                // create a join node and the tail of the dag
-                                let join = Node::Join { next }.into_link();
-                                let tail = tail.or(join.clone());
-                                (join, tail)
-                            } else {
-                                // if the tail is none, the join node was the last element
-                                // of the dag so we need to re-create it
-                                let join = Node::Join { next: None }.into_link();
-                                (join.clone(), join)
-                            };
-
-                            // modify all tails to point to the new join node
-                            for t_rc in tails.into_iter().flatten() {
-                                match &mut *t_rc.write().unwrap() {
-                                    Node::Item { ref mut next, .. } => *next = join.clone(),
-                                    Node::Join { ref mut next, .. } => *next = join.clone(),
-                                    _ => unreachable!("tail cannot be a fork"),
-                                }
-                            }
-
-                            // return the fork node
-                            (Node::Fork { next: heads }.into_link(), tail)
-                        } else {
-                            // the fork is empty
-                            (None, None)
-                        }
-                    }
-                    Node::Join { next } => {
-                        // break the recursion here, the next node will be used when cloning
-                        // the fork node
-                        (next.clone(), None)
-                    }
-                }
-            } else {
-                (None, None)
-            }
-        }
-
-        let (head, tail) = deep_clone(self.head.clone());
-        Self { head, tail }
-    }
-}
+#[derive(Clone, PartialEq, Eq)]
+pub struct Dag<T>(Vec<Node<T>>);
 
 impl<T> Default for Dag<T> {
     /// Create an empty DAG
     fn default() -> Self {
-        Dag {
-            head: None,
-            tail: None,
-        }
+        Dag(Vec::new())
     }
 }
-
-impl<T: PartialEq> PartialEq for Dag<T> {
-    fn eq(&self, other: &Self) -> bool {
-        for (left, rght) in self.iter().zip(other.iter()) {
-            if let (
-                Node::Item {
-                    value: left_value, ..
-                },
-                Node::Item {
-                    value: rght_value, ..
-                },
-            ) = (&*left.read().unwrap(), &*rght.read().unwrap())
-            {
-                if left_value != rght_value {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-impl<T: Eq> Eq for Dag<T> {}
 
 impl<T> From<T> for Dag<T> {
     /// Create a single element `Dag<T>` for any value of type `T`
     fn from(value: T) -> Self {
-        Dag::seq([value])
+        Dag(vec![Node::Item(value)])
     }
 }
 
@@ -449,48 +268,17 @@ impl<T> Dag<T> {
     /// assert_eq!(dag.to_string(), "+ ~ - 1\n    - 2\n    - 3\n  ~ - 4\n    - 5\n    - 6");
     /// ```
     pub fn new(branches: impl IntoIterator<Item = Dag<T>>) -> Dag<T> {
-        // Filter out any branches with an empty head node
         let mut branches: Vec<Dag<T>> = branches
             .into_iter()
-            .filter(|branch| branch.head.is_some())
+            .filter(|branch| !branch.is_empty())
             .collect();
 
-        // Return the single branch if only one remains
-        if branches.len() == 1 {
-            return branches.pop().unwrap();
+        // A single branch is just a sequence, there is nothing to run in parallel
+        if branches.len() <= 1 {
+            return branches.pop().unwrap_or_default();
         }
 
-        let mut next: Vec<Link<T>> = Vec::new();
-        let tail = Node::<T>::join(None).into_link();
-        for branch in branches {
-            // Add the head link to the fork list
-            next.push(branch.head);
-
-            debug_assert!(branch.tail.is_some());
-            // Link each branch tail to the join node
-            if let Some(tail_rc) = branch.tail {
-                match *tail_rc.write().unwrap() {
-                    Node::Item { ref mut next, .. } => {
-                        *next = tail.clone();
-                    }
-                    Node::Join { ref mut next } => {
-                        *next = tail.clone();
-                    }
-                    // The tail should never point to a fork
-                    Node::Fork { .. } => unreachable!(),
-                }
-            }
-        }
-
-        // Return an empty DAG if no branches remain
-        if next.is_empty() {
-            return Dag::default();
-        }
-
-        Dag {
-            head: Node::fork(next).into_link(),
-            tail,
-        }
+        Dag(vec![Node::Fork(branches)])
     }
 
     /// Create a linear DAG (a linked list) from a sequence of elements
@@ -509,26 +297,10 @@ impl<T> Dag<T> {
     /// assert_eq!(dag.to_string(), "- 1\n- 2\n- 3");
     /// ```
     pub fn seq(elems: impl IntoIterator<Item = impl Into<T>>) -> Dag<T> {
-        let mut iter = elems.into_iter();
-        let mut head: Link<T> = None;
-        let mut tail: Link<T> = None;
-
-        if let Some(value) = iter.next() {
-            head = Node::item(value.into(), None).into_link();
-            tail = head.clone();
-
-            for value in iter {
-                let new_node = Node::item(value.into(), None).into_link();
-                if let Some(tail_node) = tail {
-                    if let Node::Item { ref mut next, .. } = *tail_node.write().unwrap() {
-                        *next = new_node.clone();
-                    }
-                }
-                tail = new_node;
-            }
-        }
-
-        Dag { head, tail }
+        Dag(elems
+            .into_iter()
+            .map(|elem| Node::Item(elem.into()))
+            .collect())
     }
 
     /// Return `true` if the DAG is empty
@@ -541,66 +313,50 @@ impl<T> Dag<T> {
     /// assert!(dag.is_empty());
     /// ```
     pub fn is_empty(&self) -> bool {
-        self.tail.is_none()
+        self.0.is_empty()
     }
 
     /// Join two DAGs
-    pub fn concat(self, other: impl Into<Dag<T>>) -> Self {
-        let other = other.into();
-        if let Some(tail_node) = &self.tail {
-            match *tail_node.write().unwrap() {
-                Node::Item { ref mut next, .. } => {
-                    *next = other.head;
-                }
-                Node::Join { ref mut next } => {
-                    *next = other.head;
-                }
-                _ => unreachable!("tail cannot be a fork"),
-            }
-        } else {
-            // this dag is empty
-            return other;
-        }
-
-        Dag {
-            head: self.head,
-            tail: other.tail.or(self.tail),
-        }
-    }
-
-    /// Return an iterator over the DAG
     ///
-    /// This function is not public as not to expose the Dag internal implementation
-    /// details
-    fn iter(&self) -> Iter<T> {
-        Iter {
-            stack: vec![self.head.clone()],
-            pending: Vec::new(),
-        }
+    /// # Example
+    /// ```rust
+    /// use mahler::dag::Dag;
+    ///
+    /// let dag: Dag<i32> = Dag::seq([1, 2]).concat(Dag::seq([3]));
+    /// assert_eq!(dag.to_string(), "- 1\n- 2\n- 3");
+    /// ```
+    pub fn concat(mut self, other: impl Into<Dag<T>>) -> Self {
+        self.0.extend(other.into().0);
+        self
     }
 
     /// Return `true` if there is any node in the DAG that meets the given condition
     pub fn any(&self, condition: impl Fn(&T) -> bool) -> bool {
-        for node in self.iter() {
-            if let Node::Item { value, .. } = &*node.read().unwrap() {
-                if condition(value) {
-                    return true;
+        // Walk each sequence in turn, queueing branches to visit later
+        let mut pending: Vec<&Dag<T>> = Vec::new();
+        let mut current = self;
+        loop {
+            for node in &current.0 {
+                match node {
+                    Node::Item(value) => {
+                        if condition(value) {
+                            return true;
+                        }
+                    }
+                    Node::Fork(branches) => pending.extend(branches.iter()),
                 }
             }
+
+            match pending.pop() {
+                Some(next) => current = next,
+                None => return false,
+            }
         }
-        false
     }
 
     /// Return `true` if the given condition is met for every node in the DAG
     pub fn all(&self, condition: impl Fn(&T) -> bool) -> bool {
-        for node in self.iter() {
-            if let Node::Item { value, .. } = &*node.read().unwrap() {
-                if !condition(value) {
-                    return false;
-                }
-            }
-        }
-        true
+        !self.any(|value| !condition(value))
     }
 }
 
@@ -629,70 +385,42 @@ where
 /// ```
 impl<T: fmt::Display> fmt::Display for Dag<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fn fmt_node<T: fmt::Display>(
-            f: &mut fmt::Formatter<'_>,
-            node: &Node<T>,
-            indent: usize,
-            index: usize,
-            // stack storing (fork_index, is_last_branch) per active fork;
-            // pushed before entering a branch, popped by the Join at its end
-            branching: &mut Vec<(usize, bool)>,
-        ) -> fmt::Result {
-            let fmt_newline =
-                |f: &mut fmt::Formatter, level: usize, condition: bool| -> fmt::Result {
-                    if condition {
+        fmt_seq(f, self, 0)
+    }
+}
+
+/// Render one sequence of the DAG
+///
+/// `indent` is the nesting level, worth two spaces each.
+fn fmt_seq<T: fmt::Display>(
+    f: &mut fmt::Formatter<'_>,
+    dag: &Dag<T>,
+    indent: usize,
+) -> fmt::Result {
+    for (index, node) in dag.0.iter().enumerate() {
+        if index > 0 {
+            writeln!(f)?;
+            write!(f, "{}", "  ".repeat(indent))?;
+        }
+
+        match node {
+            Node::Item(value) => write!(f, "- {value}")?,
+            Node::Fork(branches) => {
+                write!(f, "+ ")?;
+                for (position, branch) in branches.iter().enumerate() {
+                    // The first branch continues on the line opened by `+`
+                    if position > 0 {
                         writeln!(f)?;
-                        write!(f, "{}", "  ".repeat(level))?;
+                        write!(f, "{}", "  ".repeat(indent + 1))?;
                     }
-                    Ok(())
-                };
-
-            match node {
-                Node::Item { value, next } => {
-                    fmt_newline(f, indent, index > 0)?;
-                    write!(f, "- {value}")?;
-
-                    if let Some(next_rc) = next {
-                        fmt_node(f, &*next_rc.read().unwrap(), indent, index + 1, branching)?;
-                    }
-                }
-                Node::Fork { next } => {
-                    fmt_newline(f, indent, index > 0)?;
-                    write!(f, "+ ")?;
-
-                    for (br_idx, branch) in next.iter().enumerate() {
-                        if let Some(branch_head) = branch {
-                            fmt_newline(f, indent + 1, br_idx > 0)?;
-                            write!(f, "~ ")?;
-
-                            branching.push((index, br_idx == next.len() - 1));
-                            fmt_node(f, &*branch_head.read().unwrap(), indent + 2, 0, branching)?;
-                        }
-                    }
-                }
-                Node::Join { next } => {
-                    // if this is the last branch
-                    if let Some((index, true)) = branching.pop() {
-                        if let Some(next_rc) = next {
-                            fmt_node(
-                                f,
-                                &*next_rc.read().unwrap(),
-                                indent - 2,
-                                index + 1,
-                                branching,
-                            )?;
-                        }
-                    }
+                    write!(f, "~ ")?;
+                    fmt_seq(f, branch, indent + 2)?;
                 }
             }
-            Ok(())
         }
-
-        if let Some(root) = &self.head {
-            fmt_node(f, &*root.read().unwrap(), 0, 0, &mut Vec::new())?
-        }
-        Ok(())
     }
+
+    Ok(())
 }
 
 /// Construct a linear DAG
@@ -777,9 +505,90 @@ pub trait Task {
     ) -> Result<Self::Changes, Self::Error>;
 }
 
+enum ExecError<E> {
+    Failure(Vec<E>),
+    Interrupted,
+}
+
+/// Run one sequence to completion
+///
+/// Branches run concurrently and all of them must terminate before the sequence
+/// continues past the fork.
+async fn exec_seq<T>(
+    dag: &Dag<T>,
+    input: &Reader<T::Input>,
+    channel: &Sender<T::Changes>,
+    interrupt: &Interrupt,
+) -> Result<(), ExecError<T::Error>>
+where
+    T: Task,
+    T::Input: Clone,
+{
+    for node in &dag.0 {
+        if interrupt.is_set() {
+            return Err(ExecError::Interrupted);
+        }
+
+        match node {
+            Node::Item(value) => {
+                // Copy the shared state so the read guard is not held across the await
+                let state = {
+                    let guard = input.read().await;
+                    guard.clone()
+                };
+
+                // XXX: this assumes tasks are cancel-safe which might be a source
+                // of problems in the future
+                // See: https://docs.rs/tokio/latest/tokio/macro.select.html#cancellation-safety
+                let result = tokio::select! {
+                    _ = interrupt.wait() => return Err(ExecError::Interrupted),
+                    result = value.run(&state, channel) => result,
+                };
+
+                match result {
+                    // The receiver is responsible for merging the changes back into
+                    // the shared state
+                    Ok(changes) => {
+                        if channel.send(changes).await.is_err() {
+                            return Err(ExecError::Interrupted);
+                        }
+                    }
+                    Err(e) => return Err(ExecError::Failure(vec![e])),
+                }
+            }
+            Node::Fork(branches) => {
+                // NOTE: at some point we might want to spawn new tokio tasks
+                // for each future
+                let results = futures::future::join_all(
+                    branches
+                        .iter()
+                        .map(|branch| exec_seq(branch, input, channel, interrupt)),
+                )
+                .await;
+
+                let mut errors = Vec::new();
+                for result in results {
+                    match result {
+                        Ok(()) => {}
+                        Err(ExecError::Interrupted) => return Err(ExecError::Interrupted),
+                        Err(ExecError::Failure(err)) => errors.extend(err),
+                    }
+                }
+
+                // Stop running if there are failures on any branch
+                if !errors.is_empty() {
+                    return Err(ExecError::Failure(errors));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 impl<T> Dag<T>
 where
-    T: Task + Clone,
+    T: Task,
     T::Input: Clone,
 {
     /// Run the DAG
@@ -791,158 +600,11 @@ where
         channel: Sender<T::Changes>,
         interrupt: Interrupt,
     ) -> Result<ExecutionStatus, AggregateError<T::Error>> {
-        enum InnerNode<T> {
-            Item { task: T, next: Link<T> },
-            Fork { branches: Vec<Link<T>> },
-            Join { next: Link<T> },
+        match exec_seq(&self, input, &channel, &interrupt).await {
+            Ok(()) => Ok(ExecutionStatus::Completed),
+            Err(ExecError::Interrupted) => Ok(ExecutionStatus::Interrupted),
+            Err(ExecError::Failure(errors)) => Err(AggregateError(errors)),
         }
-
-        enum InnerError<E> {
-            Failure(Vec<E>),
-            Interrupted,
-        }
-
-        async fn run_task<T: Task>(
-            task: T,
-            value: &T::Input,
-            channel: &Sender<T::Changes>,
-            interrupt: &Interrupt,
-        ) -> Result<T::Changes, InnerError<T::Error>> {
-            let future = task.run(value, channel);
-
-            // XXX: this assumes tasks are cancel-safe which might be a source
-            // of problems in the future
-            // See: https://docs.rs/tokio/latest/tokio/macro.select.html#cancellation-safety
-            // alternatively we might want to let tasks check the interrupt directly?
-            tokio::select! {
-                _ = interrupt.wait() => {
-                    Err(InnerError::Interrupted)
-                }
-                result = future => {
-                    result.map_err(|e|  InnerError::Failure(vec![e]))
-                }
-            }
-        }
-
-        async fn exec_node<T>(
-            node: Link<T>,
-            input: &Reader<T::Input>,
-            channel: &Sender<T::Changes>,
-            interrupt: &Interrupt,
-        ) -> Result<Link<T>, InnerError<T::Error>>
-        where
-            T: Task + Clone,
-            T::Input: Clone,
-        {
-            let mut current = node;
-            let mut errors = Vec::new();
-
-            // Try to run nodes as a sequence
-            while let Some(node_rc) = current {
-                if interrupt.is_set() {
-                    return Err(InnerError::Interrupted);
-                }
-
-                // We get the node data in advance to avoid holding
-                // the node across the await
-                let node = match &*node_rc.read().unwrap() {
-                    Node::Item { value, next } => InnerNode::Item {
-                        task: value.clone(),
-                        next: next.clone(),
-                    },
-                    Node::Fork { next } => InnerNode::Fork {
-                        branches: next.clone(),
-                    },
-                    Node::Join { next } => InnerNode::Join { next: next.clone() },
-                };
-
-                match node {
-                    // If a Item node is found, just run the task and continue with tne next node
-                    InnerNode::Item { task, next } => {
-                        let value = {
-                            // Read the up-to-date shared state
-                            let guard = input.read().await;
-                            guard.clone()
-                        };
-
-                        match run_task(task, &value, channel, interrupt).await {
-                            Ok(changes) => {
-                                // Send task changes back to the channel, it is the
-                                // receiver responsibility to merge changes back on the shared
-                                // state
-                                if channel.send(changes).await.is_err() {
-                                    return Err(InnerError::Interrupted);
-                                }
-                            }
-                            Err(InnerError::Interrupted) => return Err(InnerError::Interrupted),
-                            Err(InnerError::Failure(mut err)) => {
-                                errors.append(&mut err);
-                                break;
-                            }
-                        };
-
-                        current = next;
-                    }
-                    // If a fork node is found, run each branch until encoutering the exit `Join`
-                    // node and continue there
-                    InnerNode::Fork { branches } => {
-                        let mut futures = Vec::new();
-
-                        for branch in branches.into_iter().filter(|b| b.is_some()) {
-                            futures.push(exec_node(branch, input, channel, interrupt));
-                        }
-
-                        // Join the futures from the individual branches
-                        // NOTE: at some point we might want to spawn new tokio tasks
-                        // for each future
-                        let results = futures::future::join_all(futures).await;
-
-                        let mut join_next: Link<T> = None;
-
-                        for res in results {
-                            match res {
-                                Ok(next) => {
-                                    join_next = next;
-                                }
-                                Err(e) => match e {
-                                    InnerError::Interrupted => return Err(InnerError::Interrupted),
-                                    InnerError::Failure(mut err) => errors.append(&mut err),
-                                },
-                            }
-                        }
-
-                        // Stop running if there are failures on any branch
-                        if !errors.is_empty() {
-                            return Err(InnerError::Failure(errors));
-                        }
-
-                        // After all branches, continue after the Join
-                        current = join_next;
-                    }
-                    // If a join node is found, just return its continuation
-                    InnerNode::Join { next } => {
-                        return Ok(next);
-                    }
-                }
-            }
-
-            if errors.is_empty() {
-                Ok(None)
-            } else {
-                Err(InnerError::Failure(errors))
-            }
-        }
-
-        let mut next = self.head;
-        while next.is_some() {
-            next = match exec_node(next, input, &channel, &interrupt).await {
-                Ok(next) => next,
-                Err(InnerError::Interrupted) => return Ok(ExecutionStatus::Interrupted),
-                Err(InnerError::Failure(err)) => return Err(AggregateError(err)),
-            }
-        }
-
-        Ok(ExecutionStatus::Completed)
     }
 }
 
@@ -953,6 +615,7 @@ mod tests {
     use pretty_assertions::{assert_eq, assert_str_eq};
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
+        sync::Arc,
         time::Instant,
     };
 
@@ -995,47 +658,40 @@ mod tests {
     }
 
     #[test]
-    fn test_clone_sequence() {
-        let dag: Dag<i32> = seq!(1, 2, 3);
-        let clone = dag.clone();
-        assert_eq!(clone.to_string(), "- 1\n- 2\n- 3");
+    fn test_dags_are_immutable() {
+        // Extending a DAG must not affect other DAGs built from it
+        let shared: Dag<i32> = seq!(9);
+        let a: Dag<i32> = seq!(1).concat(shared.clone());
+        let b: Dag<i32> = seq!(2).concat(shared.clone());
+
+        let extended = shared.clone().concat(seq!(99));
+
+        assert_eq!(a.to_string(), "- 1\n- 9");
+        assert_eq!(b.to_string(), "- 2\n- 9");
+        assert_eq!(shared.to_string(), "- 9");
+        assert_eq!(extended.to_string(), "- 9\n- 99");
     }
 
     #[test]
-    fn test_clone_fork() {
-        let dag: Dag<i32> = seq!(1) + par!(2, 3, 4) + seq!(5);
-        let clone = dag.clone();
-        assert_eq!(clone.to_string(), "- 1\n+ ~ - 2\n  ~ - 3\n  ~ - 4\n- 5");
-    }
+    fn test_equality_is_structural() {
+        let two: Dag<i32> = seq!(1, 2);
+        assert!(two == Dag::<i32>::seq([1, 2]));
 
-    #[test]
-    fn test_clone_deep_nested_dag() {
-        let dag: Dag<char> = seq!('A')
-            + dag!(
-                seq!('B', 'C') + dag!(seq!('D', 'E'), seq!('F')),
-                seq!('G', 'H', 'I')
-            )
-            + seq!('J', 'K');
-
-        let dag = dag.clone();
-        assert_str_eq!(
-            dag.to_string(),
-            dedent!(
-                r#"
-                - A
-                + ~ - B
-                    - C
-                    + ~ - D
-                        - E
-                      ~ - F
-                  ~ - G
-                    - H
-                    - I
-                - J
-                - K
-                "#
-            )
+        // a prefix is not equal to the whole
+        assert!(
+            two != Dag::<i32>::seq([1, 2, 3]),
+            "a prefix is not the whole"
         );
+
+        // parallel branches are not a sequence, and their order matters
+        let fork: Dag<i32> = par!(1, 2);
+        assert!(fork != Dag::<i32>::seq([1, 2]));
+        assert!(fork != par!(2, 1), "branch order is significant");
+
+        // what follows a parallel section is part of the comparison
+        let left: Dag<i32> = par!(1, 2) + seq!(3);
+        let right: Dag<i32> = par!(1, 2) + seq!(4);
+        assert!(left != right, "the continuation of a fork must be compared");
     }
 
     #[test]
@@ -1152,8 +808,8 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_dag_concatenation_preserves_tail() {
-        // This test checks if tail is properly preserved when concatenating with empty DAGs
+    fn test_concatenating_through_an_empty_dag_is_the_identity() {
+        // Concatenating through an empty DAG should behave as if it were not there
         let first: Dag<i32> = seq!(1);
         let second: Dag<i32> = Dag::default(); // Empty
         let third: Dag<i32> = seq!(2);
@@ -1166,7 +822,6 @@ mod tests {
 
     #[test]
     fn test_basic_concatenation_of_sequences() {
-        // This test checks if tail is properly preserved when concatenating with empty DAGs
         let first: Dag<i32> = seq!(1, 2);
         let second: Dag<i32> = Dag::default(); // Empty
         let third: Dag<i32> = seq!(3);
