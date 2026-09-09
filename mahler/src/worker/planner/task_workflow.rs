@@ -41,7 +41,7 @@ pub fn find_workflow_for_task(
     let mut task_changes = Vec::new();
     let dag = try_task_into_workflow(&task, db, system, &mut task_domain, &mut task_changes)?;
 
-    Ok((Workflow::new(dag.reverse()), Patch(task_changes)))
+    Ok((Workflow::new(dag), Patch(task_changes)))
 }
 
 /// Convert the task into a workflow if possible
@@ -70,8 +70,8 @@ pub(super) fn try_task_into_workflow(
             // Simulate the task and get the list of changes
             let Patch(ops) = action.dry_run(cur_state)?;
 
-            // Prepend a new node to the workflow, include a copy
-            // of the changes for validation during runtime
+            // Create a single node workflow, including a copy of the
+            // changes for validation during runtime
             let new_plan = Dag::from(WorkUnit::new(work_id, action.clone(), ops.clone()));
 
             domain.insert(action.domain());
@@ -171,9 +171,8 @@ fn build_method_plan(
 
         // Check if the task domain conflicts with the cumulative domain from branches
         let partial_plan = if domains_are_conflicting(&cumulative_domain, task_domain.iter()) {
-            // If so, join the existing branches and concatenate the returned workflow
-            // we reverse the branches to preserve the expected order of tasks in the plan
-            let dag = Dag::new(plan_branches).prepend(partial_plan);
+            // If so, join the existing branches and continue with the returned workflow
+            let dag = Dag::new(plan_branches).concat(partial_plan);
             plan_branches = Vec::new();
 
             dag

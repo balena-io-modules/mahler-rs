@@ -21,8 +21,7 @@ pub fn prepare_workflow(
     distance: Distance,
     path_exceptions: &[(Path, Option<String>)],
 ) -> Workflow {
-    // we need to reverse the plan before returning
-    let mut workflow = Workflow::new(cur_plan.reverse());
+    let mut workflow = Workflow::new(cur_plan);
     let mut exceptions = Vec::new();
     for op in distance.ignored {
         let ex = if let Some((_, reason)) = path_exceptions
@@ -140,20 +139,18 @@ fn build_candidates(
     Ok(candidates)
 }
 
-/// Sort candidates and push the best valid one (that doesn't introduce cycles or revisit
-/// a previously visited state) onto the search stack.
+/// Sort candidates and return the best valid one (that doesn't introduce cycles or
+/// revisit a previously visited state), along with the state it leads to.
 fn select_best_candidate(
     mut candidates: Vec<Candidate>,
     cur_state: &System,
     cur_plan: &Dag<WorkUnit>,
     visited_states: &HashSet<u64>,
-    stack: &mut Vec<(System, Dag<WorkUnit>, usize)>,
-    depth: usize,
-) -> Result<()> {
+) -> Result<Option<(System, Dag<WorkUnit>)>> {
     // sort candidates
     candidates.sort();
 
-    // Insert the best candidate that doesn't introduce cycles into the stack
+    // Return the best candidate that doesn't introduce cycles
     for Candidate {
         partial_plan,
         changes,
@@ -177,17 +174,11 @@ fn select_best_candidate(
             continue;
         }
 
-        // Extend current plan
-        let new_plan = cur_plan.shallow_clone().prepend(partial_plan);
-
-        // Add the new plan to the search stack
-        stack.push((new_state, new_plan, depth + 1));
-
-        // Only add the most qualified candidate (greedy search)
-        break;
+        // Only the most qualified candidate is considered (greedy search)
+        return Ok(Some((new_state, partial_plan)));
     }
 
-    Ok(())
+    Ok(None)
 }
 
 /// Find a workflow that takes the system from its current state
@@ -245,7 +236,7 @@ where
 
         let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
         if !next_span.is_disabled() {
-            next_span.record("cur_plan", field::display(cur_plan.clone().reverse()));
+            next_span.record("cur_plan", field::display(&cur_plan));
         }
         let _enter = next_span.enter();
 
@@ -261,31 +252,30 @@ where
         // Record candidates found for this planning step
         trace!(candidates=%candidates.len());
 
-        select_best_candidate(
-            candidates,
-            &cur_state,
-            &cur_plan,
-            &visited_states,
-            &mut stack,
-            depth,
-        )?;
+        let best = select_best_candidate(candidates, &cur_state, &cur_plan, &visited_states)?;
 
-        if stack.is_empty() {
-            // Compute the difference between current and target state
-            // one last time in case some new paths were ignored in the
-            // last iteration
-            let distance = Distance::new(&cur, tgt, &skipped_paths(&path_exceptions));
-
-            // If there are no more operations, we've reached the goal
-            if distance.is_empty() {
-                let workflow = prepare_workflow(cur_plan, distance, &path_exceptions);
-
-                // update the system
-                *system = cur_state;
-                return Ok(Some(workflow));
+        match best {
+            // Extend the plan with the chosen candidate and keep searching
+            Some((new_state, partial_plan)) => {
+                stack.push((new_state, cur_plan.concat(partial_plan), depth + 1));
             }
+            None => {
+                // Compute the difference between current and target state
+                // one last time in case some new paths were ignored in the
+                // last iteration
+                let distance = Distance::new(&cur, tgt, &skipped_paths(&path_exceptions));
 
-            trace!(last_evaluated_state=%cur_state, "no plan was found");
+                // If there are no more operations, we've reached the goal
+                if distance.is_empty() {
+                    let workflow = prepare_workflow(cur_plan, distance, &path_exceptions);
+
+                    // update the system
+                    *system = cur_state;
+                    return Ok(Some(workflow));
+                }
+
+                trace!(last_evaluated_state=%cur_state, "no plan was found");
+            }
         }
     }
 
