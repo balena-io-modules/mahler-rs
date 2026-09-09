@@ -1,4 +1,186 @@
 - commits:
+    - subject: Represent a plan as a sequence of nodes
+      hash: 52cc02bd28a89d1b58ffb09dc081cd982657e645
+      body: >
+        The plan graph was a linked structure of `Option<Arc<RwLock<Node<T>>>>`
+        where
+
+        `Fork` and `Join` were independent node variants. Nothing connected a
+        fork to
+
+        its join, so that pairing -- the graph's central invariant -- had no
+        home and
+
+        was re-derived, with its own bookkeeping, by every traversal that walked
+        the
+
+        graph. All three bug fixes this file has received landed on that list
+        and
+
+        none of them touched the representation.
+
+
+        A plan is a sequence, so store it as one:
+
+            pub struct Dag<T>(Vec<Node<T>>);
+
+            enum Node<T> {
+                Item(T),
+                Fork(Vec<Dag<T>>),
+            }
+
+        What follows a fork is the rest of the sequence, so a fork cannot be
+
+        expressed without its branches reconverging: they have nowhere else to
+        go.
+
+
+        Most of the implementation falls out of that. `PartialEq`, `Eq` and
+        `Clone`
+
+        are derived rather than hand-written, `concat` is a `Vec::extend`, and
+
+        `Display` and the executor iterate the sequence directly. The `RwLock`
+        is
+
+        gone, so a plan can no longer be modified through a handle to it, and
+        the
+
+        per-node lock acquisitions in every traversal go with it. `execute` no
+        longer
+
+        clones each task to avoid holding a guard across an await.
+
+
+        Two behaviours change as a result. Equality is now structural: it used
+        to zip
+
+        two node iterators with no length check, so `seq!(1, 2) == seq!(1, 2,
+        3)` was
+
+        `true` and the nodes after a fork were never compared. And dropping a
+        plan
+
+        recurses once per level of fork nesting rather than once per node, which
+
+        removes a stack overflow path on long plans.
+
+
+        `Display` output is unchanged, so the existing plan assertions cover
+        this.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Test the plan graph through its public interface
+      hash: 1fb8c604d3de766a6c9119128521ff7621f07811
+      body: >
+        Several tests reached past `Dag` into its nodes, asserting on `head`,
+        `tail`
+
+        and the `Node` variants, or walking the private `iter`. That ties them
+        to one
+
+        particular representation and leaves the public surface untested: the
+
+        traversal tests, for instance, checked the order the private iterator
+        happens
+
+        to yield rather than that every value is reachable.
+
+
+        They now assert on the rendered plan, or on `any` and `all` for the
+        traversal
+
+        cases. No behaviour changes.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Remove plan graph methods with no callers
+      hash: 72bc568023d7010a90437b5e2889c27bd78f275f
+      body: >
+        `prepend` and `reverse` existed to build a plan backwards, which the
+        planner
+
+        no longer does. `shallow_clone` existed to avoid a deep clone of the
+        plan on
+
+        every search iteration, and the search no longer clones the plan at all.
+
+
+        Removing `shallow_clone` also closes a hole in the type. It handed out a
+
+        second handle to nodes that `concat` and `reverse` then rewired in
+        place, so
+
+        a caller could make two branches converge on one node -- a graph that is
+        not
+
+        series-parallel, which every traversal here assumes it will never see --
+        or
+
+        build a cycle that `execute` would spin on forever.
+
+
+        The 21 tests that only exercised these three methods go with them.
+        Forked
+
+        rendering is still covered by the remaining tests, the doc examples, and
+        the
+
+        plan assertions in the planner, worker and composer suites.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+    - subject: Build plans forwards in the planner
+      hash: 39bc53f38de7829e044ae3195c5fc6397035f57c
+      body: >
+        The planner built its plan backwards and reversed it once at the end.
+        That
+
+        was never a property of the search: `concat` splices onto the tail of
+        the
+
+        DAG it is called on, so appending to the plan under construction would
+        have
+
+        been visible to any other handle on it, while `prepend` writes to the
+        new
+
+        fragment instead. `Dag::prepend`'s own documentation says this is what
+        it is
+
+        for.
+
+
+        Nothing shares a plan while it is being extended, so extend it directly:
+
+
+        - `select_best_candidate` returns the candidate it picked rather than
+          pushing onto the search stack, and the caller extends the plan with it.
+        - That removes the `stack.is_empty()` check standing in for "no
+        candidate
+          was accepted". Those are only the same because the search keeps at most
+          one entry.
+        - `build_method_plan` concatenates its sub-plans in order, so the
+        comment
+          about reversing branches to preserve task order goes with it.
+
+        Both calls to `Dag::reverse` are gone as a result.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.27.0
+  title: ""
+  date: 2026-09-09T00:07:18.854Z
+- commits:
     - subject: Add support for hook descriptions
       hash: 8f9712f73b10b01dafe7fb6f2b0578629d110a97
       body: >
