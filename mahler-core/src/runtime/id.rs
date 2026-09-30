@@ -44,7 +44,9 @@ impl Hash for Id {
 
 impl Ord for Id {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.type_id.cmp(&other.type_id)
+        self.name
+            .cmp(other.name)
+            .then(self.type_id.cmp(&other.type_id))
     }
 }
 
