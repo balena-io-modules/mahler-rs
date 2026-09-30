@@ -1,4 +1,24 @@
 - commits:
+    - subject: Sort handler ids by name disambiguating by type id
+      hash: 1b0b86cf2376172b80ef15e8d0abe3f58b282031
+      body: |
+        While the type name is not unique when using closures, it is expected to
+        remain somewhat consistent across usages of the library (unless renaming
+        types). Before this
+        change, ids were sorted by type_id, which is unique, but it may change
+        depending on the build.
+
+        This updates the Ord implementation of `Id`, comparing by type name and
+        disambiguating by type id.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.27.1
+  title: ""
+  date: 2026-09-30T20:39:43.090Z
+- commits:
     - subject: Represent a plan as a sequence of nodes
       hash: 52cc02bd28a89d1b58ffb09dc081cd982657e645
       body: >
