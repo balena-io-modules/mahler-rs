@@ -140,6 +140,56 @@ fn it_returns_no_plan_if_search_stalls_at_the_depth_limit() {
 }
 
 #[test]
+fn it_allows_repeating_a_task_if_the_system_state_changed() {
+    #[derive(Serialize, Deserialize)]
+    struct Car {
+        full_tank: bool,
+        trips: u32,
+    }
+
+    impl State for Car {
+        type Target = Self;
+    }
+
+    fn refuel(mut full_tank: View<bool>) -> View<bool> {
+        *full_tank = true;
+        full_tank
+    }
+
+    // Every trip empties the tank
+    fn drive(mut car: View<Car>, Target(tgt): Target<Car>) -> View<Car> {
+        if car.full_tank && car.trips < tgt.trips {
+            car.full_tank = false;
+            car.trips += 1;
+        }
+        car
+    }
+
+    let domain = Domain::new()
+        .job("", update(drive).with_description(|| "drive"))
+        .job("/full_tank", update(refuel).with_description(|| "refuel"));
+
+    // `refuel` is applied to an empty tank every time, the planner should
+    // not mistake this for a loop since the number of trips is different
+    let workflow = find_plan(
+        &domain,
+        Car {
+            full_tank: false,
+            trips: 0,
+        },
+        Car {
+            full_tank: true,
+            trips: 2,
+        },
+    )
+    .unwrap()
+    .unwrap();
+
+    let expected: Dag<&str> = seq!("refuel", "drive", "refuel", "drive", "refuel");
+    assert_eq!(workflow.to_string(), expected.to_string());
+}
+
+#[test]
 fn it_calculates_a_linear_workflow_with_compound_tasks() {
     init();
     let domain = Domain::new()

@@ -198,9 +198,8 @@ where
         trace!(candidates=%candidates.len());
 
         // Only the most qualified candidate is considered (greedy search). Candidates that
-        // create a loop in the plan or take us to a previously visited state are skipped,
-        // this avoids the planner just trying tasks in a different order or looping forever
-        // jumping between a few visited states
+        // take us to a previously visited state are skipped. This avoids the planner looping
+        // forever jumping between a few visited states
         candidates.sort();
         let mut next = None;
         for Candidate {
@@ -210,10 +209,6 @@ where
             ..
         } in candidates.into_iter().rev()
         {
-            // Check for DAG cycles before cloning the system state (cheap check first)
-            if cur_plan.any(|unit| plan.dag.any(|u| u.id == unit.id)) {
-                continue;
-            }
             let mut new_state = cur_state.clone();
             new_state.patch(&Patch(plan.changes))?;
 
@@ -285,14 +280,12 @@ struct PartialPlan {
 fn try_task_into_workflow(task: &Task, db: &Domain, cur_state: &System) -> Result<PartialPlan> {
     match task {
         Task::Action(action) => {
-            let work_id = WorkUnit::new_id(action, cur_state.inner_state());
-
             // Simulate the task and get the list of changes
             let Patch(changes) = action.dry_run(cur_state)?;
 
             // Create a single node workflow, including a copy of the
             // changes for validation during runtime
-            let dag = Dag::from(WorkUnit::new(work_id, action.clone(), changes.clone()));
+            let dag = Dag::from(WorkUnit::new(action.clone(), changes.clone()));
 
             Ok(PartialPlan {
                 dag,

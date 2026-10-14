@@ -3,9 +3,7 @@
 use async_trait::async_trait;
 use json_patch::AddOperation;
 use jsonptr::resolve::ResolveError;
-use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Display};
-use std::hash::{Hash, Hasher};
 use tracing::{info, instrument};
 
 use crate::dag::{Dag, ExecutionStatus as DagExecutionStatus, Task};
@@ -14,27 +12,11 @@ use crate::json::{Operation, Patch, PatchOperation, RemoveOperation, ReplaceOper
 use crate::runtime::{Channel, System};
 use crate::sync::{channel, Interrupt, Reader, Sender};
 use crate::system_ext::SystemExt;
-use crate::task::{Action, Id};
+use crate::task::Action;
 
-/// Unique representation of a task acting on a specific path and system state.
-///
-/// The hash of this structure is used as the [`WorkUnit`] id
-#[derive(Hash)]
-struct WorkUnitId<'s> {
-    /// The task id
-    task_id: Id,
-    /// The task path
-    path: String,
-    /// The state that is used to test the action
-    state: &'s Value,
-}
-
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 /// Utility type to encode a single work unit in a workflow
 pub(super) struct WorkUnit {
-    /// Unique id for the action. This is calculed by hashing a WorkUnitId
-    pub id: u64,
-
     /// The action to execute
     ///
     /// Only atomic tasks can be added to a worflow item
@@ -49,34 +31,8 @@ pub(super) struct WorkUnit {
 
 impl WorkUnit {
     /// Create a new WorkUnit
-    pub fn new(id: u64, action: Action, output: Vec<PatchOperation>) -> Self {
-        Self { id, action, output }
-    }
-
-    /// Calculate the id of a given action and state value.
-    ///
-    /// Use this before calling [`new`]
-    pub fn new_id(task: &Action, state: &Value) -> u64 {
-        let pointer = task.context().path.as_ref();
-
-        // Resolve the value that will be modified by
-        // the task. If the value does not exist yet, we use Null
-        let state = pointer.resolve(state).unwrap_or(&Value::Null);
-
-        let action_id = WorkUnitId {
-            task_id: task.id(),
-            path: task.context().path.to_string(),
-            state,
-        };
-
-        // Create a DefaultHasher
-        let mut hasher = DefaultHasher::new();
-
-        // Hash the data
-        action_id.hash(&mut hasher);
-
-        // Retrieve the hash value
-        hasher.finish()
+    pub fn new(action: Action, output: Vec<PatchOperation>) -> Self {
+        Self { action, output }
     }
 }
 
