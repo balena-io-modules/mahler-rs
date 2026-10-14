@@ -115,11 +115,13 @@ fn build_candidates(
 pub fn find_workflow_to_target<T>(
     db: &Domain,
     system: &System,
-    tgt: &Value,
+    tgt: &T::Target,
 ) -> Result<Option<Workflow>>
 where
     T: State,
 {
+    let tgt = &serde_json::to_value(tgt)?;
+
     trace!(initial=%system, target=%tgt, "searching for workflow");
 
     let find_workflow_span = Span::current();

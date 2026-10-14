@@ -76,8 +76,6 @@ pub fn find_plan<T>(db: &Domain, cur: T, tgt: T::Target) -> Result<Option<Workfl
 where
     T: State,
 {
-    let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
-
     let system = crate::runtime::System::try_from(cur).expect("failed to serialize current state");
 
     let res = find_workflow_to_target::<T>(db, &system, &tgt)?;
@@ -745,8 +743,7 @@ fn it_applies_workflow_changes_to_reach_the_target_state() {
     };
 
     let system = crate::runtime::System::try_from(initial).unwrap();
-    let tgt = serde_json::to_value(&target).unwrap();
-    let workflow = find_workflow_to_target::<MyState>(&domain, &system, &tgt)
+    let workflow = find_workflow_to_target::<MyState>(&domain, &system, &target)
         .unwrap()
         .unwrap();
 
@@ -755,7 +752,10 @@ fn it_applies_workflow_changes_to_reach_the_target_state() {
     assert!(workflow.to_string().contains("+ ~"));
 
     let result = workflow.apply_changes(&system).unwrap();
-    assert_eq!(result.inner_state(), &tgt);
+    assert_eq!(
+        result.inner_state(),
+        &serde_json::to_value(&target).unwrap()
+    );
 
     // The input state is not modified
     assert_eq!(

@@ -913,8 +913,6 @@ impl<O: State> Worker<O, Ready> {
     where
         T: Borrow<O::Target>,
     {
-        let tgt = serde_json::to_value(tgt.borrow()).map_err(Error::from)?;
-
         let Ready {
             domain,
             system,
@@ -922,7 +920,7 @@ impl<O: State> Worker<O, Ready> {
             ..
         } = &self.inner;
 
-        let mut workflow = planner::find_workflow_to_target::<O>(domain, system, &tgt)?;
+        let mut workflow = planner::find_workflow_to_target::<O>(domain, system, tgt.borrow())?;
 
         // Attach worker metadata
         if let Some(w) = workflow.as_mut() {
@@ -965,7 +963,7 @@ impl<O: State> Worker<O, Ready> {
     where
         T: Borrow<O::Target>,
     {
-        let tgt = serde_json::to_value(tgt.borrow()).map_err(Error::from)?;
+        let tgt = tgt.borrow();
 
         let Ready {
             domain,
@@ -974,7 +972,7 @@ impl<O: State> Worker<O, Ready> {
             ..
         } = &self.inner;
 
-        let mut workflow = planner::find_workflow_to_target::<O>(domain, system, &tgt)?;
+        let mut workflow = planner::find_workflow_to_target::<O>(domain, system, tgt)?;
 
         // Attach worker metadata and pending hooks
         if let Some(w) = workflow.as_mut() {
@@ -984,7 +982,7 @@ impl<O: State> Worker<O, Ready> {
             let mut system = w.apply_changes(system)?;
 
             // concatenate pending hooks at the end of the plan
-            let hooks = self.find_hooks(&mut system, &tgt)?;
+            let hooks = self.find_hooks(&mut system, tgt)?;
             w.concat(hooks);
         }
 
@@ -997,7 +995,9 @@ impl<O: State> Worker<O, Ready> {
     /// changes of every planned hook. Hooks whose condition is not met are skipped.
     ///
     /// The returned workflow may be empty if no hook conditions are pending.
-    fn find_hooks(&self, system: &mut System, tgt: &Value) -> Result<Workflow> {
+    fn find_hooks(&self, system: &mut System, tgt: &O::Target) -> Result<Workflow> {
+        let tgt = serde_json::to_value(tgt).map_err(Error::from)?;
+
         let Ready {
             domain,
             hooks,
