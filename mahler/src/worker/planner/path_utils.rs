@@ -1,11 +1,8 @@
 use std::collections::BTreeSet;
-use std::hash::{DefaultHasher, Hash, Hasher};
 
 use jsonptr::PointerBuf;
 
 use crate::json::Path;
-use crate::result::Result;
-use crate::runtime::System;
 
 /// Returns the longest subset of non-conflicting paths, preferring prefixes over specific paths.
 ///
@@ -94,37 +91,6 @@ where
     let buf = PointerBuf::from_tokens(&prefix);
 
     Path::new(&buf)
-}
-
-/// Get a hash for the system state
-pub(super) fn hash_state(state: &System) -> u64 {
-    let value = state.inner_state();
-
-    // Create a DefaultHasher
-    let mut hasher = DefaultHasher::new();
-
-    // Hash the data
-    value.hash(&mut hasher);
-
-    // Retrieve the hash value
-    hasher.finish()
-}
-
-/// Find the first element that matches the predicate or return
-/// the first error
-///
-/// Alternative to [`std::iter::Iterator::try_find`] while that is
-/// experimental
-pub(super) fn try_find<T, I: Iterator<Item = T>>(
-    iter: I,
-    f: impl Fn(&T) -> Result<bool>,
-) -> Result<Option<T>> {
-    for t in iter {
-        if f(&t)? {
-            return Ok(Some(t));
-        }
-    }
-    Ok(None)
 }
 
 #[cfg(test)]

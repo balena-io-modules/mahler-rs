@@ -122,6 +122,24 @@ fn it_aborts_search_if_plan_length_grows_too_much() {
 }
 
 #[test]
+fn it_returns_no_plan_if_search_stalls_at_the_depth_limit() {
+    // Stops making progress after exactly 255 steps, the last step
+    // allowed by the search depth limit
+    fn capped_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
+        if *counter < tgt && *counter < 255 {
+            *counter += 1;
+        }
+
+        counter
+    }
+
+    let domain = Domain::new().job("", update(capped_plus_one));
+
+    let workflow = find_plan(&domain, 0, 300);
+    assert!(matches!(workflow, Ok(None)));
+}
+
+#[test]
 fn it_calculates_a_linear_workflow_with_compound_tasks() {
     init();
     let domain = Domain::new()

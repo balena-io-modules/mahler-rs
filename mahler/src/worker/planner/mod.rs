@@ -1,14 +1,515 @@
-mod candidate;
 mod distance;
 mod path_utils;
-mod search;
-mod task_workflow;
+
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+use tracing::{field, instrument, trace, trace_span, warn, Span};
+
+use crate::dag::Dag;
+use crate::error::{Error, ErrorKind};
+use crate::json::{Operation, OperationMatcher, Patch, PatchOperation, Path, Value};
+use crate::result::Result;
+use crate::runtime::{Context, System};
+use crate::state::State;
+use crate::system_ext::SystemExt;
+use crate::task::{Method, Task};
 
 use super::domain::Domain;
 use super::workflow::{Ignored, WorkUnit, Workflow};
+use distance::Distance;
+use path_utils::{
+    domains_are_conflicting, longest_common_prefix, select_non_conflicting_prefer_prefixes,
+};
 
-pub use search::find_workflow_to_target;
-pub use task_workflow::find_workflow_for_task;
+/// Maximum number of planning steps
+/// TODO: make this user configurable
+const MAX_DEPTH: usize = 256;
+
+/// Get a hash for the system state
+fn hash_state(state: &System) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    state.inner_state().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Build the list of candidate plans for one search iteration by evaluating each
+/// distance operation against matching jobs in the domain.
+fn build_candidates(
+    distance_operations: Vec<Operation>,
+    db: &Domain,
+    cur_state: &System,
+    tgt: &Value,
+    path_exceptions: &mut Vec<(Path, Option<String>)>,
+) -> Result<Vec<Candidate>> {
+    let mut candidates: Vec<Candidate> = Vec::new();
+
+    'ops: for op in distance_operations {
+        let path = op.path();
+
+        // skip the path if any parent path has an exception
+        if path_exceptions.iter().any(|(p, _)| p.is_prefix_of(path)) {
+            continue;
+        }
+
+        // Look for matching exceptions for the path and operation
+        if let Some((args, exceptions)) = db.find_matching_exceptions(path.as_str()) {
+            let context = Context {
+                path: path.clone(),
+                args,
+                target: tgt.clone(),
+                target_override: None,
+            };
+
+            // if there are any exceptions that apply to the context, add the path to
+            // the list and skip the path
+            for exception in exceptions.filter(|e| e.operation().matches(&op)) {
+                if exception.test(cur_state, &context)? {
+                    path_exceptions.push((path.clone(), exception.description(&context)?));
+                    continue 'ops;
+                }
+            }
+        }
+
+        // Retrieve matching jobs at this path
+        if let Some((args, jobs)) = db.find_matching_jobs(path.as_str()) {
+            let context = Context {
+                path: path.clone(),
+                args,
+                target: tgt.clone(),
+                target_override: None,
+            };
+
+            // Look for jobs matching the operation
+            for job in jobs.filter(|j| j.operation().matches(&op)) {
+                let task = job.new_task(context.clone());
+
+                // Try applying this task to the current state
+                match try_task_into_workflow(&task, db, cur_state) {
+                    Ok(plan) if !plan.changes.is_empty() => candidates.push(Candidate {
+                        plan,
+                        path: task.path().clone(),
+                        is_method: task.is_method(),
+                        operation: job.operation().clone(),
+                    }),
+                    // Skip the task if its condition is not met or it makes no changes
+                    Ok(_) => {}
+                    Err(e) if matches!(e.kind(), ErrorKind::ConditionNotMet) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
+    Ok(candidates)
+}
+
+/// Find a workflow that takes the system from its current state
+/// to the target state using the tasks in the provided Domain
+///
+/// The search is greedy: at each step the best candidate is applied and the
+/// search never backtracks.
+///
+/// If found, this will replace the value of system with the final state of the system
+#[instrument(level = "trace", skip_all, err(level = "trace"))]
+pub fn find_workflow_to_target<T>(
+    db: &Domain,
+    system: &mut System,
+    tgt: &Value,
+) -> Result<Option<Workflow>>
+where
+    T: State,
+{
+    trace!(initial=%system, target=%tgt, "searching for workflow");
+
+    let find_workflow_span = Span::current();
+
+    let mut cur_state = system.clone();
+    let mut cur_plan = Dag::default();
+
+    // path exceptions and the corresponding reason
+    let mut path_exceptions: Vec<(Path, Option<String>)> = Vec::new();
+
+    // Keep track of visited states
+    let mut visited_states = HashSet::new();
+
+    // Set when no candidate could be applied. The goal is checked once more
+    // because evaluating candidates may have added new path exceptions.
+    let mut stalled = false;
+
+    // Number of steps applied to the plan so far
+    let mut depth = 0;
+    loop {
+        // Prevent infinite recursion (e.g., from buggy tasks or recursive methods)
+        if depth >= MAX_DEPTH {
+            warn!(parent: &find_workflow_span, "reached max search depth ({MAX_DEPTH})");
+            return Err(ErrorKind::PlanningOverflow.into());
+        }
+
+        // Normalize state: deserialize into the target type and re-serialize to remove internal fields
+        let cur = cur_state
+            .state::<T::Target>()
+            .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
+
+        visited_states.insert(hash_state(&cur_state));
+
+        // Compute the difference between current and target state
+        let skipped: Vec<Path> = path_exceptions.iter().map(|(p, _)| p.clone()).collect();
+        let distance = Distance::new(&cur, tgt, &skipped);
+
+        // If there are no more operations, we've reached the goal
+        if distance.is_empty() {
+            let mut workflow = Workflow::new(cur_plan);
+            workflow.ignored = distance
+                .ignored
+                .into_iter()
+                .map(|operation| {
+                    let reason = path_exceptions
+                        .iter()
+                        .find(|(p, _)| p.is_prefix_of(operation.path()))
+                        .and_then(|(_, reason)| reason.clone());
+                    Ignored { operation, reason }
+                })
+                .collect();
+
+            // update the system
+            *system = cur_state;
+            return Ok(Some(workflow));
+        }
+
+        if stalled {
+            trace!(last_evaluated_state=%cur_state, "no plan was found");
+            return Ok(None);
+        }
+
+        let next_span = trace_span!("find_next", distance = %distance, cur_plan=field::Empty);
+        let _enter = next_span.enter();
+
+        let candidates = build_candidates(
+            distance.operations,
+            db,
+            &cur_state,
+            tgt,
+            &mut path_exceptions,
+        )?;
+        let mut candidates = merge_concurrent_candidates(candidates);
+
+        // Record candidates found for this planning step
+        trace!(candidates=%candidates.len());
+
+        // Only the most qualified candidate is considered (greedy search). Candidates that
+        // create a loop in the plan or take us to a previously visited state are skipped,
+        // this avoids the planner just trying tasks in a different order or looping forever
+        // jumping between a few visited states
+        candidates.sort();
+        let mut next = None;
+        for Candidate {
+            plan,
+            path,
+            operation,
+            ..
+        } in candidates.into_iter().rev()
+        {
+            // Check for DAG cycles before cloning the system state (cheap check first)
+            if cur_plan.any(|unit| plan.dag.any(|u| u.id == unit.id)) {
+                continue;
+            }
+            let mut new_state = cur_state.clone();
+            new_state.patch(&Patch(plan.changes))?;
+
+            if !visited_states.contains(&hash_state(&new_state)) {
+                trace!(path=%path,op=%operation,partial_plan=%plan.dag, "selected candidate");
+                next = Some((new_state, plan.dag));
+                break;
+            }
+        }
+
+        match next {
+            Some((new_state, partial_plan)) => {
+                cur_state = new_state;
+                cur_plan = cur_plan.concat(partial_plan);
+                depth += 1;
+                next_span.record("cur_plan", field::display(&cur_plan));
+            }
+            None => stalled = true,
+        }
+    }
+}
+
+/// Convert the task into a workflow if possible
+///
+/// For primitive tasks, the workflow will just contain a single node, however
+/// for composite tasks, the workflow will create a Dag with concurrent branches
+/// depending on the operational domain of each sub-task.
+///
+/// If a workflow is found, the function will also return a [`crate::json::Patch`] with the
+/// cumulative changes performed by the task.
+///
+/// # Arguments
+/// * `db` - a reference to the worker [`Domain`]
+/// * `task` - the task to convert to a workflow
+/// * `system` - the state of the system before running the task
+pub fn find_workflow_for_task(
+    mut task: Task,
+    db: &Domain,
+    system: &System,
+) -> Result<(Workflow, Patch)> {
+    // Look-up the task on the domain to find its path
+    let task_id = task.id();
+    let Context { args, .. } = task.context_mut();
+    let path = db.find_path(task_id, args)?;
+
+    // Set the correct path for the task
+    let task = task.with_path(path);
+
+    let PartialPlan { dag, changes, .. } = try_task_into_workflow(&task, db, system)?;
+
+    Ok((Workflow::new(dag), Patch(changes)))
+}
+
+/// The result of simulating a task against a state
+struct PartialPlan {
+    /// Workflow for the task
+    dag: Dag<WorkUnit>,
+    /// Cumulative changes performed by the task and its sub-tasks (if any)
+    changes: Vec<PatchOperation>,
+    /// The task operational domain, used for conflict detection
+    domain: BTreeSet<Path>,
+}
+
+/// Convert the task into a workflow if possible
+///
+/// For primitive tasks, the workflow will just contain a single node, however
+/// for composite tasks, the workflow will create a Dag with concurrent branches
+/// depending on the operational domain of each sub-task.
+fn try_task_into_workflow(task: &Task, db: &Domain, cur_state: &System) -> Result<PartialPlan> {
+    match task {
+        Task::Action(action) => {
+            let work_id = WorkUnit::new_id(action, cur_state.inner_state());
+
+            // Simulate the task and get the list of changes
+            let Patch(changes) = action.dry_run(cur_state)?;
+
+            // Create a single node workflow, including a copy of the
+            // changes for validation during runtime
+            let dag = Dag::from(WorkUnit::new(work_id, action.clone(), changes.clone()));
+
+            Ok(PartialPlan {
+                dag,
+                changes,
+                domain: BTreeSet::from([action.domain()]),
+            })
+        }
+        Task::Method(method) => {
+            let mut plan_branches = Vec::new();
+            let mut domain = BTreeSet::new();
+            let mut changes = Vec::new();
+            let mut cur_state = cur_state.clone();
+
+            for task in expand_method_tasks(method, db, &cur_state)? {
+                // Run the task as if it was a sequential plan
+                let task_plan = try_task_into_workflow(&task, db, &cur_state)?;
+
+                // If the task domain conflicts with the cumulative domain from the
+                // branches, join the existing branches before continuing
+                let dag = if domains_are_conflicting(&domain, task_plan.domain.iter()) {
+                    Dag::new(std::mem::take(&mut plan_branches)).concat(task_plan.dag)
+                } else {
+                    task_plan.dag
+                };
+
+                let patch = Patch(task_plan.changes);
+                cur_state.patch(&patch)?;
+
+                changes.extend(patch.0);
+                domain.extend(task_plan.domain);
+                plan_branches.push(dag);
+            }
+
+            Ok(PartialPlan {
+                dag: Dag::new(plan_branches),
+                changes,
+                domain,
+            })
+        }
+    }
+}
+
+/// Expand a method into its enriched child tasks, propagating arguments and resolving
+/// each task against the domain to attach the correct path and description.
+fn expand_method_tasks(method: &Method, db: &Domain, cur_state: &System) -> Result<Vec<Task>> {
+    // Get the list of referenced tasks
+    let tasks = method.expand(cur_state)?;
+
+    // Extended tasks will store the correct references from the domain with the
+    // right path and description
+    let mut extended_tasks = Vec::new();
+
+    for mut t in tasks.into_iter() {
+        let task_id = t.id();
+
+        let Context {
+            args: m_args,
+            target: m_target,
+            ..
+        } = method.context();
+        let Context {
+            args: t_args,
+            target: t_target,
+            ..
+        } = t.context_mut();
+
+        // Propagate arguments from the method into the child tasks.
+        // This is just for better user experience as it avoids having to define
+        // arguments for each sub-task in the method
+        for (k, v) in m_args.iter() {
+            if !t_args.contains_key(k) {
+                t_args.insert(k, v);
+            }
+        }
+
+        // The global target is the same for every task so we propagate it
+        // to the child task
+        *t_target = m_target.clone();
+
+        // Find the job path on the domain list, pass the argument for path matching
+        // this will remove any unused arguments in the path
+        let path = db.find_path(task_id, t_args)?;
+
+        // Using the path, now find the actual job on the domain.
+        // The domain job includes additional configuration like the description that
+        // we want to use in the workflow
+        let job = db
+            .find_job(&path, task_id)
+            // this should never happen since the path was returned by the domain
+            .ok_or(Error::internal(format!("should find a job for {path}")))?;
+
+        // Get a copy of the task for the final list
+        let task = job.new_task(t.context().to_owned()).with_path(path);
+
+        extended_tasks.push(task);
+    }
+
+    Ok(extended_tasks)
+}
+
+struct Candidate {
+    plan: PartialPlan,
+    path: Path,
+    operation: OperationMatcher,
+    is_method: bool,
+}
+
+impl PartialEq for Candidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for Candidate {}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Sort by reverse path ordering first, giving shorter paths
+        // higher priority
+        other
+            .path
+            .cmp(&self.path)
+            // User defined methods vs actions and automatically generated
+            // workflows
+            .then(self.is_method.cmp(&other.is_method))
+            // Sort by operation (`Any` is after all other)
+            .then(self.operation.cmp(&other.operation))
+    }
+}
+
+/// Merge concurrent non-conflicting candidates into a single combined candidate when possible.
+///
+/// When more than one candidate can run without conflicts, they are combined into a single
+/// concurrent candidate backed by a parallel DAG branch. If only one (or zero) candidates
+/// are non-conflicting, the list is returned unchanged.
+fn merge_concurrent_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
+    if candidates.len() < 2 {
+        return candidates;
+    }
+
+    // Find the longest list of non-conflicting tasks based on paths (for prioritization)
+    let non_conflicting_paths = select_non_conflicting_prefer_prefixes(
+        candidates.iter().map(|Candidate { path, .. }| path),
+    );
+
+    // Track the best candidate index per path, avoiding full Candidate clones
+    let mut concurrent_indices: BTreeMap<Path, usize> = BTreeMap::new();
+    let mut cumulative_domain = BTreeSet::new();
+
+    for (i, candidate) in candidates.iter().enumerate() {
+        if let Some(&prev_idx) = concurrent_indices.get(&candidate.path) {
+            if candidates[prev_idx] >= *candidate {
+                // skip the candidate if there is a previous candidate for the path
+                // with higher priority
+                continue;
+            }
+        }
+
+        // If the domain of the candidate doesn't conflict with the cumulative domain
+        if non_conflicting_paths.contains(&candidate.path)
+            && !domains_are_conflicting(&cumulative_domain, candidate.plan.domain.iter())
+        {
+            cumulative_domain.extend(candidate.plan.domain.iter().cloned());
+            concurrent_indices.insert(candidate.path.clone(), i);
+        }
+    }
+
+    if concurrent_indices.len() > 1 {
+        // The path for the candidate is the longest common prefix between child paths
+        let path = longest_common_prefix(concurrent_indices.keys());
+
+        // Partition in one O(n) pass: move concurrent candidates out, keep the rest.
+        let selected: BTreeSet<usize> = concurrent_indices.into_values().collect();
+        let mut concurrent = Vec::with_capacity(selected.len());
+        let mut remaining = Vec::with_capacity(candidates.len() - selected.len());
+        for (i, candidate) in candidates.into_iter().enumerate() {
+            if selected.contains(&i) {
+                concurrent.push(candidate);
+            } else {
+                remaining.push(candidate);
+            }
+        }
+
+        let mut plan_branches = Vec::with_capacity(concurrent.len());
+        let mut changes = Vec::new();
+        let mut domain = BTreeSet::new();
+        // Treat the candidate as a method when sorting if all children are methods
+        let is_method = concurrent.iter().all(|c| c.is_method);
+
+        for Candidate { plan, .. } in concurrent {
+            plan_branches.push(plan.dag);
+            changes.extend(plan.changes);
+            domain.extend(plan.domain);
+        }
+
+        // Construct a new candidate using the concurrent branches
+        remaining.push(Candidate {
+            plan: PartialPlan {
+                dag: Dag::new(plan_branches),
+                changes,
+                domain,
+            },
+            path,
+            is_method,
+            operation: OperationMatcher::Update,
+        });
+        remaining
+    } else {
+        candidates
+    }
+}
 
 #[cfg(test)]
 mod tests;
