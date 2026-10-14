@@ -78,10 +78,9 @@ where
 {
     let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
 
-    let mut system =
-        crate::runtime::System::try_from(cur).expect("failed to serialize current state");
+    let system = crate::runtime::System::try_from(cur).expect("failed to serialize current state");
 
-    let res = find_workflow_to_target::<T>(db, &mut system, &tgt)?;
+    let res = find_workflow_to_target::<T>(db, &system, &tgt)?;
     Ok(res)
 }
 
@@ -713,6 +712,56 @@ fn it_finds_concurrent_plans_with_nested_forks() {
         + seq!("a++");
 
     assert_eq!(workflow.to_string(), expected.to_string(),);
+}
+
+#[test]
+fn it_applies_workflow_changes_to_reach_the_target_state() {
+    init();
+    type Counters = Map<String, i32>;
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct MyState {
+        counters: Counters,
+    }
+
+    impl State for MyState {
+        type Target = Self;
+    }
+
+    let domain = Domain::new().job("/counters/{counter}", update(plus_one));
+
+    let counters = |a, b, c| {
+        Map::from([
+            ("a".to_string(), a),
+            ("b".to_string(), b),
+            ("c".to_string(), c),
+        ])
+    };
+    let initial = MyState {
+        counters: counters(0, 0, 0),
+    };
+    let target = MyState {
+        counters: counters(2, 1, 3),
+    };
+
+    let system = crate::runtime::System::try_from(initial).unwrap();
+    let tgt = serde_json::to_value(&target).unwrap();
+    let workflow = find_workflow_to_target::<MyState>(&domain, &system, &tgt)
+        .unwrap()
+        .unwrap();
+
+    // The workflow runs counters concurrently, the final state has to match
+    // the target regardless of how branches are ordered
+    assert!(workflow.to_string().contains("+ ~"));
+
+    let result = workflow.apply_changes(&system).unwrap();
+    assert_eq!(result.inner_state(), &tgt);
+
+    // The input state is not modified
+    assert_eq!(
+        system.inner_state(),
+        &json!({"counters": {"a": 0, "b": 0, "c": 0}})
+    );
 }
 
 #[test]

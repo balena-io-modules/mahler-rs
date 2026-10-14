@@ -922,8 +922,7 @@ impl<O: State> Worker<O, Ready> {
             ..
         } = &self.inner;
 
-        let mut system = system.clone();
-        let mut workflow = planner::find_workflow_to_target::<O>(domain, &mut system, &tgt)?;
+        let mut workflow = planner::find_workflow_to_target::<O>(domain, system, &tgt)?;
 
         // Attach worker metadata
         if let Some(w) = workflow.as_mut() {
@@ -975,17 +974,18 @@ impl<O: State> Worker<O, Ready> {
             ..
         } = &self.inner;
 
-        let mut system = system.clone();
-        let mut workflow = planner::find_workflow_to_target::<O>(domain, &mut system, &tgt)?;
+        let mut workflow = planner::find_workflow_to_target::<O>(domain, system, &tgt)?;
 
         // Attach worker metadata and pending hooks
         if let Some(w) = workflow.as_mut() {
             w.worker_id = *worker_id;
 
+            // hooks are planned against the simulated post-workflow state
+            let mut system = w.apply_changes(system)?;
+
             // concatenate pending hooks at the end of the plan
-            let Workflow { dag: h_dag, .. } = self.find_hooks(&mut system, &tgt)?;
-            let w_dag = std::mem::take(&mut w.dag);
-            w.dag = w_dag.concat(h_dag);
+            let hooks = self.find_hooks(&mut system, &tgt)?;
+            w.concat(hooks);
         }
 
         Ok(workflow)
@@ -1017,7 +1017,7 @@ impl<O: State> Worker<O, Ready> {
 
             let task = job.new_task(Context::new().with_target(tgt.clone()).with_path(""));
 
-            let (hook_wf, patch) = match planner::find_workflow_for_task(task, domain, system) {
+            let hook_wf = match planner::find_workflow_for_task(task, domain, system) {
                 Ok(wf) => wf,
                 // skip the hook if its condition is not met
                 Err(e) if e.kind() == ErrorKind::ConditionNotMet => continue,
@@ -1029,12 +1029,10 @@ impl<O: State> Worker<O, Ready> {
             }
 
             // apply hook changes
-            system.patch(&patch)?;
+            *system = hook_wf.apply_changes(system)?;
 
             // concatenate the hook at the end of the plan
-            let Workflow { dag: h_dag, .. } = hook_wf;
-            let w_dag = std::mem::take(&mut workflow.dag);
-            workflow.dag = w_dag.concat(h_dag);
+            workflow.concat(hook_wf);
         }
 
         Ok(workflow)
@@ -1243,7 +1241,7 @@ impl<O: State> Worker<O, Ready> {
         let now = Instant::now();
 
         // look for a workflow for the task, the simulated state is discarded
-        let (mut workflow, _) = match planner::find_workflow_for_task(task, domain, system) {
+        let mut workflow = match planner::find_workflow_for_task(task, domain, system) {
             Ok(w) => w,
             Err(e) => {
                 warn!(time = ?now.elapsed(), "workflow not found");

@@ -110,11 +110,11 @@ fn build_candidates(
 /// The search is greedy: at each step the best candidate is applied and the
 /// search never backtracks.
 ///
-/// If found, this will replace the value of system with the final state of the system
+/// The final state of the system can be obtained with [`Workflow::apply_changes`]
 #[instrument(level = "trace", skip_all, err(level = "trace"))]
 pub fn find_workflow_to_target<T>(
     db: &Domain,
-    system: &mut System,
+    system: &System,
     tgt: &Value,
 ) -> Result<Option<Workflow>>
 where
@@ -172,8 +172,6 @@ where
                 })
                 .collect();
 
-            // update the system
-            *system = cur_state;
             return Ok(Some(workflow));
         }
 
@@ -237,18 +235,11 @@ where
 /// for composite tasks, the workflow will create a Dag with concurrent branches
 /// depending on the operational domain of each sub-task.
 ///
-/// If a workflow is found, the function will also return a [`crate::json::Patch`] with the
-/// cumulative changes performed by the task.
-///
 /// # Arguments
 /// * `db` - a reference to the worker [`Domain`]
 /// * `task` - the task to convert to a workflow
 /// * `system` - the state of the system before running the task
-pub fn find_workflow_for_task(
-    mut task: Task,
-    db: &Domain,
-    system: &System,
-) -> Result<(Workflow, Patch)> {
+pub fn find_workflow_for_task(mut task: Task, db: &Domain, system: &System) -> Result<Workflow> {
     // Look-up the task on the domain to find its path
     let task_id = task.id();
     let Context { args, .. } = task.context_mut();
@@ -257,9 +248,9 @@ pub fn find_workflow_for_task(
     // Set the correct path for the task
     let task = task.with_path(path);
 
-    let PartialPlan { dag, changes, .. } = try_task_into_workflow(&task, db, system)?;
+    let PartialPlan { dag, .. } = try_task_into_workflow(&task, db, system)?;
 
-    Ok((Workflow::new(dag), Patch(changes)))
+    Ok(Workflow::new(dag))
 }
 
 /// The result of simulating a task against a state

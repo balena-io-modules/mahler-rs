@@ -260,6 +260,22 @@ impl Workflow {
         self.worker_id
     }
 
+    /// Append the tasks of another workflow to the end of this one
+    pub(super) fn concat(&mut self, other: Workflow) {
+        let dag = std::mem::take(&mut self.dag);
+        self.dag = dag.concat(other.dag);
+    }
+
+    /// Apply the changes of every task in the workflow to the given system, returning
+    /// the resulting state. The input system is not modified.
+    pub(super) fn apply_changes(&self, system: &System) -> Result<System, Error> {
+        let mut system = system.clone();
+        for unit in self.dag.iter() {
+            system.patch(&unit.output)?;
+        }
+        Ok(system)
+    }
+
     pub(super) async fn execute(
         self,
         sys_reader: &Reader<System>,
