@@ -435,79 +435,86 @@ impl Ord for Candidate {
 /// concurrent candidate backed by a parallel DAG branch. If only one (or zero) candidates
 /// are non-conflicting, the list is returned unchanged.
 fn merge_concurrent_candidates(candidates: Vec<Candidate>) -> Vec<Candidate> {
-    if candidates.len() < 2 {
+    let selected = select_concurrent(&candidates);
+    if selected.len() < 2 {
         return candidates;
     }
 
+    let mut concurrent = Vec::with_capacity(selected.len());
+    let mut remaining = Vec::with_capacity(candidates.len() - selected.len());
+    for (i, candidate) in candidates.into_iter().enumerate() {
+        if selected.contains(&i) {
+            concurrent.push(candidate);
+        } else {
+            remaining.push(candidate);
+        }
+    }
+
+    remaining.push(Candidate::concurrent(concurrent));
+    remaining
+}
+
+/// Select the indexes of the candidates that can be run concurrently.
+///
+/// The selection has at most one candidate per path (the highest priority one), the
+/// paths do not conflict with each other and the task domains do not overlap.
+fn select_concurrent(candidates: &[Candidate]) -> BTreeSet<usize> {
     // Find the longest list of non-conflicting tasks based on paths (for prioritization)
     let non_conflicting_paths = select_non_conflicting_prefer_prefixes(
         candidates.iter().map(|Candidate { path, .. }| path),
     );
 
-    // Track the best candidate index per path, avoiding full Candidate clones
-    let mut concurrent_indices: BTreeMap<Path, usize> = BTreeMap::new();
+    // Best candidate index selected for each path
+    let mut selected: BTreeMap<&Path, usize> = BTreeMap::new();
     let mut cumulative_domain = BTreeSet::new();
 
     for (i, candidate) in candidates.iter().enumerate() {
-        if let Some(&prev_idx) = concurrent_indices.get(&candidate.path) {
-            if candidates[prev_idx] >= *candidate {
-                // skip the candidate if there is a previous candidate for the path
-                // with higher priority
-                continue;
-            }
+        // A candidate with higher priority was already selected for the path
+        if selected
+            .get(&candidate.path)
+            .is_some_and(|&prev| candidates[prev] >= *candidate)
+        {
+            continue;
         }
 
-        // If the domain of the candidate doesn't conflict with the cumulative domain
         if non_conflicting_paths.contains(&candidate.path)
             && !domains_are_conflicting(&cumulative_domain, candidate.plan.domain.iter())
         {
             cumulative_domain.extend(candidate.plan.domain.iter().cloned());
-            concurrent_indices.insert(candidate.path.clone(), i);
+            selected.insert(&candidate.path, i);
         }
     }
 
-    if concurrent_indices.len() > 1 {
-        // The path for the candidate is the longest common prefix between child paths
-        let path = longest_common_prefix(concurrent_indices.keys());
+    selected.into_values().collect()
+}
 
-        // Partition in one O(n) pass: move concurrent candidates out, keep the rest.
-        let selected: BTreeSet<usize> = concurrent_indices.into_values().collect();
-        let mut concurrent = Vec::with_capacity(selected.len());
-        let mut remaining = Vec::with_capacity(candidates.len() - selected.len());
-        for (i, candidate) in candidates.into_iter().enumerate() {
-            if selected.contains(&i) {
-                concurrent.push(candidate);
-            } else {
-                remaining.push(candidate);
-            }
-        }
+impl Candidate {
+    /// Combine independent candidates into a single candidate with a parallel DAG
+    fn concurrent(candidates: Vec<Candidate>) -> Self {
+        // The path is the longest common prefix between the child paths
+        let path = longest_common_prefix(candidates.iter().map(|c| &c.path));
+        // Treat the candidate as a method when sorting if all children are methods
+        let is_method = candidates.iter().all(|c| c.is_method);
 
-        let mut plan_branches = Vec::with_capacity(concurrent.len());
+        let mut branches = Vec::with_capacity(candidates.len());
         let mut changes = Vec::new();
         let mut domain = BTreeSet::new();
-        // Treat the candidate as a method when sorting if all children are methods
-        let is_method = concurrent.iter().all(|c| c.is_method);
-
-        for Candidate { plan, .. } in concurrent {
-            plan_branches.push(plan.dag);
+        for Candidate { plan, .. } in candidates {
+            branches.push(plan.dag);
             changes.extend(plan.changes);
             domain.extend(plan.domain);
         }
 
-        // Construct a new candidate using the concurrent branches
-        remaining.push(Candidate {
+        Candidate {
             plan: PartialPlan {
-                dag: Dag::new(plan_branches),
+                dag: Dag::new(branches),
                 changes,
                 domain,
             },
             path,
             is_method,
             operation: OperationMatcher::Update,
-        });
-        remaining
-    } else {
-        candidates
+        }
     }
 }
 
