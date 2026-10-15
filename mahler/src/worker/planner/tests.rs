@@ -76,12 +76,9 @@ pub fn find_plan<T>(db: &Domain, cur: T, tgt: T::Target) -> Result<Option<Workfl
 where
     T: State,
 {
-    let tgt = serde_json::to_value(tgt).expect("failed to serialize target state");
+    let system = crate::runtime::System::try_from(cur).expect("failed to serialize current state");
 
-    let mut system =
-        crate::runtime::System::try_from(cur).expect("failed to serialize current state");
-
-    let res = find_workflow_to_target::<T>(db, &mut system, &tgt)?;
+    let res = find_workflow_to_target::<T>(db, &system, &tgt)?;
     Ok(res)
 }
 
@@ -119,6 +116,74 @@ fn it_aborts_search_if_plan_length_grows_too_much() {
 
     let workflow = find_plan(&domain, 0, 2);
     assert!(workflow.is_err());
+}
+
+#[test]
+fn it_returns_no_plan_if_search_stalls_at_the_depth_limit() {
+    // Stops making progress after exactly 255 steps, the last step
+    // allowed by the search depth limit
+    fn capped_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> View<i32> {
+        if *counter < tgt && *counter < 255 {
+            *counter += 1;
+        }
+
+        counter
+    }
+
+    let domain = Domain::new().job("", update(capped_plus_one));
+
+    let workflow = find_plan(&domain, 0, 300);
+    assert!(matches!(workflow, Ok(None)));
+}
+
+#[test]
+fn it_allows_repeating_a_task_if_the_system_state_changed() {
+    #[derive(Serialize, Deserialize)]
+    struct Car {
+        full_tank: bool,
+        trips: u32,
+    }
+
+    impl State for Car {
+        type Target = Self;
+    }
+
+    fn refuel(mut full_tank: View<bool>) -> View<bool> {
+        *full_tank = true;
+        full_tank
+    }
+
+    // Every trip empties the tank
+    fn drive(mut car: View<Car>, Target(tgt): Target<Car>) -> View<Car> {
+        if car.full_tank && car.trips < tgt.trips {
+            car.full_tank = false;
+            car.trips += 1;
+        }
+        car
+    }
+
+    let domain = Domain::new()
+        .job("", update(drive).with_description(|| "drive"))
+        .job("/full_tank", update(refuel).with_description(|| "refuel"));
+
+    // `refuel` is applied to an empty tank every time, the planner should
+    // not mistake this for a loop since the number of trips is different
+    let workflow = find_plan(
+        &domain,
+        Car {
+            full_tank: false,
+            trips: 0,
+        },
+        Car {
+            full_tank: true,
+            trips: 2,
+        },
+    )
+    .unwrap()
+    .unwrap();
+
+    let expected: Dag<&str> = seq!("refuel", "drive", "refuel", "drive", "refuel");
+    assert_eq!(workflow.to_string(), expected.to_string());
 }
 
 #[test]
@@ -645,6 +710,58 @@ fn it_finds_concurrent_plans_with_nested_forks() {
         + seq!("a++");
 
     assert_eq!(workflow.to_string(), expected.to_string(),);
+}
+
+#[test]
+fn it_applies_workflow_changes_to_reach_the_target_state() {
+    init();
+    type Counters = Map<String, i32>;
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct MyState {
+        counters: Counters,
+    }
+
+    impl State for MyState {
+        type Target = Self;
+    }
+
+    let domain = Domain::new().job("/counters/{counter}", update(plus_one));
+
+    let counters = |a, b, c| {
+        Map::from([
+            ("a".to_string(), a),
+            ("b".to_string(), b),
+            ("c".to_string(), c),
+        ])
+    };
+    let initial = MyState {
+        counters: counters(0, 0, 0),
+    };
+    let target = MyState {
+        counters: counters(2, 1, 3),
+    };
+
+    let system = crate::runtime::System::try_from(initial).unwrap();
+    let workflow = find_workflow_to_target::<MyState>(&domain, &system, &target)
+        .unwrap()
+        .unwrap();
+
+    // The workflow runs counters concurrently, the final state has to match
+    // the target regardless of how branches are ordered
+    assert!(workflow.to_string().contains("+ ~"));
+
+    let result = workflow.apply_changes(&system).unwrap();
+    assert_eq!(
+        result.inner_state(),
+        &serde_json::to_value(&target).unwrap()
+    );
+
+    // The input state is not modified
+    assert_eq!(
+        system.inner_state(),
+        &json!({"counters": {"a": 0, "b": 0, "c": 0}})
+    );
 }
 
 #[test]
@@ -1986,4 +2103,105 @@ fn test_multiple_skipped_services_each_get_correct_reason() {
         three.and_then(|op| op.reason.as_deref()),
         Some("service 'three' is failed")
     );
+}
+
+fn candidate(path: &'static str, domain: &[&'static str], is_method: bool) -> Candidate {
+    Candidate {
+        plan: PartialPlan {
+            dag: Dag::default(),
+            changes: Vec::new(),
+            domain: domain.iter().map(|p| Path::from_static(p)).collect(),
+        },
+        path: Path::from_static(path),
+        is_method,
+        operation: OperationMatcher::Update,
+    }
+}
+
+#[test]
+fn it_selects_the_highest_priority_candidate_for_a_path_with_overlapping_domains() {
+    // Both candidates target `/a` and their domains overlap, the method has
+    // higher priority than the action
+    let candidates = vec![
+        candidate("/a", &["/a"], false),
+        candidate("/a", &["/a/x"], true),
+        candidate("/b", &["/b"], false),
+    ];
+
+    let selected = select_concurrent(&candidates);
+    assert_eq!(selected, BTreeSet::from([1, 2]));
+}
+
+#[test]
+fn it_prefers_methods_over_actions_on_the_same_path_when_merging_concurrent_candidates() {
+    init();
+    type Config = Map<String, String>;
+
+    #[derive(Serialize, Deserialize)]
+    struct MyState {
+        config: Config,
+        counters: Map<String, i32>,
+    }
+
+    impl State for MyState {
+        type Target = Self;
+    }
+
+    fn new_counter(mut counter: View<Option<i32>>, Target(tgt): Target<i32>) -> View<Option<i32>> {
+        counter.replace(tgt);
+        counter
+    }
+
+    fn new_config(
+        mut config: View<Option<String>>,
+        Target(tgt): Target<String>,
+    ) -> View<Option<String>> {
+        config.replace(tgt);
+        config
+    }
+
+    // An action and a method are registered for the same path. Jobs are evaluated
+    // sorted by name, so the action comes first as a candidate, but the method has
+    // higher priority. The domain of the method (/config/some_var) overlaps with the
+    // domain of the action (/config)
+    fn a_update_config(mut config: View<Config>, Target(tgt): Target<Config>) -> View<Config> {
+        *config = tgt;
+        config
+    }
+
+    fn z_update_config_vars(Target(tgt): Target<Config>) -> Vec<Task> {
+        tgt.into_iter()
+            .map(|(name, _)| new_config.with_arg("config", name))
+            .collect()
+    }
+
+    let domain = Domain::new()
+        .job(
+            "/counters/{counter}",
+            create(new_counter).with_description(|Args(counter): Args<String>| {
+                format!("create counter '{counter}'")
+            }),
+        )
+        .job(
+            "/config/{config}",
+            create(new_config)
+                .with_description(|Args(config): Args<String>| format!("create config '{config}'")),
+        )
+        .job(
+            "/config",
+            update(a_update_config).with_description(|| "update configurations"),
+        )
+        .job("/config", update(z_update_config_vars));
+
+    let initial =
+        serde_json::from_value::<MyState>(json!({ "config": {}, "counters": {} })).unwrap();
+    let target = serde_json::from_value::<MyState>(
+        json!({ "config": {"some_var":"one"}, "counters": {"one": 0} }),
+    )
+    .unwrap();
+
+    let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
+
+    let expected: Dag<&str> = par!("create config 'some_var'", "create counter 'one'");
+    assert_eq!(expected.to_string(), workflow.to_string());
 }
