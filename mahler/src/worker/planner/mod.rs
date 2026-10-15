@@ -464,28 +464,31 @@ fn select_concurrent(candidates: &[Candidate]) -> BTreeSet<usize> {
         candidates.iter().map(|Candidate { path, .. }| path),
     );
 
-    // Best candidate index selected for each path
-    let mut selected: BTreeMap<&Path, usize> = BTreeMap::new();
-    let mut cumulative_domain = BTreeSet::new();
-
+    // Highest priority candidate for each path
+    let mut best: BTreeMap<&Path, usize> = BTreeMap::new();
     for (i, candidate) in candidates.iter().enumerate() {
-        // A candidate with higher priority was already selected for the path
-        if selected
-            .get(&candidate.path)
-            .is_some_and(|&prev| candidates[prev] >= *candidate)
-        {
-            continue;
-        }
-
-        if non_conflicting_paths.contains(&candidate.path)
-            && !domains_are_conflicting(&cumulative_domain, candidate.plan.domain.iter())
-        {
-            cumulative_domain.extend(candidate.plan.domain.iter().cloned());
-            selected.insert(&candidate.path, i);
+        if non_conflicting_paths.contains(&candidate.path) {
+            let prev = best.entry(&candidate.path).or_insert(i);
+            if candidates[*prev] < *candidate {
+                *prev = i;
+            }
         }
     }
 
-    selected.into_values().collect()
+    // Keep the best candidates whose domains do not overlap, in the original order
+    let mut best: Vec<usize> = best.into_values().collect();
+    best.sort_unstable();
+
+    let mut selected = BTreeSet::new();
+    let mut cumulative_domain = BTreeSet::new();
+    for i in best {
+        let domain = &candidates[i].plan.domain;
+        if !domains_are_conflicting(&cumulative_domain, domain.iter()) {
+            cumulative_domain.extend(domain.iter().cloned());
+            selected.insert(i);
+        }
+    }
+    selected
 }
 
 impl Candidate {

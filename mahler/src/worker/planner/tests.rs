@@ -2005,3 +2005,104 @@ fn test_multiple_skipped_services_each_get_correct_reason() {
         Some("service 'three' is failed")
     );
 }
+
+fn candidate(path: &'static str, domain: &[&'static str], is_method: bool) -> Candidate {
+    Candidate {
+        plan: PartialPlan {
+            dag: Dag::default(),
+            changes: Vec::new(),
+            domain: domain.iter().map(|p| Path::from_static(p)).collect(),
+        },
+        path: Path::from_static(path),
+        is_method,
+        operation: OperationMatcher::Update,
+    }
+}
+
+#[test]
+fn it_selects_the_highest_priority_candidate_for_a_path_with_overlapping_domains() {
+    // Both candidates target `/a` and their domains overlap, the method has
+    // higher priority than the action
+    let candidates = vec![
+        candidate("/a", &["/a"], false),
+        candidate("/a", &["/a/x"], true),
+        candidate("/b", &["/b"], false),
+    ];
+
+    let selected = select_concurrent(&candidates);
+    assert_eq!(selected, BTreeSet::from([1, 2]));
+}
+
+#[test]
+fn it_prefers_methods_over_actions_on_the_same_path_when_merging_concurrent_candidates() {
+    init();
+    type Config = Map<String, String>;
+
+    #[derive(Serialize, Deserialize)]
+    struct MyState {
+        config: Config,
+        counters: Map<String, i32>,
+    }
+
+    impl State for MyState {
+        type Target = Self;
+    }
+
+    fn new_counter(mut counter: View<Option<i32>>, Target(tgt): Target<i32>) -> View<Option<i32>> {
+        counter.replace(tgt);
+        counter
+    }
+
+    fn new_config(
+        mut config: View<Option<String>>,
+        Target(tgt): Target<String>,
+    ) -> View<Option<String>> {
+        config.replace(tgt);
+        config
+    }
+
+    // An action and a method are registered for the same path. Jobs are evaluated
+    // sorted by name, so the action comes first as a candidate, but the method has
+    // higher priority. The domain of the method (/config/some_var) overlaps with the
+    // domain of the action (/config)
+    fn a_update_config(mut config: View<Config>, Target(tgt): Target<Config>) -> View<Config> {
+        *config = tgt;
+        config
+    }
+
+    fn z_update_config_vars(Target(tgt): Target<Config>) -> Vec<Task> {
+        tgt.into_iter()
+            .map(|(name, _)| new_config.with_arg("config", name))
+            .collect()
+    }
+
+    let domain = Domain::new()
+        .job(
+            "/counters/{counter}",
+            create(new_counter).with_description(|Args(counter): Args<String>| {
+                format!("create counter '{counter}'")
+            }),
+        )
+        .job(
+            "/config/{config}",
+            create(new_config)
+                .with_description(|Args(config): Args<String>| format!("create config '{config}'")),
+        )
+        .job(
+            "/config",
+            update(a_update_config).with_description(|| "update configurations"),
+        )
+        .job("/config", update(z_update_config_vars));
+
+    let initial =
+        serde_json::from_value::<MyState>(json!({ "config": {}, "counters": {} })).unwrap();
+    let target = serde_json::from_value::<MyState>(
+        json!({ "config": {"some_var":"one"}, "counters": {"one": 0} }),
+    )
+    .unwrap();
+
+    let workflow = find_plan(&domain, initial, target).unwrap().unwrap();
+
+    let expected: Dag<&str> = par!("create config 'some_var'", "create counter 'one'");
+    assert_eq!(expected.to_string(), workflow.to_string());
+}
