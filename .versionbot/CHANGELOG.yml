@@ -1,4 +1,94 @@
 - commits:
+    - subject: Add Cargo.lock to repo
+      hash: ee585f6a831000ab779f4b5593e1651adb201aec
+      body: >
+        This is to prevent dependency minor updates from blocking CI. In this
+
+        specific case, `tokio-util` got it's MSRV updated to 1.85, causing tests
+
+        for this library to fail. This pins the dependency to the 0.7.19 for
+        now.
+
+
+        This library MSRV will be bumped in a future breaking change.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Do not receive a Value on find_workflow_to_target
+      hash: fc3826da127183439368e57d4549292e351571af
+      body: |
+        This makes the interface a bit more self contained. The function can
+        already handle the conversion.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Do not modify input state in `find_workflow_to_target`
+      hash: c72db17b6aacb89295c42cdfc726cd32dc2496e4
+      body: |
+        Instead, Workflow now implements an `apply_changes` function that
+        reproduces the changes in the inner dag on the state given as input.
+
+        Dag now implements `iter()` which is used by `Workflow::apply_changes`.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Remove WorkUnit::id
+      hash: 3c387e946b1e9ee4ae73b253b579ef1370895298
+      body: |
+        This property was originally intended to detect plan cycles, however the
+        planner already has a very effective cycle detection by checking that a
+        new candidate task does not visit a state that has already been visited
+        during planning. This makes the worker id unnecessary. The previous
+        implementation could also lead to false positives given the fact that
+        work unit id did not include the target override.
+
+        This removes the property, simplifying the code.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Fix same-path selection when merging candidates
+      hash: 5c44808bd24955c46b75d10ebcc5eccfec4d20aa
+      body: |
+        Select the highest priority candidate per path before checking domain
+        conflicts, so a lower priority candidate can no longer take the path
+        when its domain overlaps with the better candidate.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Split merge_concurrent_candidates on planner
+      hash: 6ffced8dcc3658cb652feece41ffabc1f1e6d8b2
+      body: |
+        The previous function was long and hard to read. This makes the process
+        easier to follow
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+    - subject: Refactor worker/planner module
+      hash: 74708fa004be1c8ea13002291f254b761a204619
+      body: |
+        Removes unnecessary intermediate functions, merges modules back into
+        `mod.rs` and simplifies code. No functionality changes.
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.27.2
+  title: ""
+  date: 2026-10-20T18:43:19.756Z
+- commits:
     - subject: Sort handler ids by name disambiguating by type id
       hash: 1b0b86cf2376172b80ef15e8d0abe3f58b282031
       body: |
