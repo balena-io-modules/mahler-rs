@@ -330,33 +330,66 @@ impl<T> Dag<T> {
         self
     }
 
+    /// Iterate over the items of the DAG in execution order
+    ///
+    /// Items in a sequence are visited in order. Branches of a fork are visited one
+    /// after the other, and all of them are visited before the items following the fork.
+    ///
+    /// # Example
+    /// ```rust
+    /// use mahler::dag::{Dag, dag, seq};
+    ///
+    /// let dag: Dag<i32> = seq!(1) + dag!(seq!(2, 3), seq!(4)) + seq!(5);
+    /// assert_eq!(dag.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+    /// ```
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter {
+            stack: vec![self.0.iter()],
+        }
+    }
+
     /// Return `true` if there is any node in the DAG that meets the given condition
     pub fn any(&self, condition: impl Fn(&T) -> bool) -> bool {
-        // Walk each sequence in turn, queueing branches to visit later
-        let mut pending: Vec<&Dag<T>> = Vec::new();
-        let mut current = self;
-        loop {
-            for node in &current.0 {
-                match node {
-                    Node::Item(value) => {
-                        if condition(value) {
-                            return true;
-                        }
-                    }
-                    Node::Fork(branches) => pending.extend(branches.iter()),
-                }
-            }
-
-            match pending.pop() {
-                Some(next) => current = next,
-                None => return false,
-            }
-        }
+        self.iter().any(condition)
     }
 
     /// Return `true` if the given condition is met for every node in the DAG
     pub fn all(&self, condition: impl Fn(&T) -> bool) -> bool {
         !self.any(|value| !condition(value))
+    }
+}
+
+/// Iterator over the items of a [`Dag`] in execution order, see [`Dag::iter`]
+pub struct Iter<'a, T> {
+    /// Sequences still being visited, the innermost one on top
+    stack: Vec<std::slice::Iter<'a, Node<T>>>,
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        loop {
+            match self.stack.last_mut()?.next() {
+                None => {
+                    self.stack.pop();
+                }
+                Some(Node::Item(value)) => return Some(value),
+                // Reversed so the first branch ends up on top of the stack
+                Some(Node::Fork(branches)) => {
+                    self.stack.extend(branches.iter().rev().map(|b| b.0.iter()))
+                }
+            }
+        }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Dag<T> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    fn into_iter(self) -> Iter<'a, T> {
+        self.iter()
     }
 }
 
