@@ -1,12 +1,16 @@
 use anyhow::{anyhow, Context as AnyhowCtx};
-use bollard::container::{CreateContainerOptions, StartContainerOptions};
-use bollard::secret::{ContainerInspectResponse, ContainerState, ContainerStateStatusEnum};
+use bollard::models::{
+    ContainerCreateBody, ContainerInspectResponse, ContainerState, ContainerStateStatusEnum,
+};
+use bollard::query_parameters::{
+    CreateContainerOptions, CreateImageOptions, RemoveContainerOptions, RemoveImageOptions,
+    StartContainerOptions,
+};
 use futures_util::stream::StreamExt;
 use mahler::worker::{Uninitialized, Worker};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use bollard::image::CreateImageOptions;
 use bollard::Docker;
 
 use mahler::extract::{Args, Res, System, Target, View};
@@ -22,9 +26,9 @@ pub enum ServiceStatus {
     Stopped,
 }
 
-impl From<ServiceTarget> for bollard::container::Config<String> {
-    fn from(tgt: ServiceTarget) -> bollard::container::Config<String> {
-        bollard::container::Config {
+impl From<ServiceTarget> for ContainerCreateBody {
+    fn from(tgt: ServiceTarget) -> ContainerCreateBody {
+        ContainerCreateBody {
             image: Some(tgt.image),
             cmd: tgt.cmd.map(|list| list.into()),
             ..Default::default()
@@ -242,7 +246,7 @@ fn fetch_image(
 
         // Otherwise try to download the image
         let options = Some(CreateImageOptions {
-            from_image: image_name.clone(),
+            from_image: Some(image_name.clone()),
             ..Default::default()
         });
 
@@ -291,7 +295,7 @@ fn remove_image(
         docker
             .as_ref()
             .expect("docker resource should be available")
-            .remove_image(&image_name, None, None)
+            .remove_image(&image_name, None::<RemoveImageOptions>, None)
             .await
             .with_context(|| format!("failed to remove image {image_name}"))?;
 
@@ -382,8 +386,8 @@ fn install_service(
         };
 
         let options = Some(CreateContainerOptions {
-            name: container_name.clone(),
-            platform: None,
+            name: Some(container_name.clone()),
+            ..Default::default()
         });
 
         let tgt_img = tgt.image.clone();
@@ -442,7 +446,7 @@ fn start_service(
             .expect("docker resource should be available");
         if let Some(ref id) = svc_view.id {
             docker
-                .start_container(id, None::<StartContainerOptions<String>>)
+                .start_container(id, None::<StartContainerOptions>)
                 .await
                 .with_context(|| format!("failed to start container for {service_name}"))?;
 
@@ -550,7 +554,7 @@ fn uninstall_service(
             docker
                 .remove_container(
                     id,
-                    Some(bollard::container::RemoveContainerOptions {
+                    Some(RemoveContainerOptions {
                         v: true,
                         ..Default::default()
                     }),
@@ -657,7 +661,7 @@ pub fn create_worker() -> Worker<Project, Uninitialized> {
 mod tests {
     use std::collections::HashMap;
 
-    use bollard::container::{ListContainersOptions, RemoveContainerOptions};
+    use bollard::query_parameters::{ListContainersOptions, PruneImagesOptions};
     use mahler::dag::{dag, seq, Dag};
     use mahler::worker::{FindWorkflow, RunTask, SeekStatus, SeekTarget};
     use pretty_assertions::assert_eq;
@@ -686,7 +690,7 @@ mod tests {
     async fn cleanup() {
         let docker = Docker::connect_with_defaults().unwrap();
         let containers = docker
-            .list_containers(Some(ListContainersOptions::<String> {
+            .list_containers(Some(ListContainersOptions {
                 all: true,
                 ..Default::default()
             }))
@@ -723,9 +727,11 @@ mod tests {
 
         // Delete unused images
         let mut filters = HashMap::new();
-        filters.insert("dangling", vec!["false"]);
+        filters.insert("dangling".to_string(), vec!["false".to_string()]);
         let _ = docker
-            .prune_images(Some(bollard::image::PruneImagesOptions { filters }))
+            .prune_images(Some(PruneImagesOptions {
+                filters: Some(filters),
+            }))
             .await;
     }
 
