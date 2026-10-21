@@ -197,7 +197,7 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "mahler"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "mahler-core"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "async-trait",
  "dedent",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "mahler-derive"
-version = "0.27.2"
+version = "0.27.3"
 dependencies = [
  "mahler",
  "proc-macro2",

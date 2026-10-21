@@ -1,4 +1,24 @@
 - commits:
+    - subject: Update dependencies
+      hash: e36d484cb8c9343cc1cffaa61afc98f8af021a00
+      body: |
+        Bump workspace dependencies to their latest compatible versions and
+        upgrade syn to v3 in mahler-derive. jsonptr stays on 0.7 since
+        json-patch 4.2 (latest) still depends on it and exposes its types.
+        tokio stays on 1.53 in the workspace lockfile to keep the declared
+        rust-version (1.81); tokio 1.54 requires 1.85.
+
+        Update the example dependencies, migrating the composer example to
+        bollard v0.21 (`query_parameters` options and models types).
+      footer:
+        Change-type: patch
+        change-type: patch
+      author: Felipe Lalanne
+      nested: []
+  version: 0.27.3
+  title: ""
+  date: 2026-10-21T23:37:10.807Z
+- commits:
     - subject: Add Cargo.lock to repo
       hash: ee585f6a831000ab779f4b5593e1651adb201aec
       body: >
