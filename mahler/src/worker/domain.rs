@@ -1,6 +1,6 @@
 use matchit::Router;
-use std::collections::btree_set::Iter;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
+use std::slice::Iter;
 
 use crate::error::{Error, ErrorKind};
 use crate::exception::Exception;
@@ -11,12 +11,23 @@ use crate::task::Id as TaskId;
 
 #[derive(Default, Debug, Clone)]
 pub struct Domain {
-    // The router stores a list of jobs matching a route
-    jobs: Router<BTreeSet<Job>>,
-    // List of exceptions matching a route
-    exceptions: Router<BTreeSet<Exception>>,
+    // The router stores a sorted list of jobs matching a route
+    jobs: Router<Vec<Job>>,
+    // Sorted list of exceptions matching a route
+    exceptions: Router<Vec<Exception>>,
     // The index stores the reverse relation of task id to a route
-    index: HashMap<TaskId, String>,
+    index: HashMap<TaskId, &'static str>,
+}
+
+/// Insert an item into a sorted list, keeping the existing item if an equal one exists
+///
+/// Lists are kept sorted (like a `BTreeSet`) but sized to their contents, as most routes
+/// only have a handful of jobs.
+fn insert_sorted<T: Ord>(list: &mut Vec<T>, item: T) {
+    if let Err(pos) = list.binary_search(&item) {
+        list.reserve_exact(1);
+        list.insert(pos, item);
+    }
 }
 
 impl Domain {
@@ -51,16 +62,16 @@ impl Domain {
         let task_id = job.id();
 
         // Remove the route from the router if it exists or create
-        // a new set if it doesn't
+        // a new list if it doesn't
         let mut queue = jobs.remove(route).unwrap_or_default();
-        queue.insert(job);
+        insert_sorted(&mut queue, job);
 
         // (re)insert the queue to the router, we should not have
         // conflicts here
         jobs.insert(route, queue).expect("route should be valid");
 
         // Only allow one assignment of a job to a route
-        if let Some(oldroute) = index.insert(task_id, String::from(route)) {
+        if let Some(oldroute) = index.insert(task_id, route) {
             if oldroute != route {
                 panic!(
                     "cannot assign '{task_id}' to route '{route}', a previous assignment exists to '{oldroute}'"
@@ -74,9 +85,9 @@ impl Domain {
         let Self { mut exceptions, .. } = self;
 
         // Remove the route from the router if it exists or create
-        // a new set if it doesn't
+        // a new list if it doesn't
         let mut queue = exceptions.remove(route).unwrap_or_default();
-        queue.insert(exception);
+        insert_sorted(&mut queue, exception);
 
         // (re)insert the queue to the router, we should not have
         // conflicts here
@@ -100,7 +111,7 @@ impl Domain {
     /// it allows to parse only once
     pub(crate) fn find_path(&self, task_id: TaskId, args: &mut PathArgs) -> Result<String> {
         if let Some(route) = self.index.get(&task_id) {
-            let mut route = route.clone();
+            let mut route = route.to_string();
             let mut replacements = Vec::new();
             // Track used keys with their position in the route for ordering
             let mut used_keys: Vec<(usize, String)> = Vec::new();

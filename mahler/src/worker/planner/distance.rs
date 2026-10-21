@@ -1,49 +1,49 @@
 use json_patch::{diff, Patch};
-use jsonptr::Pointer;
-use std::collections::BTreeSet;
+use jsonptr::{Pointer, PointerBuf};
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::json::{Operation, Path, Value};
+use crate::json::{Operation, OperationMatcher, Path, Value};
 
 #[derive(Debug)]
 pub struct Distance {
     pub required: Vec<Operation>,
     pub ignored: Vec<Operation>,
-    pub operations: Vec<Operation>,
+    /// Every path that may be operated on to reach the target, with the kind of operation.
+    ///
+    /// The kind is always one of `Create`, `Update` or `Delete`. Values are not kept as
+    /// only the path and the kind are used to look for matching jobs.
+    pub operations: Vec<(Path, OperationMatcher)>,
 }
 
-fn insert_remove_ops(ops: &mut BTreeSet<Operation>, path: &Pointer, value: &Value) {
-    let mut queue = Vec::new();
-    queue.push((path.to_buf(), value));
+fn insert_remove_ops<'a>(
+    ops: &mut BTreeMap<Path, OperationMatcher>,
+    path: &Pointer,
+    value: &'a Value,
+) {
+    let mut queue = vec![(path.to_buf(), value)];
 
     while let Some((path, value)) = queue.pop() {
-        if value.is_object() {
-            let obj = value.as_object().unwrap();
-            for (k, v) in obj.iter() {
-                let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
-                // Insert a remove operation for each child
-                ops.insert(Operation::Delete {
-                    path: Path::new(path.as_ref()),
-                });
-
-                // Append the value to the queue
-                queue.push((path, v));
+        let mut push = |child: PointerBuf, v: &'a Value| {
+            // only containers have children left to visit
+            if v.is_object() || v.is_array() {
+                queue.push((child.clone(), v));
             }
-        }
+            // `or_insert` keeps the first operation recorded for a path
+            ops.entry(Path::from(child))
+                .or_insert(OperationMatcher::Delete);
+        };
 
-        if value.is_array() {
-            let obj = value.as_array().unwrap();
-            for (k, v) in obj.iter().enumerate() {
-                let path = path.concat(Pointer::parse(&format!("/{k}")).unwrap());
-
-                // Insert a remove operation for each child
-                ops.insert(Operation::Delete {
-                    path: Path::new(path.as_ref()),
-                });
-
-                // Append the value to the queue
-                queue.push((path, v));
-            }
+        match value {
+            Value::Object(obj) => obj
+                .iter()
+                .for_each(|(k, v)| push(path.with_trailing_token(k.as_str()), v)),
+            Value::Array(arr) => arr
+                .iter()
+                .enumerate()
+                .for_each(|(i, v)| push(path.with_trailing_token(i), v)),
+            _ => {}
         }
     }
 }
@@ -88,7 +88,9 @@ impl Distance {
     /// When creating a new distance, an ignore list can be added. Changes for path prefixed by any of the
     /// paths in the ignore list are not added to the operations list.
     pub fn new(src: &Value, tgt: &Value, ignore: &[Path]) -> Distance {
-        let mut operations = BTreeSet::new();
+        // Ordered by path (length, then lexicographically), the first operation recorded
+        // for a path wins
+        let mut operations = BTreeMap::new();
 
         // calculate differences between the system root and
         // the target
@@ -103,22 +105,15 @@ impl Distance {
             // For every operation on the list of changes
             let path = op.path().as_ref();
 
-            // get all paths up to the root
+            // every parent up to the root may be updated to reach the target
             let mut parent = path;
             while let Some(newparent) = parent.parent() {
-                // get the target at the parent to use as value
-                // no matter the operation, the parent of the target should
-                // always exist. If it doesn't there is a bug (probbly in jsonptr)
-                let value = newparent
-                    .resolve(tgt)
-                    .unwrap_or_else(|e| panic!("path `{path}` should be resolvable on state: {e}"));
-
-                // Insert a replace operation for each one
-                operations.insert(Operation::Update {
-                    path: Path::new(newparent),
-                    value: value.clone(),
-                });
-
+                // every path in the map already has its ancestors in the map
+                if let Entry::Vacant(entry) = operations.entry(Path::new(newparent)) {
+                    entry.insert(OperationMatcher::Update);
+                } else {
+                    break;
+                }
                 parent = newparent;
             }
 
@@ -136,7 +131,7 @@ impl Distance {
             }
 
             // Finally insert the actual operation
-            operations.insert(op.clone());
+            operations.entry(op.path().clone()).or_insert(op.into());
         }
 
         Distance {
@@ -164,7 +159,7 @@ mod tests {
         let ops: Vec<Value> = distance
             .operations
             .iter()
-            .map(|o| serde_json::to_value(o).unwrap())
+            .map(|(path, kind)| json!({"op": kind.to_string(), "path": path}))
             .collect();
 
         assert_eq!(ops, result)
@@ -176,9 +171,9 @@ mod tests {
             json!({"a": 1, "b": "one", "c": {"k": "v"}}),
             json!({"a": 2, "b": "one", "c": {}}),
             vec![
-                json!({"op": "update", "path": "", "value": {"a": 2, "b": "one", "c": {}}}),
-                json!({"op": "update", "path": "/a", "value": 2}),
-                json!({"op": "update", "path": "/c", "value": {}}),
+                json!({"op": "update", "path": ""}),
+                json!({"op": "update", "path": "/a"}),
+                json!({"op": "update", "path": "/c"}),
                 json!({"op": "delete", "path": "/c/k"}),
             ],
         );
@@ -186,8 +181,8 @@ mod tests {
             json!({"a": 1, "b": "one", "c": {"k": "v"}}),
             json!({"a": 2}),
             vec![
-                json!({"op": "update", "path": "", "value": {"a": 2}}),
-                json!({"op": "update", "path": "/a", "value": 2}),
+                json!({"op": "update", "path": ""}),
+                json!({"op": "update", "path": "/a"}),
                 json!({"op": "delete", "path": "/b"}),
                 json!({"op": "delete", "path": "/c"}),
                 json!({"op": "delete", "path": "/c/k"}),
@@ -197,18 +192,18 @@ mod tests {
             json!({"a": 1, "b": "one", "c": {"k": "v"}}),
             json!({"a": 2, "b": "two", "c": {"k": "v"}}),
             vec![
-                json!({"op": "update", "path": "", "value": {"a": 2, "b": "two", "c": {"k": "v"}}}),
-                json!({"op": "update", "path": "/a", "value": 2}),
-                json!({"op": "update", "path": "/b", "value": "two"}),
+                json!({"op": "update", "path": ""}),
+                json!({"op": "update", "path": "/a"}),
+                json!({"op": "update", "path": "/b"}),
             ],
         );
         distance_eq(
             json!({"a": {"b": {"c": {"d": "e"}}}}),
             json!({"a": {"b": {}}}),
             vec![
-                json!({"op": "update", "path": "", "value": {"a": {"b": {}}}}),
-                json!({"op": "update", "path": "/a", "value": {"b": {}}}),
-                json!({"op": "update", "path": "/a/b", "value": {}}),
+                json!({"op": "update", "path": ""}),
+                json!({"op": "update", "path": "/a"}),
+                json!({"op": "update", "path": "/a/b"}),
                 json!({"op": "delete", "path": "/a/b/c"}),
                 json!({"op": "delete", "path": "/a/b/c/d"}),
             ],

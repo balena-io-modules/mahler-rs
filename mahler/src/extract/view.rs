@@ -121,16 +121,38 @@ fn prepend_path(pointer: PointerBuf, patch: Patch) -> Patch {
 /// value pointed by the path cannot be deserialized into type `<T>`
 #[derive(Debug)]
 pub struct View<T> {
-    initial: Value,
+    initial: Initial,
     state: T,
     path: Path,
     channel: Channel,
 }
 
+/// The value at the view path to compare the view against when creating a patch
+#[derive(Debug)]
+enum Initial {
+    /// The value is read from the system the view was created from. Sharing the system
+    /// avoids copying the value for views that are never turned into a patch
+    System(System),
+    /// The value was set after the view was created
+    Value(Value),
+}
+
+impl Initial {
+    fn resolve(&self, path: &Path) -> &Value {
+        match self {
+            Initial::System(system) => path
+                .as_ref()
+                .resolve(system.inner_state())
+                .unwrap_or(&Value::Null),
+            Initial::Value(value) => value,
+        }
+    }
+}
+
 impl<T> View<T> {
     // The only way to create a pointer is via the
     // from_system method
-    fn new(initial: Value, state: T, path: Path, channel: Channel) -> Self {
+    fn new(initial: Initial, state: T, path: Path, channel: Channel) -> Self {
         Self {
             initial,
             state,
@@ -144,7 +166,7 @@ impl<T> View<T> {
         T: Serialize,
     {
         let path: PointerBuf = self.path.clone().into();
-        let before = &self.initial;
+        let before = self.initial.resolve(&self.path);
 
         match (before, after) {
             (&Value::Null, Value::Null) => Patch(vec![]),
@@ -217,7 +239,7 @@ impl<T> View<T> {
             self.channel.send(changes).await?;
 
             // Update initial to match the current state
-            self.initial = after;
+            self.initial = Initial::Value(after);
         }
 
         Ok(())
@@ -243,7 +265,7 @@ impl<T> View<T> {
         if !self.channel.is_detached() {
             let after = serde_json::to_value(&self.state)?;
             let changes = self.create_patch(after.clone());
-            self.initial = after.clone();
+            self.initial = Initial::Value(after.clone());
             self.channel.send_and_commit(changes, after).await?;
         }
         Ok(())
@@ -315,24 +337,19 @@ impl<T: DeserializeOwned> FromSystem for View<T> {
         // At this point we assume that if the pointer cannot be
         // resolved is because the value does not exist yet unless
         // the parent is a scalar
-        let (state, initial): (T, Value) = match pointer.resolve(root) {
+        let (state, initial): (T, Initial) = match pointer.resolve(root) {
             Ok(value) => (
-                serde_json::from_value::<T>(value.clone())
+                T::deserialize(value)
                     .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?,
-                value.clone(),
+                Initial::System(system.clone()),
             ),
             Err(e) => match e {
-                ResolveError::NotFound { .. } => (
-                    // if the value does not exist, see if we can deserialize null into the type
+                // the value does not exist or may be a new index in an array, see if we can
+                // deserialize null into the type. The initial value resolves to null
+                ResolveError::NotFound { .. } | ResolveError::OutOfBounds { .. } => (
                     serde_json::from_value::<T>(Value::Null)
                         .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?,
-                    Value::Null,
-                ),
-                ResolveError::OutOfBounds { .. } => (
-                    // the value may be a new index in an array, try to deserialize null
-                    serde_json::from_value::<T>(Value::Null)
-                        .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?,
-                    Value::Null,
+                    Initial::System(system.clone()),
                 ),
                 _ => {
                     // The remaining errors are Unreachable and FailedToParse index

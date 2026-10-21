@@ -3,12 +3,13 @@ mod path_utils;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 use tracing::{field, instrument, trace, trace_span, warn, Span};
 
 use crate::dag::Dag;
 use crate::error::{Error, ErrorKind};
-use crate::json::{Operation, OperationMatcher, Patch, PatchOperation, Path, Value};
+use crate::json::{OperationMatcher, Patch, PatchOperation, Path, Value};
 use crate::result::Result;
 use crate::runtime::{Context, System};
 use crate::state::State;
@@ -36,16 +37,16 @@ fn hash_state(state: &System) -> u64 {
 /// Build the list of candidate plans for one search iteration by evaluating each
 /// distance operation against matching jobs in the domain.
 fn build_candidates(
-    distance_operations: Vec<Operation>,
+    distance_operations: Vec<(Path, OperationMatcher)>,
     db: &Domain,
-    cur_state: &System,
-    tgt: &Value,
+    cur_state: &mut System,
+    tgt: &Arc<Value>,
     path_exceptions: &mut Vec<(Path, Option<String>)>,
 ) -> Result<Vec<Candidate>> {
     let mut candidates: Vec<Candidate> = Vec::new();
 
-    'ops: for op in distance_operations {
-        let path = op.path();
+    'ops: for (path, kind) in distance_operations {
+        let path = &path;
 
         // skip the path if any parent path has an exception
         if path_exceptions.iter().any(|(p, _)| p.is_prefix_of(path)) {
@@ -63,7 +64,7 @@ fn build_candidates(
 
             // if there are any exceptions that apply to the context, add the path to
             // the list and skip the path
-            for exception in exceptions.filter(|e| e.operation().matches(&op)) {
+            for exception in exceptions.filter(|e| e.operation().allows(&kind)) {
                 if exception.test(cur_state, &context)? {
                     path_exceptions.push((path.clone(), exception.description(&context)?));
                     continue 'ops;
@@ -81,7 +82,7 @@ fn build_candidates(
             };
 
             // Look for jobs matching the operation
-            for job in jobs.filter(|j| j.operation().matches(&op)) {
+            for job in jobs.filter(|j| j.operation().allows(&kind)) {
                 let task = job.new_task(context.clone());
 
                 // Try applying this task to the current state
@@ -120,7 +121,7 @@ pub fn find_workflow_to_target<T>(
 where
     T: State,
 {
-    let tgt = &serde_json::to_value(tgt)?;
+    let tgt = &Arc::new(serde_json::to_value(tgt)?);
 
     trace!(initial=%system, target=%tgt, "searching for workflow");
 
@@ -148,16 +149,17 @@ where
             return Err(ErrorKind::PlanningOverflow.into());
         }
 
-        // Normalize state: deserialize into the target type and re-serialize to remove internal fields
-        let cur = cur_state
-            .state::<T::Target>()
-            .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
-
         visited_states.insert(hash_state(&cur_state));
 
-        // Compute the difference between current and target state
-        let skipped: Vec<Path> = path_exceptions.iter().map(|(p, _)| p.clone()).collect();
-        let distance = Distance::new(&cur, tgt, &skipped);
+        // Compute the difference between current and target state. The state is normalized
+        // first: deserialized into the target type and re-serialized to remove internal fields
+        let distance = {
+            let cur = cur_state
+                .state::<T::Target>()
+                .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
+            let skipped: Vec<Path> = path_exceptions.iter().map(|(p, _)| p.clone()).collect();
+            Distance::new(&cur, tgt, &skipped)
+        };
 
         // If there are no more operations, we've reached the goal
         if distance.is_empty() {
@@ -188,7 +190,7 @@ where
         let candidates = build_candidates(
             distance.operations,
             db,
-            &cur_state,
+            &mut cur_state,
             tgt,
             &mut path_exceptions,
         )?;
@@ -209,19 +211,21 @@ where
             ..
         } in candidates.into_iter().rev()
         {
-            let mut new_state = cur_state.clone();
-            new_state.patch(&Patch(plan.changes))?;
+            // apply the candidate in place, reverting it if the state was visited
+            let mut undo = Vec::new();
+            cur_state.patch_with_undo(plan.changes, &mut undo)?;
 
-            if !visited_states.contains(&hash_state(&new_state)) {
+            if !visited_states.contains(&hash_state(&cur_state)) {
                 trace!(path=%path,op=%operation,partial_plan=%plan.dag, "selected candidate");
-                next = Some((new_state, plan.dag));
+                next = Some(plan.dag);
                 break;
             }
+
+            cur_state.revert(undo)?;
         }
 
         match next {
-            Some((new_state, partial_plan)) => {
-                cur_state = new_state;
+            Some(partial_plan) => {
                 cur_plan = cur_plan.concat(partial_plan);
                 depth += 1;
                 next_span.record("cur_plan", field::display(&cur_plan));
@@ -250,7 +254,7 @@ pub fn find_workflow_for_task(mut task: Task, db: &Domain, system: &System) -> R
     // Set the correct path for the task
     let task = task.with_path(path);
 
-    let PartialPlan { dag, .. } = try_task_into_workflow(&task, db, system)?;
+    let PartialPlan { dag, .. } = try_task_into_workflow(&task, db, &mut system.clone())?;
 
     Ok(Workflow::new(dag))
 }
@@ -270,7 +274,9 @@ struct PartialPlan {
 /// For primitive tasks, the workflow will just contain a single node, however
 /// for composite tasks, the workflow will create a Dag with concurrent branches
 /// depending on the operational domain of each sub-task.
-fn try_task_into_workflow(task: &Task, db: &Domain, cur_state: &System) -> Result<PartialPlan> {
+///
+/// The state is used to simulate the tasks of a method and is restored before returning.
+fn try_task_into_workflow(task: &Task, db: &Domain, cur_state: &mut System) -> Result<PartialPlan> {
     match task {
         Task::Action(action) => {
             // Simulate the task and get the list of changes
@@ -287,38 +293,57 @@ fn try_task_into_workflow(task: &Task, db: &Domain, cur_state: &System) -> Resul
             })
         }
         Task::Method(method) => {
-            let mut plan_branches = Vec::new();
-            let mut domain = BTreeSet::new();
-            let mut changes = Vec::new();
-            let mut cur_state = cur_state.clone();
-
-            for task in expand_method_tasks(method, db, &cur_state)? {
-                // Run the task as if it was a sequential plan
-                let task_plan = try_task_into_workflow(&task, db, &cur_state)?;
-
-                // If the task domain conflicts with the cumulative domain from the
-                // branches, join the existing branches before continuing
-                let dag = if domains_are_conflicting(&domain, task_plan.domain.iter()) {
-                    Dag::new(std::mem::take(&mut plan_branches)).concat(task_plan.dag)
-                } else {
-                    task_plan.dag
-                };
-
-                let patch = Patch(task_plan.changes);
-                cur_state.patch(&patch)?;
-
-                changes.extend(patch.0);
-                domain.extend(task_plan.domain);
-                plan_branches.push(dag);
-            }
-
-            Ok(PartialPlan {
-                dag: Dag::new(plan_branches),
-                changes,
-                domain,
-            })
+            // child tasks are simulated in place and reverted once the method is expanded
+            let mut undo = Vec::new();
+            let plan = try_method_into_workflow(method, db, cur_state, &mut undo);
+            cur_state.revert(undo)?;
+            plan
         }
     }
+}
+
+/// Convert the method into a workflow, recording in `undo` the changes made to the state
+/// while simulating its child tasks
+fn try_method_into_workflow(
+    method: &Method,
+    db: &Domain,
+    cur_state: &mut System,
+    undo: &mut Vec<PatchOperation>,
+) -> Result<PartialPlan> {
+    let mut plan_branches = Vec::new();
+    let mut domain = BTreeSet::new();
+    let mut changes = Vec::new();
+
+    for task in expand_method_tasks(method, db, cur_state)? {
+        // Run the task as if it was a sequential plan. Child methods record their changes
+        // in the same undo log, so the changes are applied once and reverted by the caller
+        let task_plan = match &task {
+            Task::Method(child) => try_method_into_workflow(child, db, cur_state, undo)?,
+            Task::Action(_) => {
+                let task_plan = try_task_into_workflow(&task, db, cur_state)?;
+                cur_state.patch_with_undo(task_plan.changes.iter().cloned(), undo)?;
+                task_plan
+            }
+        };
+
+        // If the task domain conflicts with the cumulative domain from the
+        // branches, join the existing branches before continuing
+        let dag = if domains_are_conflicting(&domain, task_plan.domain.iter()) {
+            Dag::new(std::mem::take(&mut plan_branches)).concat(task_plan.dag)
+        } else {
+            task_plan.dag
+        };
+
+        changes.extend(task_plan.changes);
+        domain.extend(task_plan.domain);
+        plan_branches.push(dag);
+    }
+
+    Ok(PartialPlan {
+        dag: Dag::new(plan_branches),
+        changes,
+        domain,
+    })
 }
 
 /// Expand a method into its enriched child tasks, propagating arguments and resolving
@@ -370,8 +395,8 @@ fn expand_method_tasks(method: &Method, db: &Domain, cur_state: &System) -> Resu
             // this should never happen since the path was returned by the domain
             .ok_or(Error::internal(format!("should find a job for {path}")))?;
 
-        // Get a copy of the task for the final list
-        let task = job.new_task(t.context().to_owned()).with_path(path);
+        // Create the domain task with the child context
+        let task = job.new_task(t.into_context()).with_path(path);
 
         extended_tasks.push(task);
     }

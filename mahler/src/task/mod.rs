@@ -257,14 +257,14 @@ impl Task {
         }
     }
 
-    pub(crate) fn context_mut(&mut self) -> &mut Context {
+    pub(crate) fn into_context(self) -> Context {
         match self {
             Self::Action(Action { context, .. }) => context,
             Self::Method(Method { context, .. }) => context,
         }
     }
 
-    pub(crate) fn context(&mut self) -> &Context {
+    pub(crate) fn context_mut(&mut self) -> &mut Context {
         match self {
             Self::Action(Action { context, .. }) => context,
             Self::Method(Method { context, .. }) => context,

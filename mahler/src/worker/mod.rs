@@ -1301,10 +1301,12 @@ impl StreamState {
     fn new(system: System, sensor_router: SensorRouter) -> Result<Self> {
         // Create initial sensor subscriptions
         let mut sensor_streams = StreamMap::new();
-        let mut all_paths = Vec::new();
-        Self::collect_paths(system.inner_state(), Pointer::root(), &mut all_paths);
-        for path in all_paths {
-            Self::try_subscribe(&system, &path, &sensor_router, &mut sensor_streams)?;
+        if !sensor_router.is_empty() {
+            let mut all_paths = Vec::new();
+            Self::collect_paths(system.inner_state(), Pointer::root(), &mut all_paths);
+            for path in all_paths {
+                Self::try_subscribe(&system, &path, &sensor_router, &mut sensor_streams)?;
+            }
         }
 
         let (system_reader, system_writer) = rw_lock(system);
@@ -1370,6 +1372,10 @@ impl StreamState {
 
     /// Update the state subscriptions based on the last patch
     fn update(&mut self, system: &System, last_patch: &Patch) -> Result<()> {
+        if self.sensor_router.is_empty() {
+            return Ok(());
+        }
+
         let sensor_streams = &mut self.sensor_streams;
         let sensor_router = &self.sensor_router;
 

@@ -208,12 +208,15 @@ impl Eq for Sensor {}
 
 /// Registry of sensors mapped to routes
 #[derive(Default, Debug, Clone)]
-pub(crate) struct SensorRouter(Router<Sensor>);
+pub(crate) struct SensorRouter {
+    // created on the first insert, so an empty registry can be detected
+    router: Option<Router<Sensor>>,
+}
 
 impl SensorRouter {
     /// Create a new empty sensor registry
     pub fn new() -> Self {
-        Self(Router::new())
+        Self::default()
     }
 
     /// Add a sensor to the registry
@@ -223,17 +226,24 @@ impl SensorRouter {
     /// This function will panic if the route is not a valid path
     pub fn insert(&mut self, route: &'static str, sensor: Sensor) -> Option<Sensor> {
         // remove the route if it already exists
-        let old_sensor = self.0.remove(route);
+        let router = self.router.get_or_insert_with(Router::new);
+        let old_sensor = router.remove(route);
 
         // (re)insert the queue to the router
-        self.0.insert(route, sensor).expect("route should be valid");
+        router.insert(route, sensor).expect("route should be valid");
 
         old_sensor
     }
 
+    /// Returns true if no sensors have been registered
+    pub fn is_empty(&self) -> bool {
+        self.router.is_none()
+    }
+
     /// Find a sensor matching the given route
     pub fn at(&self, path: &str) -> Option<(PathArgs, &Sensor)> {
-        self.0
+        self.router
+            .as_ref()?
             .at(path)
             .map(|matched| (PathArgs::from(matched.params), matched.value))
             .ok()

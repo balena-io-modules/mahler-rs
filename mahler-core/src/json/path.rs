@@ -59,24 +59,10 @@ impl Path {
     /// A path is a prefix of another if all its tokens match the beginning of the other's tokens.
     /// For example, "/a" is a prefix of "/a/b", but "/a" is NOT a prefix of "/aa".
     pub fn is_prefix_of(&self, other: &Path) -> bool {
-        let self_tokens: Vec<_> = self.0.tokens().collect();
-        let other_tokens: Vec<_> = other.0.tokens().collect();
-
-        // Empty path is a prefix of everything
-        if self_tokens.is_empty() {
-            return true;
-        }
-
-        // Can't be a prefix if we have more tokens
-        if self_tokens.len() > other_tokens.len() {
-            return false;
-        }
-
-        // Check if all our tokens match the beginning of other's tokens
-        self_tokens
-            .iter()
-            .zip(other_tokens.iter())
-            .all(|(a, b)| a == b)
+        // every token must match the token at the same position on the other path,
+        // which fails if the other path runs out of tokens first
+        let mut other_tokens = other.0.tokens();
+        self.0.tokens().all(|a| other_tokens.next() == Some(a))
     }
 }
 
@@ -89,6 +75,12 @@ impl Display for Path {
 impl From<Path> for String {
     fn from(path: Path) -> String {
         path.0.to_string()
+    }
+}
+
+impl From<PointerBuf> for Path {
+    fn from(pointer: PointerBuf) -> Self {
+        Self(pointer)
     }
 }
 

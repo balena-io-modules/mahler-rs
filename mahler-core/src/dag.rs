@@ -578,6 +578,9 @@ where
                     result = value.run(&state, channel) => result,
                 };
 
+                // Release the copy before the changes are merged into the shared state
+                drop(state);
+
                 match result {
                     // The receiver is responsible for merging the changes back into
                     // the shared state
