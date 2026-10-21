@@ -1,0 +1,49 @@
+[package]
+name = "mahler-bench"
+description = "Speed and memory benchmarks for the mahler planner and runtime"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# do not inherit the workspace from the top-level folder: criterion needs a newer
+# toolchain than the library does, and the benchmarks should not constrain it
+[workspace]
+
+[dependencies]
+mahler = { path = "../mahler" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", default-features = false, features = [
+  "rt",
+  "sync",
+  "macros",
+] }
+
+[dev-dependencies]
+# the execution benchmarks run workflows on a multi-thread runtime
+tokio = { version = "1.53.1", default-features = false, features = ["rt-multi-thread"] }
+criterion = { version = "0.8", default-features = false, features = [
+  "cargo_bench_support",
+] }
+
+# `bench = false` on the lib and bin: otherwise `cargo bench -- <criterion flags>` also
+# passes the flags to their libtest harness, which rejects them
+[lib]
+bench = false
+
+# `test = false`: these are criterion harnesses, `cargo test` should not run them
+[[bench]]
+name = "planning"
+harness = false
+test = false
+
+[[bench]]
+name = "execution"
+harness = false
+test = false
+
+[[bin]]
+name = "mahler-memreport"
+path = "src/bin/memreport.rs"
+bench = false
