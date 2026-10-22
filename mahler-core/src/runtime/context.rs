@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use jsonptr::{PointerBuf, Token};
 
 use crate::json::{Path, PathArgs, Value};
 
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 /// Describes the Task applicability context
 pub struct Context {
     /// The global target passed to the planner
@@ -21,6 +21,20 @@ pub struct Context {
 
     /// The task path arguments if any
     pub args: PathArgs,
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        // every task is created with a default context, sharing the null target avoids
+        // allocating one for each of them
+        static NULL_TARGET: OnceLock<Arc<Value>> = OnceLock::new();
+        Self {
+            target: NULL_TARGET.get_or_init(|| Arc::new(Value::Null)).clone(),
+            target_override: None,
+            path: Path::default(),
+            args: PathArgs::default(),
+        }
+    }
 }
 
 impl Context {

@@ -23,6 +23,7 @@ tokio = { workspace = true, features = ["time"] }
 [dev-dependencies]
 dedent = "0.1.1"
 pretty_assertions = "1.4.1"
+serde = { version = "1.0", features = ["derive"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
   "ansi",
   "registry",

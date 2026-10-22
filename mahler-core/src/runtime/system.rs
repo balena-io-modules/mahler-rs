@@ -45,7 +45,7 @@ impl System {
     where
         S: Serialize,
     {
-        let state = serde_json::to_value(state)?;
+        let state = crate::json::to_value(&state)?;
         Ok(Self {
             state: Arc::new(state),
             resources: Resources::new(),

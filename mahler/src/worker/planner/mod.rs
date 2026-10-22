@@ -121,7 +121,7 @@ pub fn find_workflow_to_target<T>(
 where
     T: State,
 {
-    let tgt = &Arc::new(serde_json::to_value(tgt)?);
+    let tgt = &Arc::new(crate::json::to_value(tgt)?);
 
     trace!(initial=%system, target=%tgt, "searching for workflow");
 
@@ -152,13 +152,11 @@ where
         visited_states.insert(hash_state(&cur_state));
 
         // Compute the difference between current and target state. The state is normalized
-        // first: deserialized into the target type and re-serialized to remove internal fields
+        // first: deserialized into the target type to remove internal fields
         let distance = {
-            let cur = cur_state
-                .state::<T::Target>()
-                .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
+            let cur = cur_state.state::<T::Target>()?;
             let skipped: Vec<Path> = path_exceptions.iter().map(|(p, _)| p.clone()).collect();
-            Distance::new(&cur, tgt, &skipped)
+            Distance::new(&cur, tgt, &skipped)?
         };
 
         // If there are no more operations, we've reached the goal

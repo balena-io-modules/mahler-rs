@@ -1,5 +1,4 @@
 use matchit::Router;
-use std::collections::HashMap;
 use std::slice::Iter;
 
 use crate::error::{Error, ErrorKind};
@@ -11,12 +10,16 @@ use crate::task::Id as TaskId;
 
 #[derive(Default, Debug, Clone)]
 pub struct Domain {
-    // The router stores a sorted list of jobs matching a route
-    jobs: Router<Vec<Job>>,
+    // The router stores the position on `jobs` of the sorted list of jobs matching a route.
+    // Using a position allows to add jobs to an existing route without re-inserting it
+    router: Router<usize>,
+    // Routes are few, so they are looked up linearly when inserting jobs
+    jobs: Vec<(&'static str, Vec<Job>)>,
     // Sorted list of exceptions matching a route
     exceptions: Router<Vec<Exception>>,
-    // The index stores the reverse relation of task id to a route
-    index: HashMap<TaskId, &'static str>,
+    // The index stores the reverse relation of task id to a route. Domains have few jobs,
+    // for which a linear search is faster than hashing the id
+    index: Vec<(TaskId, &'static str)>,
 }
 
 /// Insert an item into a sorted list, keeping the existing item if an equal one exists
@@ -32,11 +35,7 @@ fn insert_sorted<T: Ord>(list: &mut Vec<T>, item: T) {
 
 impl Domain {
     pub fn new() -> Self {
-        Self {
-            jobs: Router::new(),
-            exceptions: Router::new(),
-            index: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Add a job to a domain
@@ -53,30 +52,28 @@ impl Domain {
     pub fn insert_job(&mut self, route: &'static str, job: Job) {
         // TODO: it would be great to figure out a way to validate
         // that the pointer is valid for the parent state at compile time
-        let Self {
-            ref mut jobs,
-            ref mut index,
-            ..
-        } = self;
-
         let task_id = job.id();
 
-        // Remove the route from the router if it exists or create
-        // a new list if it doesn't
-        let mut queue = jobs.remove(route).unwrap_or_default();
-        insert_sorted(&mut queue, job);
-
-        // (re)insert the queue to the router, we should not have
-        // conflicts here
-        jobs.insert(route, queue).expect("route should be valid");
+        let position = match self.jobs.iter().position(|(r, _)| *r == route) {
+            Some(position) => position,
+            None => {
+                let position = self.jobs.len();
+                self.router
+                    .insert(route, position)
+                    .expect("route should be valid");
+                self.jobs.push((route, Vec::new()));
+                position
+            }
+        };
+        insert_sorted(&mut self.jobs[position].1, job);
 
         // Only allow one assignment of a job to a route
-        if let Some(oldroute) = index.insert(task_id, route) {
-            if oldroute != route {
-                panic!(
-                    "cannot assign '{task_id}' to route '{route}', a previous assignment exists to '{oldroute}'"
-                )
-            }
+        match self.index.iter().find(|(id, _)| *id == task_id) {
+            Some((_, oldroute)) if *oldroute != route => panic!(
+                "cannot assign '{task_id}' to route '{route}', a previous assignment exists to '{oldroute}'"
+            ),
+            Some(_) => {}
+            None => self.index.push((task_id, route)),
         }
     }
 
@@ -110,121 +107,96 @@ impl Domain {
     /// PathArgs passed as argument. This is not a great interface, but
     /// it allows to parse only once
     pub(crate) fn find_path(&self, task_id: TaskId, args: &mut PathArgs) -> Result<String> {
-        if let Some(route) = self.index.get(&task_id) {
-            let mut route = route.to_string();
-            let mut replacements = Vec::new();
-            // Track used keys with their position in the route for ordering
-            let mut used_keys: Vec<(usize, String)> = Vec::new();
-
-            // Step 1: Look for any `{param}` or `{*param}` references
-            // for every key in the argument list. If there any escaped params {{param}}, replace them
-            // with a temp placeholder.
-            for (k, v) in args.iter() {
-                let param = format!("{{{k}}}");
-                let wildcard_param = format!("{{*{k}}}");
-                let escaped_param = format!("{{{{{k}}}}}");
-
-                // Replace escaped parameters with a temp placeholder, but do not mark as used
-                let placeholder = format!("__ESCAPED_{k}__");
-                route = route.replace(&escaped_param, &placeholder);
-
-                // Only mark as used if actual replacement occurs
-                let pos = route.find(&param).or_else(|| route.find(&wildcard_param));
-                if let Some(pos) = pos {
-                    used_keys.push((pos, k.to_string()));
-                    replacements.push((param, v.clone()));
-                    replacements.push((wildcard_param, v.clone()));
-                }
-            }
-
-            // Apply replacements
-            for (param, value) in replacements {
-                route = route.replace(&param, &value);
-            }
-
-            // Convert any other `{{param}}` → `{param}`
-            let mut final_route = String::new();
-            let mut chars = route.chars().peekable();
-            let mut missing_args = Vec::new();
-
-            while let Some(c) = chars.next() {
-                if c == '{' && chars.peek() == Some(&'{') {
-                    chars.next(); // Skip second '{'
-                    final_route.push('{');
-                } else if c == '}' && chars.peek() == Some(&'}') {
-                    chars.next(); // Skip second '}'
-                    final_route.push('}');
-                } else if c == '{' {
-                    let mut placeholder = String::from("{");
-                    while let Some(&next) = chars.peek() {
-                        placeholder.push(next);
-                        chars.next();
-                        if next == '}' {
-                            break;
-                        }
-                    }
-
-                    if placeholder.ends_with('}') {
-                        missing_args.push(placeholder.clone());
-                    }
-
-                    final_route.push_str(&placeholder);
-                } else {
-                    final_route.push(c);
-                }
-            }
-
-            // If there are non escaped {param} in the list, then these
-            // arguments are missing a value and we need to fail
-            if !missing_args.is_empty() {
-                return Err(Error::new(
-                    ErrorKind::MissingArgs,
-                    format!(
-                        "missing required arguments for job '{task_id}': {}",
-                        missing_args.join(", ")
-                    ),
-                ));
-            }
-
-            // Restore escaped parameters
-            for (k, _) in args.iter() {
-                let placeholder = format!("__ESCAPED_{k}__");
-                let param = format!("{{{k}}}");
-                final_route = final_route.replace(&placeholder, &param);
-            }
-
-            // Retain only the used keys, sorted by the order they appear in the route
-            used_keys.sort_by_key(|(pos, _)| *pos);
-            args.retain(|(k, _)| used_keys.iter().any(|(_, uk)| uk.as_str() == k.as_ref()));
-            args.sort_by_key(|(k, _)| {
-                used_keys
-                    .iter()
-                    .position(|(_, uk)| uk.as_str() == k.as_ref())
-                    .unwrap_or(usize::MAX)
-            });
-
-            Ok(final_route)
-        } else {
-            Err(Error::new(
+        let Some(&(_, route)) = self.index.iter().find(|(id, _)| *id == task_id) else {
+            return Err(Error::new(
                 ErrorKind::UnregisteredJob,
                 format!("{task_id} not in domain"),
-            ))
+            ));
+        };
+
+        let mut path = String::with_capacity(route.len());
+        // keys of the arguments used by the route, in the order they first appear
+        let mut used_keys: Vec<&str> = Vec::new();
+        let mut missing_args: Vec<&str> = Vec::new();
+
+        let bytes = route.as_bytes();
+        // start of the route text not yet copied to the path
+        let mut start = 0;
+        let mut pos = 0;
+        while pos < bytes.len() {
+            match (bytes[pos], bytes.get(pos + 1)) {
+                // `{{` and `}}` are escaped braces, keep only the first one
+                (b'{', Some(b'{')) | (b'}', Some(b'}')) => {
+                    path.push_str(&route[start..=pos]);
+                    pos += 2;
+                    start = pos;
+                }
+                // a `{name}` or `{*name}` parameter
+                (b'{', _) => {
+                    // an unterminated parameter is kept as literal text
+                    let Some(len) = route[pos..].find('}') else {
+                        break;
+                    };
+                    path.push_str(&route[start..pos]);
+                    let param = &route[pos..=pos + len];
+                    let inner = &param[1..param.len() - 1];
+                    let name = inner.strip_prefix('*').unwrap_or(inner);
+                    match args.iter().find(|(k, _)| k.as_ref() == name) {
+                        Some((_, value)) => {
+                            path.push_str(value);
+                            if !used_keys.contains(&name) {
+                                used_keys.push(name);
+                            }
+                        }
+                        None => missing_args.push(param),
+                    }
+                    pos += len + 1;
+                    start = pos;
+                }
+                _ => pos += 1,
+            }
         }
+        path.push_str(&route[start..]);
+
+        // If there are non escaped {param} in the route without a value, the
+        // arguments are missing and we need to fail
+        if !missing_args.is_empty() {
+            return Err(Error::new(
+                ErrorKind::MissingArgs,
+                format!(
+                    "missing required arguments for job '{task_id}': {}",
+                    missing_args.join(", ")
+                ),
+            ));
+        }
+
+        // Retain only the used keys, sorted by the order they appear in the route
+        args.retain(|(k, _)| used_keys.contains(&k.as_ref()));
+        args.sort_by_key(|(k, _)| used_keys.iter().position(|uk| *uk == k.as_ref()));
+
+        Ok(path)
     }
 
     /// Find a job given the path and the id
     pub fn find_job(&self, path: &str, task_id: TaskId) -> Option<&Job> {
-        self.jobs
-            .at(path)
-            .ok()
-            .and_then(|matched| matched.value.iter().find(|job| job.id() == task_id))
+        self.router.at(path).ok().and_then(|matched| {
+            self.jobs[*matched.value]
+                .1
+                .iter()
+                .find(|job| job.id() == task_id)
+        })
     }
 
     /// Find [`Job`] matches for the given path in the domain
     pub fn find_matching_jobs(&self, path: &str) -> Option<(PathArgs, Iter<'_, Job>)> {
-        self.jobs
+        self.router
             .at(path)
-            .map(|matched| (PathArgs::from(matched.params), matched.value.iter()))
+            .map(|matched| {
+                (
+                    PathArgs::from(matched.params),
+                    self.jobs[*matched.value].1.iter(),
+                )
+            })
             .ok()
     }
 

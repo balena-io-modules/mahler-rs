@@ -29,9 +29,8 @@ impl Ord for Path {
         // Compare first by path length (number of tokens)
         // shorter paths come before longer paths no matter the
         // lexicographic order
-        self.0
-            .count()
-            .cmp(&other.0.count())
+        self.token_count()
+            .cmp(&other.token_count())
             // Then lexicographically
             .then(self.0.cmp(&other.0))
     }
@@ -59,10 +58,15 @@ impl Path {
     /// A path is a prefix of another if all its tokens match the beginning of the other's tokens.
     /// For example, "/a" is a prefix of "/a/b", but "/a" is NOT a prefix of "/aa".
     pub fn is_prefix_of(&self, other: &Path) -> bool {
-        // every token must match the token at the same position on the other path,
-        // which fails if the other path runs out of tokens first
-        let mut other_tokens = other.0.tokens();
-        self.0.tokens().all(|a| other_tokens.next() == Some(a))
+        other.0.starts_with(&self.0)
+    }
+
+    /// Number of tokens in the path
+    ///
+    /// Every token starts with a `/`, and a `/` within a token is always encoded as `~1`,
+    /// so counting bytes is equivalent to, and much cheaper than, iterating the tokens.
+    fn token_count(&self) -> usize {
+        self.as_str().bytes().filter(|&b| b == b'/').count()
     }
 }
 

@@ -1,10 +1,11 @@
-use json_patch::{diff, Patch};
 use jsonptr::{Pointer, PointerBuf};
+use serde_json::Error;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::json::{Operation, OperationMatcher, Path, Value};
+use crate::json::{diff_serialized, to_value, Operation, OperationMatcher, Path, Value};
+use crate::serde::Serialize;
 
 #[derive(Debug)]
 pub struct Distance {
@@ -87,20 +88,25 @@ impl Distance {
     ///
     /// When creating a new distance, an ignore list can be added. Changes for path prefixed by any of the
     /// paths in the ignore list are not added to the operations list.
-    pub fn new(src: &Value, tgt: &Value, ignore: &[Path]) -> Distance {
+    ///
+    /// # Errors
+    ///
+    /// Fails if the state cannot be converted into JSON
+    pub fn new<S: Serialize>(src: &S, tgt: &Value, ignore: &[Path]) -> Result<Distance, Error> {
         // Ordered by path (length, then lexicographically), the first operation recorded
         // for a path wins
         let mut operations = BTreeMap::new();
 
         // calculate differences between the system root and
         // the target
-        let Patch(changes) = diff(src, tgt);
+        let changes = diff_serialized(src, tgt)?;
 
         let (ignored, required): (Vec<_>, Vec<_>) = changes
             .into_iter()
             .map(Operation::from)
             .partition(|op| ignore.iter().any(|p| p.is_prefix_of(op.path())));
 
+        let mut src_value = None;
         for op in required.iter() {
             // For every operation on the list of changes
             let path = op.path().as_ref();
@@ -120,10 +126,16 @@ impl Distance {
             // for every delete operation '/a/b/c', add child
             // nodes of the deleted path with 'remove' operation
             if let Operation::Delete { .. } = op {
+                // The state is only converted to JSON if something is removed from it
+                if src_value.is_none() {
+                    src_value = Some(to_value(src)?);
+                }
+                let src_value = src_value.as_ref().expect("value was converted above");
+
                 // By definition of the remove operation the path should be
                 // resolvable on the left side of the diff
                 let value = path
-                    .resolve(src)
+                    .resolve(src_value)
                     .unwrap_or_else(|e| panic!("path `{path}` should be resolvable on state: {e}"));
 
                 // add remove operations for inner values
@@ -134,11 +146,11 @@ impl Distance {
             operations.entry(op.path().clone()).or_insert(op.into());
         }
 
-        Distance {
+        Ok(Distance {
             ignored,
             required,
             operations: operations.into_iter().collect(),
-        }
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -153,7 +165,7 @@ mod tests {
     use serde_json::json;
 
     fn distance_eq(src: Value, tgt: Value, result: Vec<Value>) {
-        let distance = Distance::new(&src, &tgt, &[]);
+        let distance = Distance::new(&src, &tgt, &[]).unwrap();
 
         // Serialize results to make comparison easier
         let ops: Vec<Value> = distance

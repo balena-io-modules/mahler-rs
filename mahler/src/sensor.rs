@@ -122,7 +122,7 @@ where
     fn into_sensor_stream(self) -> SensorStream {
         Box::pin(self.map(move |item| {
             item.into_sensor_result()
-                .and_then(|input| serde_json::to_value(input).map_err(Error::from))
+                .and_then(|input| crate::json::to_value(&input).map_err(Error::from))
         }))
     }
 }

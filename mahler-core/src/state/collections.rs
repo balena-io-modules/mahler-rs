@@ -13,6 +13,23 @@ use std::ops::{Deref, DerefMut, Index, IndexMut};
 use crate::serde;
 
 use super::{State, StateDeserializer};
+use crate::json::BULK_BUILD_MIN_LEN;
+
+/// Capacity to pre-allocate for elements of type `T` from a deserializer size hint
+///
+/// The hint comes from the input, so it is capped, like serde does, to avoid allocating
+/// more than 1 MiB before any element has been read.
+fn cautious<T>(hint: Option<usize>) -> usize {
+    const MAX_PREALLOC_BYTES: usize = 1024 * 1024;
+    let max = MAX_PREALLOC_BYTES / std::mem::size_of::<T>().max(1);
+    hint.unwrap_or(0).min(max)
+}
+
+/// Whether a collection of the hinted size is worth bulk building, see
+/// [`BULK_BUILD_MIN_LEN`]
+fn is_large(hint: Option<usize>) -> bool {
+    hint.is_some_and(|len| len >= BULK_BUILD_MIN_LEN)
+}
 
 /// A list of State values (newtype over Vec).
 ///
@@ -176,7 +193,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for ListVisitor<T>
     where
         A: serde::de::SeqAccess<'de>,
     {
-        let mut vec = Vec::new();
+        let mut vec = Vec::with_capacity(cautious::<T>(seq.size_hint()));
         while let Some(elem) = seq.next_element_seed(StateDeserializer::<T>(PhantomData))? {
             vec.push(elem);
         }
@@ -326,11 +343,27 @@ impl<'de, T: serde::Deserialize<'de> + Ord> serde::de::Visitor<'de> for SetVisit
     where
         A: serde::de::SeqAccess<'de>,
     {
-        let mut set = BTreeSet::new();
-        while let Some(elem) = seq.next_element_seed(StateDeserializer::<T>(PhantomData))? {
-            set.insert(elem);
+        let seed = || StateDeserializer::<T>(PhantomData);
+        if !is_large(seq.size_hint()) {
+            let mut set = BTreeSet::new();
+            while let Some(elem) = seq.next_element_seed(seed())? {
+                set.insert(elem);
+            }
+            return Ok(Set(set));
         }
-        Ok(Set(set))
+
+        // bulk building a large set is faster than inserting one element at a time
+        let mut elems = Vec::with_capacity(cautious::<T>(seq.size_hint()));
+        while let Some(elem) = seq.next_element_seed(seed())? {
+            elems.push(elem);
+        }
+        // Like inserting, keep the first of equal elements. Elements usually come sorted
+        // and unique, in which case there is nothing to remove
+        if !elems.windows(2).all(|pair| pair[0] < pair[1]) {
+            elems.sort();
+            elems.dedup();
+        }
+        Ok(Set(BTreeSet::from_iter(elems)))
     }
 }
 
@@ -506,14 +539,36 @@ impl<'de, K: serde::Deserialize<'de> + Ord, V: serde::Deserialize<'de>> serde::d
     where
         A: serde::de::MapAccess<'de>,
     {
-        let mut result = BTreeMap::new();
-        while let Some((key, value)) = map.next_entry_seed(
-            StateDeserializer::<K>(PhantomData),
-            StateDeserializer::<V>(PhantomData),
-        )? {
-            result.insert(key, value);
+        let key_seed = || StateDeserializer::<K>(PhantomData);
+        let value_seed = || StateDeserializer::<V>(PhantomData);
+        if !is_large(map.size_hint()) {
+            let mut result = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry_seed(key_seed(), value_seed())? {
+                result.insert(key, value);
+            }
+            return Ok(Map(result));
         }
-        Ok(Map(result))
+
+        // Collecting first lets a large map be bulk built, which is much faster than
+        // inserting one entry at a time when the entries already come sorted, as they do
+        // from JSON
+        let mut entries = Vec::with_capacity(cautious::<(K, V)>(map.size_hint()));
+        while let Some(entry) = map.next_entry_seed(key_seed(), value_seed())? {
+            entries.push(entry);
+        }
+        // Like inserting, keep the first of equal keys with the last value. Keys usually come
+        // sorted and unique, as they do from JSON, in which case there is nothing to remove
+        if !entries.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            entries.dedup_by(|later, earlier| {
+                let repeated = later.0 == earlier.0;
+                if repeated {
+                    std::mem::swap(&mut later.1, &mut earlier.1);
+                }
+                repeated
+            });
+        }
+        Ok(Map(BTreeMap::from_iter(entries)))
     }
 }
 
@@ -572,4 +627,74 @@ macro_rules! map {
     ($($key:expr => $value:expr),+ $(,)?) => {
         $crate::state::Map::from(std::collections::BTreeMap::from([$(($key, $value)),+]))
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::serde::de::value::MapDeserializer;
+    use ::serde::Deserialize;
+    use serde_json::json;
+
+    /// Ordered by name only, so elements with different versions compare equal
+    #[derive(Deserialize, Debug)]
+    struct Item {
+        name: String,
+        version: u8,
+    }
+
+    impl PartialEq for Item {
+        fn eq(&self, other: &Self) -> bool {
+            self.name == other.name
+        }
+    }
+    impl Eq for Item {}
+    impl PartialOrd for Item {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Item {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.name.cmp(&other.name)
+        }
+    }
+
+    /// `len` items, with the first two equal, before and after the bulk build threshold
+    fn items(len: usize) -> Vec<serde_json::Value> {
+        let mut items = vec![
+            json!({"name": "a", "version": 1}),
+            json!({"name": "a", "version": 2}),
+        ];
+        items.extend((2..len).map(|i| json!({"name": format!("n{i:02}"), "version": 0})));
+        items
+    }
+
+    #[test]
+    fn sets_keep_the_first_of_equal_elements_at_any_size() {
+        for len in [3, BULK_BUILD_MIN_LEN + 2] {
+            let set: Set<Item> = serde_json::from_value(json!(items(len))).unwrap();
+            assert_eq!(set.len(), len - 1);
+            assert_eq!(set.iter().next().map(|i| i.version), Some(1), "len {len}");
+        }
+    }
+
+    #[test]
+    fn maps_keep_the_first_of_equal_keys_and_the_last_value_at_any_size() {
+        for len in [3, BULK_BUILD_MIN_LEN + 2] {
+            // equal keys cannot come from a JSON object, so the entries are a sequence of
+            // pairs deserialized through a map adapter
+            let pairs: Vec<(serde_json::Value, u8)> = items(len)
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| (item, i as u8))
+                .collect();
+            let deserializer: MapDeserializer<_, serde_json::Error> =
+                MapDeserializer::new(pairs.into_iter());
+            let map = Map::<Item, u8>::deserialize(deserializer).unwrap();
+            assert_eq!(map.len(), len - 1);
+            let (key, value) = map.iter().next().unwrap();
+            assert_eq!((key.version, *value), (1, 1), "len {len}");
+        }
+    }
 }
