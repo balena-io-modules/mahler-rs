@@ -5,7 +5,7 @@ use std::{
 };
 
 #[derive(Clone)]
-pub struct Resources(HashMap<TypeId, Arc<dyn Any + Send + Sync>>);
+pub struct Resources(Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>);
 
 impl Default for Resources {
     fn default() -> Self {
@@ -15,7 +15,7 @@ impl Default for Resources {
 
 impl Resources {
     pub fn new() -> Self {
-        Self(HashMap::new())
+        Self(Arc::new(HashMap::new()))
     }
 
     pub fn insert<R>(&mut self, res: R)
@@ -23,7 +23,7 @@ impl Resources {
         R: Send + Sync + 'static,
     {
         let type_id = TypeId::of::<R>();
-        self.0.insert(type_id, Arc::new(res));
+        Arc::make_mut(&mut self.0).insert(type_id, Arc::new(res));
     }
 
     pub fn get<R>(&self) -> Option<Arc<R>>

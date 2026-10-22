@@ -16,6 +16,8 @@ mahler-core = { path = "../mahler-core", version = "0" }
 mahler-derive = { path = "../mahler-derive", version = "0", optional = true }
 
 async-trait.workspace = true
+# catches panics of workflows run in the task polling them, as a spawned task would
+futures.workspace = true
 json-patch.workspace = true
 jsonptr.workspace = true
 matchit.workspace = true

@@ -29,9 +29,8 @@ impl Ord for Path {
         // Compare first by path length (number of tokens)
         // shorter paths come before longer paths no matter the
         // lexicographic order
-        self.0
-            .count()
-            .cmp(&other.0.count())
+        self.token_count()
+            .cmp(&other.token_count())
             // Then lexicographically
             .then(self.0.cmp(&other.0))
     }
@@ -59,24 +58,15 @@ impl Path {
     /// A path is a prefix of another if all its tokens match the beginning of the other's tokens.
     /// For example, "/a" is a prefix of "/a/b", but "/a" is NOT a prefix of "/aa".
     pub fn is_prefix_of(&self, other: &Path) -> bool {
-        let self_tokens: Vec<_> = self.0.tokens().collect();
-        let other_tokens: Vec<_> = other.0.tokens().collect();
+        other.0.starts_with(&self.0)
+    }
 
-        // Empty path is a prefix of everything
-        if self_tokens.is_empty() {
-            return true;
-        }
-
-        // Can't be a prefix if we have more tokens
-        if self_tokens.len() > other_tokens.len() {
-            return false;
-        }
-
-        // Check if all our tokens match the beginning of other's tokens
-        self_tokens
-            .iter()
-            .zip(other_tokens.iter())
-            .all(|(a, b)| a == b)
+    /// Number of tokens in the path
+    ///
+    /// Every token starts with a `/`, and a `/` within a token is always encoded as `~1`,
+    /// so counting bytes is equivalent to, and much cheaper than, iterating the tokens.
+    fn token_count(&self) -> usize {
+        self.as_str().bytes().filter(|&b| b == b'/').count()
     }
 }
 
@@ -89,6 +79,12 @@ impl Display for Path {
 impl From<Path> for String {
     fn from(path: Path) -> String {
         path.0.to_string()
+    }
+}
+
+impl From<PointerBuf> for Path {
+    fn from(pointer: PointerBuf) -> Self {
+        Self(pointer)
     }
 }
 

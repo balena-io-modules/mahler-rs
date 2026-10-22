@@ -90,7 +90,7 @@ where
 
     let buf = PointerBuf::from_tokens(&prefix);
 
-    Path::new(&buf)
+    Path::from(buf)
 }
 
 #[cfg(test)]

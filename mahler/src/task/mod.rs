@@ -4,6 +4,7 @@ mod handler;
 mod into_result;
 mod io;
 
+use std::any::Any;
 use std::fmt::{self, Display};
 use std::future::Future;
 use std::pin::Pin;
@@ -34,8 +35,10 @@ pub mod prelude {
 }
 
 type ActionOutput = Pin<Box<dyn Future<Output = Result<Patch>> + Send>>;
-type DryRun = Arc<dyn Fn(&System, &Context) -> Result<Patch> + Send + Sync>;
-type Run = Arc<dyn Fn(&System, &Context, &Channel) -> ActionOutput + Send + Sync>;
+/// A type erased action [`Handler`]
+type ErasedHandler = dyn Any + Send + Sync;
+type DryRun = fn(&ErasedHandler, &System, &Context) -> Result<Patch>;
+type Run = fn(&ErasedHandler, &System, &Context, &Channel) -> ActionOutput;
 type Expand = Arc<dyn Fn(&System, &Context) -> Result<Vec<Task>> + Send + Sync>;
 type Describe = Arc<dyn Fn(&Context) -> Result<String> + Send + Sync>;
 
@@ -45,9 +48,48 @@ pub struct Action {
     id: Id,
     scoped: bool,
     context: Context,
+    /// The handler is shared by the dry run and run functions, which are instantiated for
+    /// its type, so creating an action allocates only once
+    handler: Arc<ErasedHandler>,
     dry_run: DryRun,
     run: Run,
-    describe: Describe,
+    /// User description, the default description is used if not set
+    describe: Option<Describe>,
+}
+
+/// Recover the handler of type `H` that an action was created with
+fn downcast<H: 'static>(handler: &ErasedHandler) -> &H {
+    handler
+        .downcast_ref::<H>()
+        .expect("action handler should have the type the action was created with")
+}
+
+fn dry_run_handler<H, T, I>(
+    handler: &ErasedHandler,
+    system: &System,
+    context: &Context,
+) -> Result<Patch>
+where
+    H: Handler<T, Patch, I>,
+    I: Send + 'static,
+{
+    downcast::<H>(handler)
+        .call(system, context, &Channel::detached())
+        .pure()
+}
+
+fn run_handler<H, T, I>(
+    handler: &ErasedHandler,
+    system: &System,
+    context: &Context,
+    channel: &Channel,
+) -> ActionOutput
+where
+    H: Handler<T, Patch, I>,
+    I: Send + 'static,
+{
+    let effect = downcast::<H>(handler).call(system, context, channel);
+    Box::pin(async { effect.run().await })
 }
 
 impl PartialEq for Action {
@@ -72,30 +114,31 @@ fn default_description(id: Id, ctx: &Context) -> String {
     format!("{}({})", id, ctx.path)
 }
 
+/// Describe a task with the user description if any, falling back to the default one
+fn describe(id: Id, describe: Option<&Describe>, ctx: &Context) -> String {
+    let Some(describe) = describe else {
+        return default_description(id, ctx);
+    };
+    describe(ctx)
+        .inspect_err(|e| warn!("failed to expand description for task {}: {}", id, e))
+        .unwrap_or_else(|_| default_description(id, ctx))
+}
+
 impl Action {
     pub(crate) fn new<H, T, I>(action: H, context: Context, scoped: bool) -> Self
     where
         H: Handler<T, Patch, I>,
         I: Send + 'static,
     {
-        let handler_clone = action.clone();
         let id = action.id();
         Self {
             id,
             scoped,
             context,
-            dry_run: Arc::new(move |system: &System, context: &Context| {
-                let effect = handler_clone.call(system, context, &Channel::detached());
-                effect.pure()
-            }),
-            run: Arc::new(
-                move |system: &System, context: &Context, channel: &Channel| {
-                    let effect = action.call(system, context, channel);
-
-                    Box::pin(async { effect.run().await })
-                },
-            ),
-            describe: Arc::new(move |context: &Context| Ok(default_description(id, context))),
+            handler: Arc::new(action),
+            dry_run: dry_run_handler::<H, T, I>,
+            run: run_handler::<H, T, I>,
+            describe: None,
         }
     }
 
@@ -124,25 +167,30 @@ impl Action {
 
     /// Run the task on the system and return a list of changes
     pub(crate) async fn run(&self, system: &System, channel: &Channel) -> Result<Patch> {
-        let Action { context, run, .. } = self;
-        (run)(system, context, channel).await
+        let Action {
+            context,
+            handler,
+            run,
+            ..
+        } = self;
+        (run)(handler.as_ref(), system, context, channel).await
     }
 
     /// Simulate the effect of the task on the system
     pub(crate) fn dry_run(&self, system: &System) -> Result<Patch> {
         let Action {
-            context, dry_run, ..
+            context,
+            handler,
+            dry_run,
+            ..
         } = self;
-        (dry_run)(system, context)
+        (dry_run)(handler.as_ref(), system, context)
     }
 }
 
 impl Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        (self.describe)(&self.context)
-            .inspect_err(|e| warn!("failed to expand description for task {}: {}", self.id, e))
-            .unwrap_or_else(|_| default_description(self.id, &self.context))
-            .fmt(f)
+        describe(self.id, self.describe.as_ref(), &self.context).fmt(f)
     }
 }
 
@@ -152,7 +200,8 @@ pub struct Method {
     id: Id,
     context: Context,
     expand: Expand,
-    describe: Describe,
+    /// User description, the default description is used if not set
+    describe: Option<Describe>,
 }
 
 impl fmt::Debug for Method {
@@ -176,7 +225,7 @@ impl Method {
             expand: Arc::new(move |system: &System, context: &Context| {
                 method.call(system, context, &Channel::detached()).pure()
             }),
-            describe: Arc::new(move |context: &Context| Ok(default_description(id, context))),
+            describe: None,
         }
     }
 
@@ -203,10 +252,7 @@ impl Method {
 
 impl Display for Method {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        (self.describe)(&self.context)
-            .inspect_err(|e| warn!("failed to expand description for task {}: {}", self.id, e))
-            .unwrap_or_else(|_| default_description(self.id, &self.context))
-            .fmt(f)
+        describe(self.id, self.describe.as_ref(), &self.context).fmt(f)
     }
 }
 
@@ -257,14 +303,14 @@ impl Task {
         }
     }
 
-    pub(crate) fn context_mut(&mut self) -> &mut Context {
+    pub(crate) fn into_context(self) -> Context {
         match self {
             Self::Action(Action { context, .. }) => context,
             Self::Method(Method { context, .. }) => context,
         }
     }
 
-    pub(crate) fn context(&mut self) -> &Context {
+    pub(crate) fn context_mut(&mut self) -> &mut Context {
         match self {
             Self::Action(Action { context, .. }) => context,
             Self::Method(Method { context, .. }) => context,
@@ -275,7 +321,7 @@ impl Task {
     ///
     /// This returns a result with an error if the serialization of the target fails
     pub fn try_target<S: Serialize>(self, target: S) -> Result<Self> {
-        let target = serde_json::to_value(target)?;
+        let target = crate::json::to_value(&target)?;
         Ok(match self {
             Self::Action(mut action) => {
                 action.context = action.context.with_target(target);
@@ -360,7 +406,7 @@ impl Task {
     where
         D: Description<T>,
     {
-        let describe: Describe = Arc::new(move |ctx| description.call(ctx));
+        let describe: Option<Describe> = Some(Arc::new(move |ctx| description.call(ctx)));
         match self {
             Self::Action(task) => Self::Action(Action { describe, ..task }),
             Self::Method(task) => Self::Method(Method { describe, ..task }),

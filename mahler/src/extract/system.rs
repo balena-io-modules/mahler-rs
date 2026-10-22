@@ -42,7 +42,7 @@ pub struct System<S>(pub S);
 impl<S: DeserializeOwned> FromSystem for System<S> {
     fn from_system(system: &SystemState, _: &Context, _: &Channel) -> Result<Self> {
         // This will fail if the value cannot be deserialized into the target type
-        let state = serde_json::from_value::<S>(system.inner_state().clone())
+        let state = S::deserialize(system.inner_state())
             .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
 
         Ok(Self(state))

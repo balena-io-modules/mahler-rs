@@ -4,6 +4,7 @@ use crate::error::{Error, ErrorKind};
 use crate::result::Result;
 use crate::runtime::{Channel, Context, FromContext, FromSystem, System};
 use crate::serde::de::DeserializeOwned;
+use crate::serde::Deserialize;
 use crate::state::State;
 
 /// Extracts the target state for tasks created from the job handler
@@ -108,14 +109,14 @@ impl<T: State> FromContext for Target<T> {
             context
                 .path
                 .as_ref()
-                .resolve(&context.target)
+                .resolve(context.target.as_ref())
                 // the path is assumed to be correct at this point, so
                 // unwrap the result to Null if a resolution error happens
                 .unwrap_or(&serde_json::Value::Null)
         };
 
         // This will fail if the value cannot be deserialized into the target type
-        let target = serde_json::from_value::<T::Target>(value.clone())
+        let target = T::Target::deserialize(value)
             .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
 
         Ok(Target(target))
@@ -183,15 +184,15 @@ impl<T: DeserializeOwned> FromContext for RawTarget<T> {
             context
                 .path
                 .as_ref()
-                .resolve(&context.target)
+                .resolve(context.target.as_ref())
                 // the path is assumed to be correct at this point, so
                 // unwrap the result to Null if a resolution error happens
                 .unwrap_or(&serde_json::Value::Null)
         };
 
         // This will fail if the value cannot be deserialized into the target type
-        let target = serde_json::from_value::<T>(value.clone())
-            .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
+        let target =
+            T::deserialize(value).map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
 
         Ok(Self(target))
     }
@@ -241,10 +242,10 @@ pub struct SystemTarget<T: State>(pub T::Target);
 
 impl<T: State> FromContext for SystemTarget<T> {
     fn from_context(context: &Context) -> Result<Self> {
-        let value = &context.target;
+        let value = context.target.as_ref();
 
         // This will fail if the value cannot be deserialized into the target type
-        let target = serde_json::from_value::<T::Target>(value.clone())
+        let target = T::Target::deserialize(value)
             .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?;
 
         Ok(Self(target))
