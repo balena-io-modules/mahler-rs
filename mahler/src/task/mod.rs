@@ -278,11 +278,11 @@ impl Task {
         let target = serde_json::to_value(target)?;
         Ok(match self {
             Self::Action(mut action) => {
-                action.context = action.context.with_target(target);
+                action.context = action.context.with_target_override(target);
                 Self::Action(action)
             }
             Self::Method(mut method) => {
-                method.context = method.context.with_target(target);
+                method.context = method.context.with_target_override(target);
                 Self::Method(method)
             }
         })
