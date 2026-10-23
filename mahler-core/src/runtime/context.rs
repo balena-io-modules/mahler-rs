@@ -24,8 +24,8 @@ impl Context {
         Self::default()
     }
 
-    /// Return a new context with the provided target
-    pub fn with_target(self, target: Value) -> Self {
+    /// Return a new context with the provided task-specific target override
+    pub fn with_target_override(self, target: Value) -> Self {
         Self {
             target_override: Some(target),
             ..self
