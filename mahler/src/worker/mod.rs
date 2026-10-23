@@ -1015,7 +1015,10 @@ impl<O: State> Worker<O, Ready> {
                 .find_job("", *hook_id)
                 .ok_or(Error::internal("hook job not found in worker domain"))?;
 
-            let task = job.new_task(Context::new().with_target(tgt.clone()).with_path(""));
+            let task = job.new_task(Context {
+                target: tgt.clone(),
+                ..Context::new().with_path("")
+            });
 
             let hook_wf = match planner::find_workflow_for_task(task, domain, system) {
                 Ok(wf) => wf,
@@ -1182,6 +1185,11 @@ impl<O: State> Worker<O, Ready> {
 
     /// Run a task within the context of the worker domain
     ///
+    /// Since there is no global target when running a single task, the current state of the
+    /// worker is used as the global target. This means [`SystemTarget`](crate::extract::SystemTarget)
+    /// extracts the current state, and [`Target`](crate::extract::Target) extracts the current
+    /// value at the task path unless one is provided via [`Task::with_target`].
+    ///
     /// # Example
     /// ```rust
     /// use std::time::Duration;
@@ -1224,7 +1232,7 @@ impl<O: State> Worker<O, Ready> {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn run_task(self, task: Task) -> Result<(O, WorkflowStatus)>
+    pub async fn run_task(self, mut task: Task) -> Result<(O, WorkflowStatus)>
     where
         O: State + DeserializeOwned + Send + Unpin + 'static,
         O::Target: Serialize,
@@ -1239,6 +1247,12 @@ impl<O: State> Worker<O, Ready> {
 
         info!("searching workflow");
         let now = Instant::now();
+
+        // there is no global target when running a single task, so the current state
+        // is used instead
+        task.context_mut().target = system
+            .state::<O::Target>()
+            .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
 
         // look for a workflow for the task, the simulated state is discarded
         let mut workflow = match planner::find_workflow_for_task(task, domain, system) {
@@ -1635,7 +1649,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::extract::{Target, View};
+    use crate::extract::{SystemTarget, Target, View};
     use crate::job::*;
     use crate::task::*;
     use serde::{Deserialize, Serialize};
@@ -2776,6 +2790,143 @@ mod tests {
         let (state, status) = worker.seek_target(2).await.unwrap();
         assert_eq!(status, SeekStatus::Success);
         assert_eq!(state, 0);
+    }
+
+    // State with internal fields, so the target type differs from the state type
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct SyncState {
+        value: i32,
+        needs_sync: bool,
+        synced_value: i32,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct SyncStateTarget {
+        value: i32,
+    }
+
+    impl State for SyncState {
+        type Target = SyncStateTarget;
+    }
+
+    fn sync_increment(
+        mut state: View<SyncState>,
+        Target(tgt): Target<SyncState>,
+    ) -> View<SyncState> {
+        if state.value < tgt.value {
+            state.value += 1;
+            state.needs_sync = true;
+        }
+        state
+    }
+
+    fn sync_with_system_target(
+        mut state: View<SyncState>,
+        SystemTarget(tgt): SystemTarget<SyncState>,
+    ) -> Option<View<SyncState>> {
+        if !state.needs_sync {
+            return None;
+        }
+        state.needs_sync = false;
+        state.synced_value = tgt.value;
+        Some(state)
+    }
+
+    #[tokio::test]
+    async fn test_hook_extracts_system_target() {
+        init();
+
+        let worker = Worker::new()
+            .job("", update(sync_increment))
+            .hook(sync_with_system_target)
+            .initial_state(SyncState {
+                value: 0,
+                needs_sync: false,
+                synced_value: 0,
+            })
+            .unwrap();
+
+        let (state, status) = worker
+            .seek_target(SyncStateTarget { value: 2 })
+            .await
+            .unwrap();
+
+        assert_eq!(status, SeekStatus::Success);
+        assert_eq!(
+            state,
+            SyncState {
+                value: 2,
+                needs_sync: false,
+                synced_value: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_method_hook_propagates_system_target_to_children() {
+        init();
+
+        fn sync_method(state: View<SyncState>) -> Option<Vec<Task>> {
+            if !state.needs_sync {
+                return None;
+            }
+            Some(vec![sync_with_system_target.into_task()])
+        }
+
+        let worker = Worker::new()
+            .job("", update(sync_increment))
+            .job("", none(sync_with_system_target))
+            .hook(sync_method)
+            .initial_state(SyncState {
+                value: 0,
+                needs_sync: false,
+                synced_value: 0,
+            })
+            .unwrap();
+
+        let (state, status) = worker
+            .seek_target(SyncStateTarget { value: 2 })
+            .await
+            .unwrap();
+
+        assert_eq!(status, SeekStatus::Success);
+        assert_eq!(
+            state,
+            SyncState {
+                value: 2,
+                needs_sync: false,
+                synced_value: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn it_uses_the_current_state_as_system_target_when_running_tasks() {
+        init();
+
+        let worker = Worker::new()
+            .job("", update(sync_with_system_target))
+            .initial_state(SyncState {
+                value: 3,
+                needs_sync: true,
+                synced_value: 0,
+            })
+            .unwrap();
+
+        let (state, status) = worker
+            .run_task(sync_with_system_target.into_task())
+            .await
+            .unwrap();
+
+        assert_eq!(status, WorkflowStatus::Success);
+        assert_eq!(
+            state,
+            SyncState {
+                value: 3,
+                needs_sync: false,
+                synced_value: 3,
+            }
+        );
     }
 
     #[tokio::test]
