@@ -93,15 +93,15 @@ impl From<PatchOperation> for Operation {
     fn from(op: PatchOperation) -> Self {
         match op {
             PatchOperation::Add(AddOperation { path, value }) => Operation::Create {
-                path: Path::new(&path),
+                path: Path::from(path),
                 value,
             },
             PatchOperation::Replace(ReplaceOperation { path, value }) => Operation::Update {
-                path: Path::new(&path),
+                path: Path::from(path),
                 value,
             },
             PatchOperation::Remove(RemoveOperation { path }) => Operation::Delete {
-                path: Path::new(&path),
+                path: Path::from(path),
             },
             // move/copy/test are not supported, but it is not necessary as they are not
             // never returned by json_patch::diff
@@ -150,13 +150,19 @@ pub enum OperationMatcher {
 impl OperationMatcher {
     /// Returns true if the matcher allows the given operation
     pub fn matches(&self, operation: &Operation) -> bool {
+        self.allows(&operation.into())
+    }
+
+    /// Returns true if the matcher allows operations of the given kind
+    ///
+    /// The kind is the matcher of the operation (see `From<&Operation>`), i.e. one of
+    /// `Create`, `Update` or `Delete`
+    pub fn allows(&self, kind: &OperationMatcher) -> bool {
         use OperationMatcher::*;
         match *self {
             None => false,
             Any => true,
-            Create => matches!(operation, Operation::Create { .. }),
-            Update => matches!(operation, Operation::Update { .. }),
-            Delete => matches!(operation, Operation::Delete { .. }),
+            Create | Update | Delete => self == kind,
         }
     }
 
@@ -168,6 +174,16 @@ impl OperationMatcher {
             Update => "update",
             Create => "create",
             Delete => "delete",
+        }
+    }
+}
+
+impl From<&Operation> for OperationMatcher {
+    fn from(operation: &Operation) -> Self {
+        match operation {
+            Operation::Create { .. } => OperationMatcher::Create,
+            Operation::Update { .. } => OperationMatcher::Update,
+            Operation::Delete { .. } => OperationMatcher::Delete,
         }
     }
 }

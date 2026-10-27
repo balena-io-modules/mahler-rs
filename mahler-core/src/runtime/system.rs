@@ -12,9 +12,12 @@ use super::resources::Resources;
 /// This is used by the Worker to keep track of the system state while
 /// executing tasks. It is also used by the planner to keep track of the accumulated results of
 /// different operations in the tentative plan.
+///
+/// Cloning a `System` is cheap: the state is shared between clones and only copied
+/// when one of them is modified while others still hold it.
 #[derive(Clone)]
 pub struct System {
-    state: Value,
+    state: Arc<Value>,
     resources: Resources,
 }
 
@@ -42,9 +45,9 @@ impl System {
     where
         S: Serialize,
     {
-        let state = serde_json::to_value(state)?;
+        let state = crate::json::to_value(&state)?;
         Ok(Self {
-            state,
+            state: Arc::new(state),
             resources: Resources::new(),
         })
     }
@@ -55,8 +58,10 @@ impl System {
     }
 
     /// Get a mutable reference to the inner system state as a [json::Value](`Value`)
+    ///
+    /// This copies the state first if it is shared with other clones of the `System`
     pub fn inner_state_mut(&mut self) -> &mut Value {
-        &mut self.state
+        Arc::make_mut(&mut self.state)
     }
 
     /// Try to deserialize the inner system state into the desired type
@@ -64,7 +69,7 @@ impl System {
     where
         S: DeserializeOwned,
     {
-        let s = serde_json::from_value(self.state.clone())?;
+        let s = S::deserialize(self.state.as_ref())?;
         Ok(s)
     }
 

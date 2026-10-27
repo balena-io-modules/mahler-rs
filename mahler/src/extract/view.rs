@@ -1,64 +1,15 @@
-use json_patch::{
-    diff, AddOperation, CopyOperation, MoveOperation, Patch, PatchOperation, RemoveOperation,
-    ReplaceOperation, TestOperation,
-};
+use json_patch::{AddOperation, Patch, PatchOperation, RemoveOperation, ReplaceOperation};
 use jsonptr::resolve::ResolveError;
 use jsonptr::PointerBuf;
 use serde_json::Value;
 use std::ops::{Deref, DerefMut};
 
 use crate::error::{Error, ErrorKind};
-use crate::json::Path;
+use crate::json::{diff, diff_to_serialized, Path};
 use crate::result::Result;
 use crate::runtime::{Channel, Context, FromSystem, System};
 use crate::serde::{de::DeserializeOwned, Serialize};
 use crate::task::IntoResult;
-
-/// Prepend the given pointer to every operation in the Patch
-fn prepend_path(pointer: PointerBuf, patch: Patch) -> Patch {
-    let Patch(changes) = patch;
-    let changes = changes
-        .into_iter()
-        .map(|op| match op {
-            PatchOperation::Replace(ReplaceOperation { path, value }) => {
-                PatchOperation::Replace(ReplaceOperation {
-                    path: pointer.concat(&path),
-                    value,
-                })
-            }
-            PatchOperation::Remove(RemoveOperation { path }) => {
-                PatchOperation::Remove(RemoveOperation {
-                    path: pointer.concat(&path),
-                })
-            }
-            PatchOperation::Add(AddOperation { path, value }) => {
-                PatchOperation::Add(AddOperation {
-                    path: pointer.concat(&path),
-                    value,
-                })
-            }
-            PatchOperation::Move(MoveOperation { from, path }) => {
-                PatchOperation::Move(MoveOperation {
-                    from,
-                    path: pointer.concat(&path),
-                })
-            }
-            PatchOperation::Copy(CopyOperation { from, path }) => {
-                PatchOperation::Copy(CopyOperation {
-                    from,
-                    path: pointer.concat(&path),
-                })
-            }
-            PatchOperation::Test(TestOperation { path, value }) => {
-                PatchOperation::Test(TestOperation {
-                    path: pointer.concat(&path),
-                    value,
-                })
-            }
-        })
-        .collect::<Vec<PatchOperation>>();
-    Patch(changes)
-}
 
 /// Extracts a view to a sub-element of the global state indicated
 /// by the path.
@@ -121,16 +72,38 @@ fn prepend_path(pointer: PointerBuf, patch: Patch) -> Patch {
 /// value pointed by the path cannot be deserialized into type `<T>`
 #[derive(Debug)]
 pub struct View<T> {
-    initial: Value,
+    initial: Initial,
     state: T,
     path: Path,
     channel: Channel,
 }
 
+/// The value at the view path to compare the view against when creating a patch
+#[derive(Debug)]
+enum Initial {
+    /// The value is read from the system the view was created from. Sharing the system
+    /// avoids copying the value for views that are never turned into a patch
+    System(System),
+    /// The value was set after the view was created
+    Value(Value),
+}
+
+impl Initial {
+    fn resolve(&self, path: &Path) -> &Value {
+        match self {
+            Initial::System(system) => path
+                .as_ref()
+                .resolve(system.inner_state())
+                .unwrap_or(&Value::Null),
+            Initial::Value(value) => value,
+        }
+    }
+}
+
 impl<T> View<T> {
     // The only way to create a pointer is via the
     // from_system method
-    fn new(initial: Value, state: T, path: Path, channel: Channel) -> Self {
+    fn new(initial: Initial, state: T, path: Path, channel: Channel) -> Self {
         Self {
             initial,
             state,
@@ -143,17 +116,19 @@ impl<T> View<T> {
     where
         T: Serialize,
     {
-        let path: PointerBuf = self.path.clone().into();
-        let before = &self.initial;
+        let path = || PointerBuf::from(self.path.clone());
+        let before = self.initial.resolve(&self.path);
 
         match (before, after) {
             (&Value::Null, Value::Null) => Patch(vec![]),
             (&Value::Null, after) => Patch(vec![PatchOperation::Add(AddOperation {
-                path,
+                path: path(),
                 value: after,
             })]),
-            (_, Value::Null) => Patch(vec![PatchOperation::Remove(RemoveOperation { path })]),
-            (before, after) => prepend_path(path, diff(before, &after)),
+            (_, Value::Null) => Patch(vec![PatchOperation::Remove(RemoveOperation {
+                path: path(),
+            })]),
+            (before, after) => Patch(diff(before, &after, self.path.as_ref())),
         }
     }
 
@@ -208,7 +183,7 @@ impl<T> View<T> {
         if !self.channel.is_detached() {
             // An error should be rare
             // https://docs.rs/serde_json/latest/serde_json/fn.to_value.html#errors
-            let after = serde_json::to_value(&self.state)?;
+            let after = crate::json::to_value(&self.state)?;
 
             // Create a patch from the initial state
             let changes = self.create_patch(after.clone());
@@ -217,7 +192,7 @@ impl<T> View<T> {
             self.channel.send(changes).await?;
 
             // Update initial to match the current state
-            self.initial = after;
+            self.initial = Initial::Value(after);
         }
 
         Ok(())
@@ -241,9 +216,9 @@ impl<T> View<T> {
         T: Serialize,
     {
         if !self.channel.is_detached() {
-            let after = serde_json::to_value(&self.state)?;
+            let after = crate::json::to_value(&self.state)?;
             let changes = self.create_patch(after.clone());
-            self.initial = after.clone();
+            self.initial = Initial::Value(after.clone());
             self.channel.send_and_commit(changes, after).await?;
         }
         Ok(())
@@ -315,24 +290,19 @@ impl<T: DeserializeOwned> FromSystem for View<T> {
         // At this point we assume that if the pointer cannot be
         // resolved is because the value does not exist yet unless
         // the parent is a scalar
-        let (state, initial): (T, Value) = match pointer.resolve(root) {
+        let (state, initial): (T, Initial) = match pointer.resolve(root) {
             Ok(value) => (
-                serde_json::from_value::<T>(value.clone())
+                T::deserialize(value)
                     .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?,
-                value.clone(),
+                Initial::System(system.clone()),
             ),
             Err(e) => match e {
-                ResolveError::NotFound { .. } => (
-                    // if the value does not exist, see if we can deserialize null into the type
+                // the value does not exist or may be a new index in an array, see if we can
+                // deserialize null into the type. The initial value resolves to null
+                ResolveError::NotFound { .. } | ResolveError::OutOfBounds { .. } => (
                     serde_json::from_value::<T>(Value::Null)
                         .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?,
-                    Value::Null,
-                ),
-                ResolveError::OutOfBounds { .. } => (
-                    // the value may be a new index in an array, try to deserialize null
-                    serde_json::from_value::<T>(Value::Null)
-                        .map_err(|e| Error::new(ErrorKind::CannotDeserializeArg, e))?,
-                    Value::Null,
+                    Initial::System(system.clone()),
                 ),
                 _ => {
                     // The remaining errors are Unreachable and FailedToParse index
@@ -367,11 +337,28 @@ impl<T> DerefMut for View<T> {
 
 impl<T: Serialize> IntoResult<Patch> for View<T> {
     fn into_result(self) -> Result<Patch> {
-        // An error here should be rare
-        let after = serde_json::to_value(&self.state).map_err(Error::internal)?;
-        let patch = self.create_patch(after);
+        let before = self.initial.resolve(&self.path);
+        if before.is_null() {
+            // the whole value is added, so it has to be converted anyway
+            let after = crate::json::to_value(&self.state).map_err(Error::internal)?;
+            return Ok(self.create_patch(after));
+        }
 
-        Ok(patch)
+        // Diff the view against its initial value without converting all of it to JSON.
+        // An error here should be rare
+        let mut changes =
+            diff_to_serialized(before, &self.state, self.path.as_ref()).map_err(Error::internal)?;
+
+        // a view set to null removes the value
+        if let [PatchOperation::Replace(ReplaceOperation { path, value })] = changes.as_slice() {
+            if value.is_null() && path.as_str() == self.path.as_str() {
+                changes = vec![PatchOperation::Remove(RemoveOperation {
+                    path: PointerBuf::from(self.path),
+                })];
+            }
+        }
+
+        Ok(Patch(changes))
     }
 }
 

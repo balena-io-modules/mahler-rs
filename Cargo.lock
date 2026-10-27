@@ -201,6 +201,7 @@ version = "0.28.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "futures",
  "json-patch",
  "jsonptr",
  "mahler-core",
@@ -229,6 +230,7 @@ dependencies = [
  "mahler",
  "matchit",
  "pretty_assertions",
+ "serde",
  "serde_core",
  "serde_json",
  "tokio",

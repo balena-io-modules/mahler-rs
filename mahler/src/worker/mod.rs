@@ -1,10 +1,13 @@
 //! Automated planning and execution of task workflows
 
 use std::borrow::Borrow;
-use std::pin::pin;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::pin::{pin, Pin};
 use std::time::Instant;
 
 use async_stream::try_stream;
+use futures::FutureExt;
 use jsonptr::{Pointer, PointerBuf};
 use tokio_stream::{Stream, StreamExt, StreamMap};
 use tracing::{debug, info, trace, warn, Instrument, Span};
@@ -857,12 +860,10 @@ impl<O: State> Worker<O, Ready> {
         let Ready { system, .. } = &self.inner;
 
         // the distance is calculated between target state types
-        let ini = system
-            .state::<O::Target>()
-            .and_then(|s| serde_json::to_value(s).map_err(Error::from))?;
-        let tgt = serde_json::to_value(tgt)?;
+        let ini = system.state::<O::Target>()?;
+        let tgt = crate::json::to_value(tgt)?;
 
-        let Patch(changes) = json_patch::diff(&ini, &tgt);
+        let changes = crate::json::diff_serialized(&ini, &tgt)?;
 
         Ok(changes.into_iter().map(Operation::from).collect())
     }
@@ -996,7 +997,7 @@ impl<O: State> Worker<O, Ready> {
     ///
     /// The returned workflow may be empty if no hook conditions are pending.
     fn find_hooks(&self, system: &mut System, tgt: &O::Target) -> Result<Workflow> {
-        let tgt = serde_json::to_value(tgt).map_err(Error::from)?;
+        let tgt = crate::json::to_value(tgt).map_err(Error::from)?;
 
         let Ready {
             domain,
@@ -1067,7 +1068,7 @@ impl<O: State> Worker<O, Ready> {
             workflow.worker_id, self.inner.worker_id,
         );
 
-        workflow_stream(self, workflow)
+        workflow_stream(self, workflow, Execution::Spawned)
     }
 
     /// Trigger system changes by providing a new target state
@@ -1166,7 +1167,8 @@ impl<O: State> Worker<O, Ready> {
         let now = Instant::now();
         info!("executing workflow");
 
-        let mut stream = std::pin::pin!(self.run_workflow(workflow));
+        // the stream is polled until the workflow finishes
+        let mut stream = std::pin::pin!(workflow_stream(self, workflow, Execution::InTask));
         let mut final_status = SeekStatus::Success;
 
         while let Some(event) = stream.next().await {
@@ -1282,7 +1284,8 @@ impl<O: State> Worker<O, Ready> {
         let now = Instant::now();
         info!("executing workflow");
 
-        let mut stream = std::pin::pin!(self.run_workflow(workflow));
+        // the stream is polled until the workflow finishes
+        let mut stream = std::pin::pin!(workflow_stream(self, workflow, Execution::InTask));
         let mut final_status = WorkflowStatus::Success;
 
         while let Some(event) = stream.next().await {
@@ -1315,10 +1318,12 @@ impl StreamState {
     fn new(system: System, sensor_router: SensorRouter) -> Result<Self> {
         // Create initial sensor subscriptions
         let mut sensor_streams = StreamMap::new();
-        let mut all_paths = Vec::new();
-        Self::collect_paths(system.inner_state(), Pointer::root(), &mut all_paths);
-        for path in all_paths {
-            Self::try_subscribe(&system, &path, &sensor_router, &mut sensor_streams)?;
+        if !sensor_router.is_empty() {
+            let mut all_paths = Vec::new();
+            Self::collect_paths(system.inner_state(), Pointer::root(), &mut all_paths);
+            for path in all_paths {
+                Self::try_subscribe(&system, &path, &sensor_router, &mut sensor_streams)?;
+            }
         }
 
         let (system_reader, system_writer) = rw_lock(system);
@@ -1384,6 +1389,10 @@ impl StreamState {
 
     /// Update the state subscriptions based on the last patch
     fn update(&mut self, system: &System, last_patch: &Patch) -> Result<()> {
+        if self.sensor_router.is_empty() {
+            return Ok(());
+        }
+
         let sensor_streams = &mut self.sensor_streams;
         let sensor_router = &self.sensor_router;
 
@@ -1423,6 +1432,17 @@ impl StreamState {
     }
 }
 
+/// Where the workflow of a [`workflow_stream`] runs
+#[derive(Clone, Copy)]
+enum Execution {
+    /// In a separate task, so it keeps running while the stream is not being polled
+    Spawned,
+    /// In the task polling the stream. This avoids handing every state change over to
+    /// another thread, but the workflow only runs while the stream is being polled, so it
+    /// is only for callers that poll the stream until it finishes.
+    InTask,
+}
+
 /// Creates a workflow stream using async-stream
 ///
 /// After workflow completion, the stream continues to listen for sensor updates
@@ -1430,6 +1450,7 @@ impl StreamState {
 fn workflow_stream<O>(
     worker: Worker<O, Ready>,
     workflow: Workflow,
+    execution: Execution,
 ) -> impl Stream<Item = Result<WorkerEvent<O>>>
 where
     O: State + DeserializeOwned + Unpin + Send + 'static,
@@ -1452,12 +1473,31 @@ where
         let system_reader = state.system_reader.clone();
         let interrupt = Interrupt::new();
         let workflow_interrupt = interrupt.clone();
-        let workflow_handle = tokio::spawn(async move {
+        let execute = async move {
             workflow.execute(&system_reader, patch_tx, workflow_interrupt).await
-        }.instrument(current_span));
+        }.instrument(current_span);
+        // A job panicking is reported as an internal error, whether the workflow runs in a
+        // spawned task or in this one
+        let mut workflow: Pin<Box<dyn Future<Output = _> + Send>> = match execution {
+            Execution::Spawned => {
+                let handle = tokio::spawn(execute);
+                Box::pin(async move { handle.await.map_err(Error::internal) })
+            }
+            Execution::InTask => Box::pin(async move {
+                AssertUnwindSafe(execute).catch_unwind().await.map_err(|panic| {
+                    let message = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("Box<dyn Any>");
+                    Error::internal(format!("workflow panicked with message {message:?}"))
+                })
+            }),
+        };
+        let mut workflow_status = None;
 
         // make sure that returning from this function or
-        // dropping the stream interrupts the workflow that is running in a separate
+        // dropping the stream interrupts the workflow if it is running in a separate
         // task
         let drop_interrupt = AutoInterrupt::from(interrupt);
         let interrupt = drop_interrupt.clone();
@@ -1465,6 +1505,11 @@ where
         // Phase 1: Executing loop - poll patches and sensors concurrently
         loop {
             let result = tokio::select! {
+                // the workflow is only polled until it finishes
+                status = &mut workflow, if workflow_status.is_none() => {
+                    workflow_status = Some(status);
+                    continue;
+                },
                 patch_opt = patch_rx.recv() => match patch_opt {
                     Some(patch) => WorkflowEvent::Patch(patch),
                     // the worklow ended once all patch senders close
@@ -1545,7 +1590,10 @@ where
         };
 
         // Phase 2: Handle workflow completion
-        let workflow_status = workflow_handle.await;
+        let workflow_status = match workflow_status {
+            Some(status) => status,
+            None => workflow.await,
+        };
 
         match workflow_status {
             Ok(Ok(InnerWorkflowStatus::Completed)) => {
@@ -1577,7 +1625,7 @@ where
                 yield WorkerEvent::WorkflowFinished(WorkflowStatus::Aborted(recoverable));
             }
             Err(e) => {
-                Err(Error::internal(e))?;
+                Err(e)?;
             }
         }
 
@@ -1689,6 +1737,20 @@ mod tests {
         counter
     }
 
+    fn panicking_plus_one(mut counter: View<i32>, Target(tgt): Target<i32>) -> IO<i32> {
+        if *counter < tgt {
+            *counter += 1;
+        }
+
+        // only panics when running, so the job can still be planned
+        with_io(counter, |counter| async {
+            if *counter > 0 {
+                panic!("job failed");
+            }
+            Ok(counter)
+        })
+    }
+
     fn init() {
         tracing_subscriber::registry()
             .with(
@@ -1731,6 +1793,22 @@ mod tests {
                 ("two".to_string(), 0),
             ]))
         );
+    }
+
+    #[tokio::test]
+    async fn test_worker_reports_a_panicking_job_as_an_error() {
+        init();
+        let worker = Worker::new()
+            .job("/{counter}", update(panicking_plus_one))
+            .initial_state(Counters(HashMap::from([("one".to_string(), 0)])));
+
+        let err = worker
+            .seek_target(Counters(HashMap::from([("one".to_string(), 1)])))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Internal);
+        assert!(err.to_string().contains("job failed"), "{err}");
     }
 
     #[tokio::test]
