@@ -1,4 +1,37 @@
 - commits:
+    - subject: Set the global target when running tasks/hooks.
+      hash: 283017ae4ff0cb595a3585bca6ba54dc62afe323
+      body: >
+        Tasks/hooks rely on a target passed via `with_target`, however this
+
+        functions sets an override for the global target state, and tasks using
+
+        `SystemTarget` would have that extractor fail since the global target is
+
+        null.
+
+
+        This commits fixes the issue by:
+
+        - Renaming `Context::with_target` to `Context::with_target_override` for
+          more clarity on what the function does.
+        - Setting context.target directly when invoking the hook, instead of
+        using
+          `with_target_override`.
+        - On calls to `run_task`, the global target is assumed to be the current
+          state of the worker since a global target is not available. Use of
+          `task.with_target` sets a specific override for the task being run.
+
+        This changes the public API of mahler-core, making it a breaking change.
+      footer:
+        Change-type: minor
+        change-type: minor
+      author: Felipe Lalanne
+      nested: []
+  version: 0.28.0
+  title: ""
+  date: 2026-10-27T17:51:28.087Z
+- commits:
     - subject: Update dependencies
       hash: e36d484cb8c9343cc1cffaa61afc98f8af021a00
       body: |
